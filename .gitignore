@@ -1,0 +1,13 @@
+node_modules/
+.venv/
+__pycache__/
+.pytest_cache/
+web/dist/
+
+# machine-specific state and secrets: pairing code, HTTPS key, logs, screenshots
+.vr/
+certs/
+logs/
+
+# working notes of the build process
+.superpowers/

@@ -1,0 +1,25 @@
+{
+  "name": "vr-voice-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prestart": ".venv\\Scripts\\python -m bridge.cert",
+    "start": "concurrently -k -n web,bridge \"vite\" \".venv\\Scripts\\python -m bridge\"",
+    "dev:web": "vite",
+    "test": "vitest run",
+    "scene:check": "node scripts/scene-check.mjs",
+    "vr:eval": "node scripts/vr-eval.mjs",
+    "vr:shot": "node scripts/vr-eval.mjs \"await screenshot()\"",
+    "vr:say": "node scripts/vr-say.mjs"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@xterm/xterm": "^6.0.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.7",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}

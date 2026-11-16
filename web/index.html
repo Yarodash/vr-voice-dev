@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VR Voice Dev</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0d12; color: #d8dee9; font-family: system-ui, sans-serif; }
+      #ui { position: fixed; inset: 0 auto auto 0; padding: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; z-index: 2; }
+      #enter-vr { font-size: 28px; padding: 18px 36px; border-radius: 12px; border: 0; background: #3b82f6; color: #fff; cursor: pointer; }
+      #enter-vr:disabled { background: #475569; cursor: default; }
+      #pair { font-size: 24px; padding: 12px; width: 9ch; border-radius: 8px; border: 1px solid #475569; background: #111827; color: #fff; }
+      #status { font-size: 18px; opacity: 0.85; }
+      /* The terminal is only read by the page (to get the dictated text); it is kept off-screen. */
+      #term { position: fixed; left: -10000px; top: 0; }
+      canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 1; }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <button id="enter-vr" disabled>Войти в VR</button>
+      <input id="pair" placeholder="код" maxlength="8" autocapitalize="off" autocomplete="off" hidden />
+      <span id="status">загрузка…</span>
+    </div>
+    <div id="term"></div>
+    <canvas id="gl"></canvas>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

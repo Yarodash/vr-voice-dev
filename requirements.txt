@@ -1,0 +1,9 @@
+aiohttp
+pywinpty
+sounddevice
+numpy
+pycaw
+cryptography
+pytest
+pytest-asyncio
+pytest-aiohttp
