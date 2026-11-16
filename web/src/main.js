@@ -87,15 +87,35 @@ function recenterHere() {
     .invert()
     .premultiply(new THREE.Matrix4().makeTranslation(0, STANDING_EYE_M, 0))
     .decompose(rig.position, rig.quaternion, rig.scale);
+  saveRig();
   return 'готово';
 }
 
-// Every time a VR session starts (also after a page reload, when the browser puts the user back
-// in), wherever the head is and however it is tilted becomes the base: straight ahead, level.
+// The rig transform survives page reloads (localStorage 'vr.rig'), so the world stays where it was
+// relative to the room. Recentering happens only on request (ctx.recenter, the menu item) and once
+// on the very first session, when nothing has been saved yet.
+const RIG_KEY = 'vr.rig';
+function saveRig() {
+  try {
+    localStorage.setItem(RIG_KEY, JSON.stringify({ p: rig.position.toArray(), q: rig.quaternion.toArray() }));
+  } catch {}
+}
+let rigRestored = false;
+try {
+  const saved = JSON.parse(localStorage.getItem(RIG_KEY));
+  if (saved && saved.p?.length === 3 && saved.q?.length === 4) {
+    rig.position.fromArray(saved.p);
+    rig.quaternion.fromArray(saved.q);
+    rigRestored = true;
+  }
+} catch {}
+
+// Only when there is no saved rig yet (the very first session): recenter once and save it.
 // The first frames of a session have no valid pose yet, so wait a few.
 let recenterPending = false;
 let framesSinceStart = 0;
 renderer.xr.addEventListener('sessionstart', () => {
+  if (rigRestored) return;
   recenterPending = true;
   framesSinceStart = 0;
 });
@@ -188,6 +208,7 @@ const remoteConsole = createRemoteConsole({
     draft: draftText,
     recording: triggerPressed || releaseTimer !== null, // true while the user is dictating: do not touch the shell then
     messages: shown, // the messages shown now, newest first
+    rig,
     recenter: recenterHere, // the current place and heading become the origin
     wheel, // the radial menu (open(menu), setStick(x, y), close()), and its test menu:
     menu: menuHolder, // menuHolder.menu: the menu the scene has set (setMenu)
@@ -244,6 +265,8 @@ const sceneHost = new SceneHost(
     // true while the radial menu is open: the grip then means "back", so the scene must not
     // let it grab things
     menuOpen: () => wheel.isOpen,
+    // the current place and heading become the origin (and are remembered across reloads)
+    recenter: () => recenterHere(),
   },
   reportScene,
 );
@@ -260,7 +283,7 @@ camera.add(hud);
 
 // The radial menu (opens while Z, the stick click, is held): it hangs over the controller, tied to
 // it, and turns to face the eyes (see placeWheel).
-const WHEEL_WIDTH_M = 0.14; // the wheel lying on the controller (it is drawn 0.45 m wide)
+const WHEEL_WIDTH_M = 0.17; // the wheel lying on the controller (it is drawn 0.45 m wide)
 const wheel = createRadialMenu({ renderer, widthM: 0.45, getMenu: () => menuHolder.menu });
 wheel.mesh.scale.setScalar(WHEEL_WIDTH_M / 0.45);
 scene.add(wheel.mesh);
@@ -498,13 +521,16 @@ renderer.setAnimationLoop((time) => {
   if (recenterPending && renderer.xr.isPresenting && ++framesSinceStart > 10) {
     recenterPending = false;
     recenterHere();
+    rigRestored = true;
   }
   controls.tick(time);
   // the ray is only needed while the unsent preview, with the cross that cancels it, is on screen
   const previewShown = typingMessage() !== null;
-  const aim = pointerAim.object ?? controls.leftController;
-  aim?.updateWorldMatrix(true, false); // the scene moves it every frame; use today's pose, not yesterday's
-  pointer.update(renderer.xr.isPresenting && previewShown ? aim : null);
+  // the ray goes along the controller's own pointing direction (not the scene's axes: aiming along
+  // them needed the controller raised too high); pointerAim is still where the wheel sits
+  const aim = controls.leftController;
+  aim?.updateWorldMatrix(true, false);
+  pointer.update(renderer.xr.isPresenting ? aim : null, previewShown);
   messagePanels[0].setHover(previewShown ? pointer.action : null); // the button under the ray lights up
   panel?.tick(time);
   if (panel && panel.version !== seenScreenVersion) {

@@ -635,6 +635,24 @@ export function createTargets({ THREE, group, shared, camera }) {
       shadowsDirty = true;
       return true;
     },
+    // Сцены (compositions.js): стоит мишень или лежит и где — [{ fallen, p, q }] по номерам мишеней.
+    getBodies() {
+      return bodies.map((body) => ({ fallen: body.fallen, p: body.p.toArray(), q: body.q.toArray() }));
+    },
+    setBodies(saved) {
+      bodies.forEach((body, index) => {
+        Object.assign(body, newBody());
+        const pose = saved?.[index];
+        if (pose?.fallen && pose.p && pose.q) {
+          body.fallen = true;
+          body.p.fromArray(pose.p);
+          body.q.fromArray(pose.q);
+        }
+        mountPlate(index);
+      });
+      aimed = -1;
+      shadowsDirty = true;
+    },
     // Куда смотрит ствол: мишень (объект из plates) или null.
     setAim(plate) {
       aimed = plate && shared.aimOutline !== false ? plates.indexOf(plate) : -1;

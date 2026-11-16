@@ -8,12 +8,12 @@ import * as THREE from 'three';
 
 const SIZE = 1024;
 const OUTER = 470; // radii, canvas pixels
-const INNER = 160;
+const INNER = 130;
 const GAP = 0.025; // radians between sectors
 const DEAD = 0.45; // stick deflection below which nothing is picked
 
-const FONT = '600 54px system-ui, "Noto Sans", sans-serif';
-const SMALL = '500 36px system-ui, "Noto Sans", sans-serif';
+const FAMILY = 'system-ui, "Noto Sans", sans-serif';
+const SMALL = `500 36px ${FAMILY}`;
 
 // The menu itself is defined in scene/menu.js (and handed over with ctx.setMenu), so that changing
 // it does not reload the page.
@@ -50,6 +50,36 @@ export function createRadialMenu({ renderer, widthM = 0.45, getMenu = null }) {
     return Math.floor(((angle + width / 2) % (Math.PI * 2)) / width);
   }
 
+  // Fits text into a w x h box: wraps at word boundaries (up to maxLines), shrinking the font step by
+  // step until every line fits. Returns { lines, size, lineH }.
+  function fit(text, weight, w, h, maxSize, minSize, maxLines) {
+    let best = null;
+    for (let size = maxSize; size >= minSize; size -= 2) {
+      g.font = `${weight} ${size}px ${FAMILY}`;
+      const words = String(text).split(/\s+/).filter(Boolean);
+      const lines = [];
+      let line = '';
+      for (const word of words) {
+        const tryLine = line ? `${line} ${word}` : word;
+        if (!line || g.measureText(tryLine).width <= w) line = tryLine;
+        else {
+          lines.push(line);
+          line = word;
+        }
+      }
+      if (line) lines.push(line);
+      const lineH = size * 1.15;
+      best = { lines, size, lineH };
+      if (lines.length <= maxLines && lines.length * lineH <= h && lines.every((l) => g.measureText(l).width <= w)) return best;
+    }
+    return best;
+  }
+
+  function drawBlock(block, weight, x, y) {
+    g.font = `${weight} ${block.size}px ${FAMILY}`;
+    block.lines.forEach((l, i) => g.fillText(l, x, y + (i - (block.lines.length - 1) / 2) * block.lineH));
+  }
+
   function paint() {
     const { title, items } = current();
     const cx = SIZE / 2;
@@ -78,12 +108,19 @@ export function createRadialMenu({ renderer, widthM = 0.45, getMenu = null }) {
       g.textAlign = 'center';
       g.textBaseline = 'middle';
       g.fillStyle = on ? '#ffffff' : '#e2e8f0';
-      g.font = FONT;
-      g.fillText(item.label, lx, ly - (item.children ? 14 : 0));
+      // the usable box: the sector's chord at mid radius across, its radial depth along
+      const chord = 2 * radius * Math.sin(Math.min(width / 2 - GAP / 2, Math.PI / 2));
+      const boxW = Math.max(150, Math.min(chord - 40, OUTER - INNER - 30));
+      const arrowH = item.children ? 40 : 0;
+      const boxH = Math.max(70, Math.min(chord - 40, OUTER - INNER - 50) - arrowH);
+      const block = fit(item.label, 600, boxW, boxH, 54, 26, 3);
+      const textH = block.lines.length * block.lineH;
+      const total = textH + arrowH;
+      drawBlock(block, 600, lx, ly - total / 2 + textH / 2);
       if (item.children) {
         g.font = SMALL;
         g.fillStyle = on ? '#dbeafe' : '#93c5fd';
-        g.fillText('▸', lx, ly + 34);
+        g.fillText('▸', lx, ly + total / 2 - 18);
       }
     });
 
@@ -99,10 +136,11 @@ export function createRadialMenu({ renderer, widthM = 0.45, getMenu = null }) {
       g.stroke();
     }
     g.fillStyle = centreChosen ? '#ffffff' : '#93c5fd';
-    g.font = SMALL;
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    g.fillText(labels.length ? labels.join(' › ') : title, cx, cy);
+    const inner = INNER - 22;
+    const cBlock = fit(labels.length ? labels.join(' › ') : title, 500, inner * 1.5, inner * 1.3, 36, 16, 3);
+    drawBlock(cBlock, 500, cx, cy);
     texture.needsUpdate = true;
   }
 

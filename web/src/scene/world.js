@@ -398,13 +398,13 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
           vec2 p = gl_PointCoord * 2.0 - 1.0;
           float r2 = dot(p, p);
           // круглое ядро + тонкие лучи по горизонтали и вертикали, гаснущие к концам; всё внутри круга
-          float a = exp(-r2 / (vCore * vCore) * 1.75 * (1.0 + vCross)); // у искрящейся звезды ядро меньше
+          float a = exp(-r2 / (vCore * vCore) * 1.75 * (1.0 + 7.0 * min(vCross, 1.0))); // у искрящейся звезды ядро маленькое: плюс, а не кружок
           if (vCross > 0.01) {
             vec2 ap = abs(p);
             vec2 fade = 1.0 - smoothstep(0.0, vLen, ap);
             float w = 1.0 / (vSpike * vSpike);
             float spikes = exp(-ap.y * ap.y * w) * fade.x * fade.x + exp(-ap.x * ap.x * w) * fade.y * fade.y;
-            a += vCross * (spikes * 1.0 + exp(-r2 / (vCore * vCore) * 0.8) * 0.08); // лучи и мягкий ореол
+            a += vCross * (spikes * 1.0 + exp(-r2 / (vCore * vCore) * 3.2) * 0.08); // лучи и мягкий ореол
           }
           a *= 1.0 - smoothstep(0.75, 1.0, r2);
           gl_FragColor = vec4(vColor * a, 1.0);

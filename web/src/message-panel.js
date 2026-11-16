@@ -19,10 +19,17 @@ const CROSS = { x: BOX.x + BOX.w + 18, y: BOX.y, w: 96, h: 96 }; // only the uns
 
 // widthM: how wide the panel is in the scene, in metres.
 export function createMessagePanel({ renderer, widthM }) {
+  // Text sharpness: the user compared variants on a test board in the headset (scene/text-test.js)
+  // and picked «2× canvas, trilinear mipmaps, anisotropy 16, LOD bias −0.5» as sharp without shimmer.
+  // The canvas is drawn at SCALE× the layout size (layout numbers stay in 1× units: the context is
+  // scaled); the bias makes the GPU pick a half-level sharper mipmap.
+  const SCALE = 2;
+  const LOD_BIAS = -0.5;
   const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
+  canvas.width = W * SCALE;
+  canvas.height = H * SCALE;
   const g = canvas.getContext('2d');
+  g.setTransform(SCALE, 0, 0, SCALE, 0, 0);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -34,6 +41,14 @@ export function createMessagePanel({ renderer, widthM }) {
     // Drawn over everything: it is part of the user's view, not an object in the scene.
     new THREE.MeshBasicMaterial({ map: texture, toneMapped: false, transparent: true, depthTest: false }),
   );
+  // the scene may patch this material further (message holes): it calls this hook first
+  mesh.material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      THREE.ShaderChunk.map_fragment.replace('texture2D( map, vMapUv )', `texture2D( map, vMapUv, ${LOD_BIAS.toFixed(2)} )`),
+    );
+  };
+  mesh.material.customProgramCacheKey = () => `message-panel-lodbias-${LOD_BIAS}`;
   mesh.renderOrder = 1000;
   mesh.visible = false;
   // The window itself (not the empty strip with the cross) is what stays centred.

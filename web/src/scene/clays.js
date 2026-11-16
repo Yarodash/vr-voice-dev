@@ -279,6 +279,19 @@ export function createClays({ THREE, root, shooting, camera }) {
     held() {
       return list.find((c) => c.state === 'held') ?? null;
     },
+    // все тарелки разом (сцены, compositions.js): [{ p, q }] — висящие; [] — ни одной
+    setAll(poses) {
+      list.length = 0;
+      for (const { p, q } of poses ?? []) {
+        const clay = newClay();
+        clay.p.fromArray(p);
+        clay.q.fromArray(q);
+        list.push(clay);
+      }
+      outline.visible = false;
+      dirty = true;
+      persist();
+    },
     // ближайшая к pos тарелка (не летящая), ближе maxDist (по умолчанию REACH)
     nearest(pos, maxDist = REACH) {
       let found = null;

@@ -28,18 +28,21 @@ export function createPointer({ scene, panels }) {
     },
 
     // controller: the left controller's ray object, or null when it is not tracked.
-    update(controller) {
+    // controller: the ray object (or null); active: whether windows can be pressed right now.
+    // The beam is always drawn while the controller is tracked; the dot only on a window.
+    update(controller, active = true) {
       hover = null;
-      line.visible = false; // the beam itself is not drawn; only the dot where it hits a window
+      line.visible = false;
       dot.visible = false;
       if (!controller) return;
+      line.visible = true;
 
       origin.setFromMatrixPosition(controller.matrixWorld);
       direction.set(0, 0, -1).transformDirection(controller.matrixWorld);
       raycaster.set(origin, direction);
 
       let distance = RAY_LENGTH_M;
-      const visible = panels.filter((panel) => panel.mesh.visible);
+      const visible = active ? panels.filter((panel) => panel.mesh.visible) : [];
       const hit = raycaster.intersectObjects(visible.map((panel) => panel.mesh), false)[0];
       if (hit) {
         distance = hit.distance;

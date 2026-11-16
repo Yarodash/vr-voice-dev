@@ -14,7 +14,12 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ControlMap } from './controls-map.js';
 import { HUD_CONFIG } from './hud.js';
-import { buildMenu } from './menu.js';
+import { buildMenu, SCENES_MENU, SAVE_NEW, CLEAR_ALL, SCENE_CONTINUE, SCENE_RESTART, RESET_SCORE, CAR_ENTER, CAR_EXIT } from './menu.js';
+import { EMPTY_FEATURES, freshOf, loadCompositions, migrateCarScene, migrateRobodogScene, nextName, readActive, saveCompositions, snapshot, storeCarPose, storeLive, writeActive } from './compositions.js';
+import { createCar } from './car.js';
+import { createRobodog } from './robodog.js';
+import { createCarDrive } from './car-drive.js';
+import { createScore } from './score.js';
 import { createPistols } from './pistols.js';
 import { createSound, SOUND_VERSION } from './sound.js';
 import { createShooting } from './shooting.js';
@@ -22,6 +27,9 @@ import { createMessageHoles } from './message-holes.js';
 import { createClays } from './clays.js';
 import { createWorld } from './world.js';
 import { createFps } from './fps.js';
+import { createLaser } from './laser.js';
+import { createLaserPanel } from './laser-panel.js';
+import { createIpd } from './ipd-panel.js';
 
 const GRIP_BUTTON = 1; // xr-standard gamepad: хват
 const TRIGGER_BUTTON = 0; // курок
@@ -54,16 +62,52 @@ export function setup(ctx) {
   } catch {
     shared.aimOutline = true;
   }
-  ctx.setMenu?.(buildMenu({ holdingPistol: false, gripMode, targetPhysics: shared.targetPhysics, aimOutline: shared.aimOutline })); // меню (menu.js): меняется на лету
+  try {
+    shared.laser = localStorage.getItem('scene.laser') === 'on'; // лазерный прицел (laser.js), по умолчанию выкл
+  } catch {
+    shared.laser = false;
+  }
+  // Сцены (compositions.js): активная задаёт, что есть в мире и в меню (features); список — для «Сцены ▸»
+  let active = readActive(shared);
+  if (migrateCarScene() && active.name === 'Сцена 2') active = writeActive(shared, active.name, { ...active.features, car: true });
+  if (migrateRobodogScene() && active.name === 'Сцена 1') active = writeActive(shared, active.name, { ...active.features, robodog: true });
+  let sceneNames = loadCompositions().map((entry) => entry.name);
+  const menuState = (heldKind = null) => ({
+    holdingPistol: Boolean(heldKind),
+    heldKind,
+    gripMode,
+    targetPhysics: shared.targetPhysics,
+    aimOutline: shared.aimOutline,
+    laser: shared.laser,
+    features: active.features,
+    scenes: sceneNames,
+    car: active.features.car ? (shared.carSeat?.seated ? 'in' : 'out') : null, // «Сесть за руль» / «Выйти из машины»
+  });
+  ctx.setMenu?.(buildMenu(menuState())); // меню (menu.js): меняется на лету
   ctx.setMapper?.(new ControlMap()); // какая кнопка что делает (controls-map.js): тоже на лету
   ctx.setHud?.(HUD_CONFIG); // окна сообщений и кружок-индикатор (hud.js): тоже на лету
 
   const world = createWorld({ THREE, scene, root, camera, renderer });
   const fps = createFps({ THREE, camera, renderer, scene });
+  // расстояние между глазами (Настройки ▸): сдвиг камер глаз + панель; после fps (оба оборачивают
+  // scene.onBeforeRender), в dispose — до fps
+  const ipd = createIpd({ THREE, renderer, scene, camera, root, shared });
+  shared.ipd = ipd; // ручка для npm run vr:eval
+  // доска теста чёткости текста (text-test.js) спрятана: выбор сделан (вариант 3 → окна сообщений);
+  // чтобы вернуть — createTextTest({ THREE, root, camera, renderer, shared }) из ./text-test.js
+  const textTest = { held: false, update() {}, dispose() {} };
   const pistols = createPistols({ THREE, root });
   // звук (sound.js) живёт между подменами сцены; новая версия файла — новый объект (контекст тот же)
   if (shared.sound?.version !== SOUND_VERSION) shared.sound = createSound();
   const shooting = createShooting({ THREE, root, camera });
+  const laser = createLaser({ THREE, root });
+  const laserPanel = createLaserPanel({ THREE, renderer, camera, root, shared }); // «Цвет прицела»
+  shared.laserPanel = laserPanel; // ручка для npm run vr:eval
+  laser.setColor(shared.laserColor);
+  shooting.setTargetsEnabled(active.features.targets); // до первого кадра: в сцене без мишеней они не встают
+  const reloaded = { targets: !Array.isArray(shared.targetStands), score: !shared.score }; // страницу перезагрузили (не подмена сцены)
+  const score = createScore({ THREE, camera, shared }); // счёт стрельбы (score.js) — функция сцены «score»
+  score.setVisible(active.features.score);
   const messageHoles = createMessageHoles({ THREE, camera });
   // глиняные тарелки (clays.js): спавн в руку, хват как у оружия, курок — бросок взмахом
   const clays = createClays({ THREE, root, shooting, camera });
@@ -362,7 +406,14 @@ export function setup(ctx) {
     right.set(1, 0, 0).transformDirection(group.matrixWorld);
     up.set(0, 1, 0).transformDirection(group.matrixWorld);
     messageHoles.hit(muzzleWorld, barrel);
-    const hit = shooting.shoot(muzzleWorld, barrel, { ejector: ejectWorld, right, up });
+    if (laserPanel.isOpen) {
+      laserPanel.cast(muzzleWorld, barrel); // выстрел в плашку выбирает цвет (laser-panel.js)
+      laserPanel.shoot(source);
+    }
+    const hit =shooting.shoot(muzzleWorld, barrel, { ejector: ejectWorld, right, up });
+    // выстрел в панель выбора цвета — не игра: очки не меняет
+    // hit === null — попал во что-то не в счёт (лежащий робопёс): ни очков, ни штрафа
+    if (active.features.score && !laserPanel.isOpen && hit !== null) score.shot(hit); // попал в мишень, тарелку или робопса — очки, иначе −20
     buzz(source, hit ? Math.max(gun.buzz, 0.95) : gun.buzz, 60);
     if (heldItem.kind === 'ak') {
       flash.until = now + 45;
@@ -388,6 +439,114 @@ export function setup(ctx) {
       return true;
     },
   };
+
+  // ---- Сцены (compositions.js): вернуть сохранённый мир или очистить его — на лету, без перезагрузки.
+  // data: снимок (snapshot) или null — пустое поле; features: что есть в сцене (мишени, спавн, X, счёт).
+  const car = createCar({ THREE, root, camera }); // машина (car.js) — функция сцены «car»
+  shared.car = car; // ручка для npm run vr:eval
+  const carDrive = createCarDrive({ THREE, camera, car, shared }); // за рулём (car-drive.js)
+  shared.carDrive = carDrive; // ручка для npm run vr:eval
+  const applyCar = (data, features) => {
+    const placed = car.apply(Boolean(features.car), data?.car);
+    if (placed && active.name) storeCarPose(active.name, placed); // поставили впервые — запомнить в сцене
+  };
+  // робопёс (robodog.js) — функция сцены «robodog»: бегает по полю, в него можно стрелять; убил —
+  // +500 к счёту (чуть позже, чтобы табличка успела показать очки за сам выстрел)
+  let disposed = false;
+  const KILL_BONUS = 500;
+  const robodog = createRobodog({
+    THREE, root, camera, shooting,
+    onKill: () => setTimeout(() => {
+      if (!disposed && active.features.score) score.bonus(KILL_BONUS);
+    }, 450),
+  });
+  shared.robodog = robodog; // ручка для npm run vr:eval (robodog.debug)
+  const applyScene = (data, features) => {
+    applyCar(data, features);
+    robodog.apply(features.robodog, data?.robodog);
+    heldItem = recalibratingItem = nearItem = releasedItem = null;
+    heldClay = nearClay = null;
+    for (const item of [...pistols.items]) pistols.remove(item);
+    for (const weapon of data?.weapons ?? []) pistols.add(weapon, weapon.kind);
+    pistols.save(null, held.toArray(), true);
+    savedHeld = null;
+    clays.setAll(data?.clays ?? []);
+    shooting.setTargets(features.targets ? (data?.targets ?? {}) : null);
+    score.set(data?.score);
+    score.setVisible(features.score);
+  };
+  // Последнее состояние активной сцены (live, для «Продолжить» и перезагрузки): раз в LIVE_EVERY_S,
+  // при подмене сцены, уходе со страницы и перед переключением на другую сцену. Пишется, только
+  // если что-то поменялось.
+  const LIVE_EVERY_S = 3;
+  let lastLive = '';
+  let liveLeft = LIVE_EVERY_S;
+  const saveLive = () => {
+    if (!active.name) return;
+    const json = JSON.stringify(scenes.snapshot());
+    if (json !== lastLive && storeLive(active.name, json)) lastLive = json;
+  };
+  const onPageHide = () => {
+    if (document.visibilityState !== 'visible') saveLive();
+  };
+  window.addEventListener('pagehide', saveLive);
+  document.addEventListener('visibilitychange', onPageHide);
+  const scenes = {
+    list: () => loadCompositions(),
+    active: () => active,
+    snapshot: () => snapshot({ pistols, clays, shooting, score, car, robodog }),
+    saveLive,
+    // текущий мир — новая сцена (с режимом активной); она же становится активной
+    saveNew(name) {
+      saveLive();
+      const list = loadCompositions();
+      const data = scenes.snapshot();
+      const entry = { name: name ?? nextName(list), savedAt: new Date().toISOString(), features: { ...active.features }, data, live: data };
+      list.push(entry);
+      if (!saveCompositions(list)) return null;
+      sceneNames = list.map((e) => e.name);
+      active = writeActive(shared, entry.name, entry.features);
+      lastLive = '';
+      menuKey = '';
+      return entry.name;
+    },
+    // mode: 'continue' — как было (live), 'restart' — заново (freshOf: мишени стоят, счёт 0)
+    restore(name, mode = 'continue') {
+      saveLive(); // уходящая сцена запоминает, где остановились
+      const entry = loadCompositions().find((e) => e.name === name);
+      if (!entry) return false;
+      active = writeActive(shared, entry.name, entry.features);
+      applyScene(mode === 'restart' ? freshOf(entry.data) : entry.live ?? entry.data, active.features);
+      lastLive = '';
+      saveLive();
+      menuKey = '';
+      return true;
+    },
+    clear() {
+      saveLive();
+      active = writeActive(shared, null, EMPTY_FEATURES);
+      applyScene(null, active.features);
+      lastLive = '';
+      menuKey = '';
+      return true;
+    },
+  };
+  shared.scenes = scenes; // ручка для npm run vr:eval
+  // после перезагрузки страницы активная сцена продолжается, как была: мишени (с дырками) и счёт —
+  // из её live (оружие и тарелки сохраняют себя сами)
+  if (reloaded.targets || reloaded.score) {
+    const entry = active.name ? loadCompositions().find((e) => e.name === active.name) : null;
+    const live = entry?.live ?? entry?.data;
+    if (live && reloaded.targets && active.features.targets && live.targets) shooting.setTargets(live.targets);
+    if (live && reloaded.score) score.set(live.score);
+  }
+  {
+    // машина — при каждой загрузке сцены (и после подмены файла сцены)
+    const entry = active.name ? loadCompositions().find((e) => e.name === active.name) : null;
+    applyCar(entry?.live?.car ? entry.live : entry?.data, active.features);
+    // робопёс: после подмены файла сцены — где был; после перезагрузки — жив/мёртв из live
+    robodog.apply(active.features.robodog, (entry?.live ?? entry?.data)?.robodog, { keep: true });
+  }
 
   // вспышка калаша — у дула того, кто стрелял (положение — после отдачи этого кадра)
   const placeFlash = () => {
@@ -416,7 +575,21 @@ export function setup(ctx) {
   return {
     // Выбран пункт радиального меню: { path, label }
     onMenu(picked) {
-      if (picked.label === 'Заспавнить пистолет') {
+      if (picked.path?.[0] === SCENES_MENU) {
+        if (picked.label === SAVE_NEW) console.log(`[scenes] сохранена: ${scenes.saveNew()}`);
+        else if (picked.label === CLEAR_ALL) scenes.clear();
+        else if (picked.label === SCENE_CONTINUE || picked.label === SCENE_RESTART) {
+          // путь: ['Сцены', '<имя сцены>', 'Продолжить' | 'Рестарт']
+          const name = picked.path[1];
+          if (!scenes.restore(name, picked.label === SCENE_RESTART ? 'restart' : 'continue')) console.warn(`[scenes] нет сцены «${name}»`);
+        }
+      } else if (picked.label === CAR_ENTER) {
+        if (!carDrive.enter()) console.warn('[car] сесть не вышло: нет машины или rig');
+      } else if (picked.label === CAR_EXIT) {
+        carDrive.exit();
+      } else if (picked.label === RESET_SCORE) {
+        score.reset();
+      } else if (picked.label === 'Заспавнить пистолет') {
         spawnWeapon('pistol');
       } else if (picked.label === 'Заспавнить калаш') {
         spawnWeapon('ak');
@@ -446,6 +619,23 @@ export function setup(ctx) {
         } catch {
           // без хранилища не переживёт перезапуск
         }
+      } else if (picked.label.startsWith('Лазерный прицел:')) {
+        shared.laser = !shared.laser;
+        try {
+          localStorage.setItem('scene.laser', shared.laser ? 'on' : 'off');
+        } catch {
+          // без хранилища не переживёт перезапуск
+        }
+      } else if (picked.label === 'Цвет прицела') {
+        if (heldItem) laserPanel.open();
+      } else if (picked.label === 'Отцентрировать') {
+        if (typeof ctx.recenter === 'function') {
+          ctx.recenter();
+          if (carDrive.seated) carDrive.enter(); // за рулём: голова снова на месте водителя
+        }
+        else console.warn('[scene] ctx.recenter ещё нет в оболочке');
+      } else if (picked.label === 'Расстояние между глазами') {
+        ipd.open();
       } else if (picked.label === 'Перенастроить оси' && heldItem) {
         recalibratingItem = heldItem; // замирает там, где он сейчас; рука его больше не ведёт
         heldItem = null;
@@ -469,7 +659,18 @@ export function setup(ctx) {
       }
       const hand = ctx.getLeftController();
       const menuNow = Boolean(ctx.menuOpen?.());
-      const menuIsOpen = menuNow || menuWasOpen; // пока открыто меню (и в кадр, когда хват его закрыл), оружие не берётся и не отпускается
+      // панель расстояния между глазами: стик и курок её, пока она открыта (и пока не отпущена
+      // кнопка, которой её закрыли) — оружие не стреляет, предметы не берутся и не отпускаются
+      ipd.update(source, menuNow || menuWasOpen);
+      if (!heldItem && laserPanel.isOpen) laserPanel.close();
+      laserPanel.update(source, menuNow || menuWasOpen);
+      const panelBusy = ipd.busy();
+      const menuOrPanel = menuNow || menuWasOpen || panelBusy || laserPanel.busy();
+      // машина: педали и руль, игрок за рулём едет с ней — до руки и оружия, чтобы они не отставали
+      carDrive.update(dt, source, menuOrPanel);
+      // пока открыто меню (и в кадр, когда хват его закрыл) или игрок за рулём (хват и курок — педали),
+      // оружие не берётся и не отпускается
+      const menuIsOpen = menuOrPanel || carDrive.seated;
       menuWasOpen = menuNow;
       const gripDown = Boolean(source?.gamepad.buttons[GRIP_BUTTON]?.pressed);
 
@@ -486,7 +687,7 @@ export function setup(ctx) {
         nearItem = null;
         nearClay = null;
         let best = REACH;
-        if (!heldItem && !heldClay && !recalibratingItem) {
+        if (!heldItem && !heldClay && !recalibratingItem && !textTest.held) {
           for (const item of pistols.items) {
             item.group.updateWorldMatrix(true, false);
             const distance = palm.copy(HANDLE).applyMatrix4(item.group.matrixWorld).distanceTo(handPosition);
@@ -499,6 +700,11 @@ export function setup(ctx) {
           nearClay = clays.nearest(handPosition, best);
           if (nearClay) nearItem = null;
         }
+        // доска теста текста (text-test.js): «Относительно схватить», только пустой рукой
+        textTest.update({
+          hand, gripWorld, handPosition, gripDown, gripWasDown, gripMode, menuIsOpen, source,
+          handBusy: Boolean(heldItem || heldClay || recalibratingItem || nearItem || nearClay),
+        });
 
         const gripPressed = gripDown && !gripWasDown;
         if (gripPressed && recalibratingItem) {
@@ -567,12 +773,12 @@ export function setup(ctx) {
       clays.setNear(heldItem || heldClay ? null : nearClay);
       // X: новая тарелка в руку (как пункт меню), если рука свободна и меню закрыто
       const xDown = Boolean(source?.gamepad.buttons[X_BUTTON]?.pressed);
-      if (xDown && !xWasDown && !heldItem && !heldClay && !recalibratingItem && !menuIsOpen) {
+      if (xDown && !xWasDown && active.features.xPlate && !heldItem && !heldClay && !recalibratingItem && !menuIsOpen) {
         spawnClay();
         buzz(source, 0.3, 40);
       }
       xWasDown = xDown;
-      if (triggerDown && heldItem && (!triggerWasDown || GUNS[heldItem.kind]?.auto)) fire(source);
+      if (triggerDown && heldItem && !panelBusy && !carDrive.seated && !laserPanel.blocksFire() && (!triggerWasDown || GUNS[heldItem.kind]?.auto)) fire(source);
       triggerWasDown = triggerDown;
 
       // задранный очередью ствол плавно возвращается
@@ -606,18 +812,36 @@ export function setup(ctx) {
         heldItem.group.updateWorldMatrix(true, false);
         aimMuzzle.copy(heldItem.muzzle).applyMatrix4(heldItem.group.matrixWorld);
         aimBarrel.set(0, 0, -1).transformDirection(heldItem.group.matrixWorld);
-        shooting.aim(aimMuzzle, aimBarrel);
-      } else shooting.aim(null);
+        let aimPoint = shooting.aim(aimMuzzle, aimBarrel);
+        // панель цвета: подсветка плашки под прицелом; лазер виден, пока она открыта
+        if (laserPanel.isOpen) {
+          const d = laserPanel.cast(aimMuzzle, aimBarrel);
+          if (d >= 0 && (!aimPoint || aimMuzzle.distanceTo(aimPoint) > d)) aimPoint = laserPanel.point;
+        }
+        laser.setColor(shared.laserColor);
+        laser.setVisible(shared.laser || laserPanel.isOpen);
+        laser.update(aimMuzzle, aimBarrel, aimPoint);
+      } else {
+        shooting.aim(null);
+        laser.setVisible(false);
+      }
       shooting.update(dt);
       clays.update(dt);
+      robodog.update(dt);
       messageHoles.update();
+      score.update(dt);
+      liveLeft -= dt;
+      if (liveLeft <= 0) {
+        liveLeft = LIVE_EVERY_S;
+        saveLive(); // последнее состояние активной сцены (compositions.js: live)
+      }
 
       // меню зависит от того, что игрок держит, и от режима хвата
       const heldKind = heldItem?.kind ?? (heldClay ? 'plate' : null);
-      const key = `${heldKind}|${gripMode}|${shared.targetPhysics}|${shared.aimOutline}`;
+      const key = `${heldKind}|${gripMode}|${shared.targetPhysics}|${shared.aimOutline}|${shared.laser}|${carDrive.seated}`; // сцены сбрасывают menuKey сами
       if (key !== menuKey) {
         menuKey = key;
-        ctx.setMenu?.(buildMenu({ holdingPistol: Boolean(heldKind), heldKind, gripMode, targetPhysics: shared.targetPhysics, aimOutline: shared.aimOutline }));
+        ctx.setMenu?.(buildMenu(menuState(heldKind)));
       }
       // положение запоминается, пока пистолет в руке (он движется), и сразу, когда его взяли/отпустили;
       // без пистолета в руке ничего не меняется — и не сохраняется каждый кадр (меньше мусора для GC)
@@ -633,10 +857,22 @@ export function setup(ctx) {
       flash.mesh.material.dispose();
       flash.texture.dispose();
       clays.dispose();
+      laser.dispose();
+      laserPanel.dispose();
+      saveLive(); // до shooting.dispose: снимок читает мишени
+      window.removeEventListener('pagehide', saveLive);
+      document.removeEventListener('visibilitychange', onPageHide);
+      score.dispose();
+      carDrive.dispose();
+      car.dispose();
+      disposed = true;
+      robodog.dispose(); // до shooting.dispose: снимает свою цель для пуль
       shooting.dispose();
       messageHoles.dispose();
       world.dispose();
+      ipd.dispose(); // до fps: оба оборачивают scene.onBeforeRender
       fps.dispose();
+      textTest.dispose();
       if (ctx.pointerAim?.object === axes) ctx.pointerAim.object = null;
       axes?.parent?.remove(axes);
       axes?.traverse((object) => {

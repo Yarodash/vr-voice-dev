@@ -14,3 +14,6 @@ logs/
 
 # your own settings (LAN address etc.); copy from config.example.json
 config.json
+
+# local game saves (your own scenes)
+saves/
