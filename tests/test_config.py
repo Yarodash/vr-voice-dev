@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_load_config_reads_all_sections():
-    cfg = load_config(ROOT / "config.json")
+    cfg = load_config(ROOT / "config.example.json")
 
     assert cfg.lan_host == "192.168.0.10"
     assert cfg.web_port == 5173
@@ -25,7 +25,7 @@ def test_load_config_reads_all_sections():
 def test_fork_from_is_optional(tmp_path):
     import json
 
-    raw = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    raw = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
     raw["claude"].pop("fork_from", None)
     path = tmp_path / "config.json"
     path.write_text(json.dumps(raw), encoding="utf-8")

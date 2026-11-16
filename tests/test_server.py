@@ -96,7 +96,7 @@ def files_dir(tmp_path):
 @pytest.fixture
 async def client(aiohttp_client, parts, console_log, files_dir, inbox_log):
     pty, dictation, status_path = parts
-    app = create_app(load_config(ROOT / "config.json"), pty, dictation, status_path, CODE, console_log, files_dir,
+    app = create_app(load_config(ROOT / "config.example.json"), pty, dictation, status_path, CODE, console_log, files_dir,
                      inbox_log)
     return await aiohttp_client(app)
 

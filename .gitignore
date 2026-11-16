@@ -11,3 +11,6 @@ logs/
 
 # working notes of the build process
 .superpowers/
+
+# your own settings (LAN address etc.); copy from config.example.json
+config.json
