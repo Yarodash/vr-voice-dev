@@ -45,11 +45,11 @@ function setup(options = {}) {
 }
 
 describe('createControls', () => {
-  it('left trigger press and release drive push-to-talk', () => {
+  it('left grip press and release drive push-to-talk', () => {
     const { ptt, fire } = setup();
 
-    fire(1, 'selectstart', LEFT);
-    fire(1, 'selectend', LEFT);
+    fire(1, 'squeezestart', LEFT);
+    fire(1, 'squeezeend', LEFT);
 
     expect(ptt).toEqual([true, false]);
   });
@@ -57,16 +57,16 @@ describe('createControls', () => {
   it('ignores the right controller and a pinching hand', () => {
     const { ptt, fire } = setup();
 
-    fire(0, 'selectstart', RIGHT);
-    fire(0, 'selectend', RIGHT);
-    fire(1, 'selectstart', LEFT_HAND);
+    fire(0, 'squeezestart', RIGHT);
+    fire(0, 'squeezeend', RIGHT);
+    fire(1, 'squeezestart', LEFT_HAND);
 
     expect(ptt).toEqual([]);
   });
 
   it('the right controller going to sleep does not end the hold', () => {
     const { ptt, fire } = setup();
-    fire(1, 'selectstart', LEFT);
+    fire(1, 'squeezestart', LEFT);
 
     fire(0, 'disconnected', RIGHT);
 
@@ -75,7 +75,7 @@ describe('createControls', () => {
 
   it('the left controller going to sleep ends the hold', () => {
     const { ptt, fire } = setup();
-    fire(1, 'selectstart', LEFT);
+    fire(1, 'squeezestart', LEFT);
 
     fire(1, 'disconnected', LEFT);
 
@@ -85,7 +85,7 @@ describe('createControls', () => {
   it('the headset being taken off or the system menu opening ends the hold', () => {
     const { ptt, fire, startSession } = setup();
     const session = startSession();
-    fire(1, 'selectstart', LEFT);
+    fire(1, 'squeezestart', LEFT);
 
     session.visibilityState = 'hidden';
     session.dispatchEvent(new Event('visibilitychange'));
@@ -96,14 +96,14 @@ describe('createControls', () => {
   it('the session ending ends the hold', () => {
     const { ptt, fire, startSession, endSession } = setup();
     startSession();
-    fire(1, 'selectstart', LEFT);
+    fire(1, 'squeezestart', LEFT);
 
     endSession();
 
     expect(ptt).toEqual([true, false]);
   });
 
-  it('the trigger on a button presses the button instead of starting to listen', () => {
+  it('the trigger presses the button it points at and never starts listening', () => {
     const { ptt, actions, fire } = setup({ hitTest: () => 'close-message' });
 
     fire(1, 'selectstart', LEFT);
@@ -113,11 +113,21 @@ describe('createControls', () => {
     expect(ptt).toEqual([]);
   });
 
-  it('the trigger away from any button still starts listening', () => {
+  it('the trigger away from any button does nothing', () => {
     const { ptt, actions, fire } = setup({ hitTest: () => null });
 
     fire(1, 'selectstart', LEFT);
     fire(1, 'selectend', LEFT);
+
+    expect(ptt).toEqual([]);
+    expect(actions).toEqual([]);
+  });
+
+  it('the grip records even while the ray is on a button', () => {
+    const { ptt, actions, fire } = setup({ hitTest: () => 'close-message' });
+
+    fire(1, 'squeezestart', LEFT);
+    fire(1, 'squeezeend', LEFT);
 
     expect(ptt).toEqual([true, false]);
     expect(actions).toEqual([]);

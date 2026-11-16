@@ -1,49 +1,49 @@
-// Left Touch controller: the trigger is push-to-talk (or a click when it points at a button),
-// the other buttons go through ControlMapper.
+// Left Touch controller: the grip (side button) is push-to-talk, the trigger presses the
+// on-screen button the ray points at, the other buttons go through ControlMapper.
 import { ControlMapper } from './control-mapper.js';
 
-// A tracked hand can also fire "select" (pinch); only the real left controller counts.
+// A tracked hand can also fire these events (pinch); only the real left controller counts.
 const isLeftPad = (source) => Boolean(source && source.handedness === 'left' && source.gamepad && !source.hand);
 
 // hitTest(): the action of the on-screen button the controller points at right now, or null.
 export function createControls({ renderer, scene, onPtt, onAction, hitTest = () => null }) {
   const mapper = new ControlMapper();
   let holding = false;
-  let clicking = false; // this trigger press went to a button, not to the microphone
   let leftGrip = null;
   let leftController = null;
 
   const press = () => {
-    const action = hitTest();
-    if (action) {
-      clicking = true;
-      onAction(action);
-    } else if (!holding) {
+    if (!holding) {
       holding = true;
       onPtt(true);
     }
   };
   const release = () => {
-    clicking = false;
     if (holding) {
       holding = false;
       onPtt(false);
     }
+  };
+  const click = () => {
+    const action = hitTest();
+    if (action) onAction(action);
   };
 
   // three.js fills controller slots in connection order, not by hand, so listen on both.
   for (const index of [0, 1]) {
     const controller = renderer.xr.getController(index);
     const grip = renderer.xr.getControllerGrip(index);
-    controller.addEventListener('selectstart', (event) => isLeftPad(event.data) && press());
-    controller.addEventListener('selectend', (event) => isLeftPad(event.data) && release());
+    controller.addEventListener('squeezestart', (event) => isLeftPad(event.data) && press());
+    controller.addEventListener('squeezeend', (event) => isLeftPad(event.data) && release());
+    // Recording used to be on the trigger too, and every click on a button started it.
+    controller.addEventListener('selectstart', (event) => isLeftPad(event.data) && click());
     controller.addEventListener('connected', (event) => {
       if (isLeftPad(event.data)) {
         leftGrip = grip;
         leftController = controller;
       }
     });
-    // "selectend" never arrives if the left controller falls asleep mid-sentence. The other
+    // "squeezeend" never arrives if the left controller falls asleep mid-sentence. The other
     // controller (or a tracked hand) disappearing must not cut the sentence short.
     controller.addEventListener('disconnected', (event) => {
       if (leftGrip === grip) {
