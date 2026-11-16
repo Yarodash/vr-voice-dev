@@ -1,5 +1,5 @@
-// Left Touch controller: the grip (side button) is push-to-talk, the trigger presses the
-// on-screen button the ray points at, the other buttons go through ControlMapper.
+// Left Touch controller: holding Y records, the trigger presses the on-screen button the ray
+// points at, the other buttons are plain actions (see ControlMapper).
 import { ControlMapper } from './control-mapper.js';
 
 // A tracked hand can also fire these events (pinch); only the real left controller counts.
@@ -33,9 +33,7 @@ export function createControls({ renderer, scene, onPtt, onAction, hitTest = () 
   for (const index of [0, 1]) {
     const controller = renderer.xr.getController(index);
     const grip = renderer.xr.getControllerGrip(index);
-    controller.addEventListener('squeezestart', (event) => isLeftPad(event.data) && press());
-    controller.addEventListener('squeezeend', (event) => isLeftPad(event.data) && release());
-    // Recording used to be on the trigger too, and every click on a button started it.
+    // Recording is not on the trigger: every click on a button would start it.
     controller.addEventListener('selectstart', (event) => isLeftPad(event.data) && click());
     controller.addEventListener('connected', (event) => {
       if (isLeftPad(event.data)) {
@@ -43,7 +41,7 @@ export function createControls({ renderer, scene, onPtt, onAction, hitTest = () 
         leftController = controller;
       }
     });
-    // "squeezeend" never arrives if the left controller falls asleep mid-sentence. The other
+    // The release of Y never arrives if the left controller falls asleep mid-sentence. The other
     // controller (or a tracked hand) disappearing must not cut the sentence short.
     controller.addEventListener('disconnected', (event) => {
       if (leftGrip === grip) {
@@ -80,7 +78,11 @@ export function createControls({ renderer, scene, onPtt, onAction, hitTest = () 
           buttons: source.gamepad.buttons.map((button) => button.pressed),
           axes: [...source.gamepad.axes],
         };
-        for (const action of mapper.step(nowMs, state)) onAction(action);
+        for (const action of mapper.step(nowMs, state)) {
+          if (action === 'record-start') press();
+          else if (action === 'record-stop') release();
+          else onAction(action);
+        }
       }
     },
   };

@@ -3,54 +3,40 @@ import { ControlMapper } from '../src/control-mapper.js';
 
 const GRIP = 1, STICK = 3, X = 4, Y = 5;
 
-function pad({ pressed = [], stickY = 0 } = {}) {
+function pad({ pressed = [] } = {}) {
   const buttons = Array(8).fill(false);
   for (const index of pressed) buttons[index] = true;
-  return { buttons, axes: [0, 0, 0, stickY] };
+  return { buttons, axes: [0, 0, 0, 0] };
 }
 
 describe('ControlMapper', () => {
-  it('X rising edge emits enter once', () => {
+  it('X sends once per press', () => {
     const mapper = new ControlMapper();
 
     expect(mapper.step(0, pad())).toEqual([]);
-    expect(mapper.step(16, pad({ pressed: [X] }))).toEqual(['enter']);
+    expect(mapper.step(16, pad({ pressed: [X] }))).toEqual(['send']);
     expect(mapper.step(32, pad({ pressed: [X] }))).toEqual([]);
     expect(mapper.step(48, pad())).toEqual([]);
-    expect(mapper.step(64, pad({ pressed: [X] }))).toEqual(['enter']);
+    expect(mapper.step(64, pad({ pressed: [X] }))).toEqual(['send']);
   });
 
-  it('Y rising edge emits esc once', () => {
+  it('holding Y records: it starts on press and stops on release', () => {
     const mapper = new ControlMapper();
 
-    expect(mapper.step(0, pad({ pressed: [Y] }))).toEqual(['esc']);
+    expect(mapper.step(0, pad({ pressed: [Y] }))).toEqual(['record-start']);
     expect(mapper.step(16, pad({ pressed: [Y] }))).toEqual([]);
+    expect(mapper.step(900, pad())).toEqual(['record-stop']);
+    expect(mapper.step(916, pad())).toEqual([]);
   });
 
-  it('stick up repeats scroll-up every repeatMs', () => {
-    const mapper = new ControlMapper({ repeatMs: 200 });
-
-    expect(mapper.step(0, pad({ stickY: -0.9 }))).toEqual(['scroll-up']);
-    expect(mapper.step(100, pad({ stickY: -0.9 }))).toEqual([]);
-    expect(mapper.step(200, pad({ stickY: -0.9 }))).toEqual(['scroll-up']);
-    expect(mapper.step(250, pad({ stickY: 0 }))).toEqual([]);
-    expect(mapper.step(260, pad({ stickY: 0.9 }))).toEqual(['scroll-down']);
-  });
-
-  it('small stick deflection is ignored', () => {
-    const mapper = new ControlMapper({ threshold: 0.6 });
-
-    expect(mapper.step(0, pad({ stickY: -0.5 }))).toEqual([]);
-  });
-
-  it('stick with grip emits arrows instead of scroll', () => {
+  it('the grip deletes once per press', () => {
     const mapper = new ControlMapper();
 
-    expect(mapper.step(0, pad({ pressed: [GRIP], stickY: -0.9 }))).toEqual(['arrow-up']);
-    expect(mapper.step(300, pad({ pressed: [GRIP], stickY: 0.9 }))).toEqual(['arrow-down']);
+    expect(mapper.step(0, pad({ pressed: [GRIP] }))).toEqual(['delete']);
+    expect(mapper.step(16, pad({ pressed: [GRIP] }))).toEqual([]);
   });
 
-  it('stick click held 1000 ms emits reload once', () => {
+  it('stick click held 1000 ms reloads once', () => {
     const mapper = new ControlMapper({ holdMs: 1000 });
 
     expect(mapper.step(0, pad({ pressed: [STICK] }))).toEqual([]);
@@ -59,20 +45,11 @@ describe('ControlMapper', () => {
     expect(mapper.step(2500, pad({ pressed: [STICK] }))).toEqual([]);
   });
 
-  it('a short stick click brings the panels in front of the user', () => {
-    const mapper = new ControlMapper({ holdMs: 1000 });
-
-    expect(mapper.step(0, pad({ pressed: [STICK] }))).toEqual([]);
-    expect(mapper.step(300, pad())).toEqual(['recenter']);
-    expect(mapper.step(400, pad())).toEqual([]);
-  });
-
-  it('a long stick click reloads and does not also recenter on release', () => {
+  it('a short stick click does nothing', () => {
     const mapper = new ControlMapper({ holdMs: 1000 });
 
     mapper.step(0, pad({ pressed: [STICK] }));
-    expect(mapper.step(1000, pad({ pressed: [STICK] }))).toEqual(['reload']);
-    expect(mapper.step(1100, pad())).toEqual([]);
+    expect(mapper.step(300, pad())).toEqual([]);
   });
 
   it('a controller that reports fewer buttons does not throw', () => {

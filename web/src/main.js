@@ -180,25 +180,18 @@ triggerDot.renderOrder = 1001;
 triggerDot.position.set(HUD.messageWidth / 2 - 0.014, 0.12, 0);
 hud.add(triggerDot);
 
-// Grey — trigger up, green — trigger down. For a second after X it is yellow ("sent"),
-// after Y red ("deleted"), so that the buttons give some feedback.
-let flashColor = null;
-let flashTimer = null;
-function paintDot() {
-  triggerDot.material.color.set(flashColor ?? (triggerPressed ? 0x22c55e : 0x6b7280));
+// The dot: grey — nothing; red — recording right now; blue — something is recorded and not
+// sent yet; green for a second — it has just been sent.
+const DOT = { idle: 0x6b7280, recording: 0xef4444, pending: 0x3b82f6, sent: 0x22c55e };
+let sentFlashUntil = 0;
+function paintDot(time) {
+  const color = time < sentFlashUntil ? DOT.sent
+    : triggerPressed ? DOT.recording
+      : draftText ? DOT.pending : DOT.idle;
+  triggerDot.material.color.set(color);
 }
 function setTriggerPressed(pressed) {
   triggerPressed = pressed;
-  paintDot();
-}
-function flashDot(color) {
-  flashColor = color;
-  paintDot();
-  clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => {
-    flashColor = null;
-    paintDot();
-  }, 1000);
 }
 
 const messages = createMessageQueue();
@@ -228,7 +221,10 @@ function sendWhenReady(time) {
   if (!sendRequested || triggerPressed || releaseTimer !== null || voiceState !== 'idle') return;
   if (time - draftChangedAt < SETTLE_MS) return;
   sendRequested = false;
-  if (draftText) bridge.send({ t: 'send', text: draftText }); // the bridge then empties the prompt
+  if (draftText) {
+    bridge.send({ t: 'send', text: draftText }); // the bridge then empties the prompt
+    sentFlashUntil = time + 1000;
+  }
 }
 
 let lastFrame = 0;
@@ -248,6 +244,7 @@ renderer.setAnimationLoop((time) => {
     }
   }
   sendWhenReady(time);
+  paintDot(time);
   messagePanel.tick();
   sceneHost.update(dt);
   sceneHost.render(() => renderer.render(scene, camera));
@@ -313,18 +310,16 @@ function onPtt(down) {
   mic.start((frame) => bridge.sendBinary(frame.buffer));
 }
 
-// Actions come from the buttons of the controller ('enter' is X, 'esc' is Y, 'reload' is a long
-// stick click) and from the ray pressing the cross of the message window ('close-message').
+// Actions come from the buttons of the controller ('send' is X, 'delete' is the grip, 'reload'
+// is a long stick click; holding Y records, see controls.js) and from the ray pressing the
+// cross of the message window ('close-message').
 function onAction(action) {
   if (action === 'reload') {
     location.reload();
-  } else if (action === 'enter') {
-    sendRequested = true; // X: send what was dictated (see sendWhenReady) — and it is cleared
-    // yellow only if there is something to send (or it is still being recognised)
-    if (draftText || triggerPressed || releaseTimer !== null || voiceState !== 'idle') flashDot(0xfacc15);
-  } else if (action === 'esc') {
-    if (draftText) flashDot(0xef4444); // red only if there was something to delete
-    // Y: throw away what was dictated; with nothing dictated it closes the message on screen
+  } else if (action === 'send') {
+    sendRequested = true; // sent once the recognition has finished (see sendWhenReady)
+  } else if (action === 'delete') {
+    // throw away what was recorded; with nothing recorded it closes the message on screen
     sendRequested = false;
     if (draftText) bridge.send({ t: 'key', k: 'clear' });
     else closeMessage();

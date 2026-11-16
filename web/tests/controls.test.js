@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createControls } from '../src/controls.js';
 
 const LEFT = { handedness: 'left', gamepad: { buttons: [], axes: [] } };
+const Y = 5;
 const RIGHT = { handedness: 'right', gamepad: { buttons: [], axes: [] } };
 const LEFT_HAND = { handedness: 'left', gamepad: { buttons: [], axes: [] }, hand: {} };
 
@@ -18,6 +19,7 @@ function setup(options = {}) {
 
   const ptt = [];
   const actions = [];
+  let clock = 0;
   const controls = createControls({
     renderer: { xr },
     scene: new THREE.Scene(),
@@ -37,6 +39,14 @@ function setup(options = {}) {
       xr.dispatchEvent({ type: 'sessionstart' });
       return session;
     },
+    // one frame with the given buttons held on the left (or another) controller
+    frame(pressed = [], source = LEFT) {
+      if (!session) this.startSession();
+      const buttons = Array.from({ length: 8 }, (_, index) => ({ pressed: pressed.includes(index) }));
+      session.inputSources = [{ ...source, gamepad: { buttons, axes: [0, 0, 0, 0] } }];
+      clock += 16;
+      controls.tick(clock);
+    },
     endSession() {
       session = null;
       xr.dispatchEvent({ type: 'sessionend' });
@@ -45,101 +55,100 @@ function setup(options = {}) {
 }
 
 describe('createControls', () => {
-  it('left grip press and release drive push-to-talk', () => {
-    const { ptt, fire } = setup();
+  it('holding Y on the left controller records', () => {
+    const t = setup();
 
-    fire(1, 'squeezestart', LEFT);
-    fire(1, 'squeezeend', LEFT);
+    t.frame([Y]);
+    t.frame([Y]);
+    t.frame([]);
 
-    expect(ptt).toEqual([true, false]);
+    expect(t.ptt).toEqual([true, false]);
   });
 
-  it('ignores the right controller and a pinching hand', () => {
-    const { ptt, fire } = setup();
+  it('ignores the right controller and a tracked hand', () => {
+    const t = setup();
 
-    fire(0, 'squeezestart', RIGHT);
-    fire(0, 'squeezeend', RIGHT);
-    fire(1, 'squeezestart', LEFT_HAND);
+    t.frame([Y], RIGHT);
+    t.frame([Y], LEFT_HAND);
 
-    expect(ptt).toEqual([]);
+    expect(t.ptt).toEqual([]);
   });
 
-  it('the right controller going to sleep does not end the hold', () => {
-    const { ptt, fire } = setup();
-    fire(1, 'squeezestart', LEFT);
+  it('X and the grip are passed on as actions', () => {
+    const t = setup();
 
-    fire(0, 'disconnected', RIGHT);
+    t.frame([4]);
+    t.frame([]);
+    t.frame([1]);
 
-    expect(ptt).toEqual([true]);
+    expect(t.actions).toEqual(['send', 'delete']);
+    expect(t.ptt).toEqual([]);
   });
 
-  it('the left controller going to sleep ends the hold', () => {
-    const { ptt, fire } = setup();
-    fire(1, 'squeezestart', LEFT);
+  it('the right controller going to sleep does not end the recording', () => {
+    const t = setup();
+    t.frame([Y]);
 
-    fire(1, 'disconnected', LEFT);
+    t.fire(0, 'disconnected', RIGHT);
 
-    expect(ptt).toEqual([true, false]);
+    expect(t.ptt).toEqual([true]);
   });
 
-  it('the headset being taken off or the system menu opening ends the hold', () => {
-    const { ptt, fire, startSession } = setup();
-    const session = startSession();
-    fire(1, 'squeezestart', LEFT);
+  it('the left controller going to sleep ends the recording', () => {
+    const t = setup();
+    t.frame([Y]);
+
+    t.fire(1, 'disconnected', LEFT);
+
+    expect(t.ptt).toEqual([true, false]);
+  });
+
+  it('the headset being taken off or the system menu opening ends the recording', () => {
+    const t = setup();
+    const session = t.startSession();
+    t.frame([Y]);
 
     session.visibilityState = 'hidden';
     session.dispatchEvent(new Event('visibilitychange'));
 
-    expect(ptt).toEqual([true, false]);
+    expect(t.ptt).toEqual([true, false]);
   });
 
-  it('the session ending ends the hold', () => {
-    const { ptt, fire, startSession, endSession } = setup();
-    startSession();
-    fire(1, 'squeezestart', LEFT);
+  it('the session ending ends the recording', () => {
+    const t = setup();
+    t.frame([Y]);
 
-    endSession();
+    t.endSession();
 
-    expect(ptt).toEqual([true, false]);
+    expect(t.ptt).toEqual([true, false]);
   });
 
-  it('the trigger presses the button it points at and never starts listening', () => {
-    const { ptt, actions, fire } = setup({ hitTest: () => 'close-message' });
+  it('the trigger presses the button it points at and never records', () => {
+    const t = setup({ hitTest: () => 'close-message' });
 
-    fire(1, 'selectstart', LEFT);
-    fire(1, 'selectend', LEFT);
+    t.fire(1, 'selectstart', LEFT);
+    t.fire(1, 'selectend', LEFT);
 
-    expect(actions).toEqual(['close-message']);
-    expect(ptt).toEqual([]);
+    expect(t.actions).toEqual(['close-message']);
+    expect(t.ptt).toEqual([]);
   });
 
   it('the trigger away from any button does nothing', () => {
-    const { ptt, actions, fire } = setup({ hitTest: () => null });
+    const t = setup({ hitTest: () => null });
 
-    fire(1, 'selectstart', LEFT);
-    fire(1, 'selectend', LEFT);
+    t.fire(1, 'selectstart', LEFT);
 
-    expect(ptt).toEqual([]);
-    expect(actions).toEqual([]);
-  });
-
-  it('the grip records even while the ray is on a button', () => {
-    const { ptt, actions, fire } = setup({ hitTest: () => 'close-message' });
-
-    fire(1, 'squeezestart', LEFT);
-    fire(1, 'squeezeend', LEFT);
-
-    expect(ptt).toEqual([true, false]);
-    expect(actions).toEqual([]);
+    expect(t.ptt).toEqual([]);
+    expect(t.actions).toEqual([]);
   });
 
   it('remembers which grip belongs to the left controller', () => {
-    const { controls, grips, fire } = setup();
+    const t = setup();
 
-    fire(1, 'connected', LEFT);
-    expect(controls.leftGrip).toBe(grips[1]);
+    t.fire(1, 'connected', LEFT);
+    expect(t.controls.leftGrip).toBe(t.grips[1]);
 
-    fire(1, 'disconnected', LEFT);
-    expect(controls.leftGrip).toBe(null);
+    t.fire(1, 'disconnected', LEFT);
+    expect(t.controls.leftGrip).toBe(null);
   });
 });
