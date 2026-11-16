@@ -10,14 +10,11 @@ function pad({ pressed = [] } = {}) {
 }
 
 describe('ControlMapper', () => {
-  it('X sends once per press', () => {
+  it('X does nothing now', () => {
     const mapper = new ControlMapper();
 
-    expect(mapper.step(0, pad())).toEqual([]);
-    expect(mapper.step(16, pad({ pressed: [X] }))).toEqual(['send']);
-    expect(mapper.step(32, pad({ pressed: [X] }))).toEqual([]);
-    expect(mapper.step(48, pad())).toEqual([]);
-    expect(mapper.step(64, pad({ pressed: [X] }))).toEqual(['send']);
+    expect(mapper.step(0, pad({ pressed: [X] }))).toEqual([]);
+    expect(mapper.step(16, pad())).toEqual([]);
   });
 
   it('holding Y records: it starts on press and stops on release', () => {
@@ -29,11 +26,10 @@ describe('ControlMapper', () => {
     expect(mapper.step(916, pad())).toEqual([]);
   });
 
-  it('the grip deletes once per press', () => {
+  it('the grip is left to the scene', () => {
     const mapper = new ControlMapper();
 
-    expect(mapper.step(0, pad({ pressed: [GRIP] }))).toEqual(['delete']);
-    expect(mapper.step(16, pad({ pressed: [GRIP] }))).toEqual([]);
+    expect(mapper.step(0, pad({ pressed: [GRIP] }))).toEqual([]);
   });
 
   it('stick click held 1000 ms reloads once', () => {

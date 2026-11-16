@@ -30,7 +30,7 @@ export function createPointer({ scene, panels }) {
     // controller: the left controller's ray object, or null when it is not tracked.
     update(controller) {
       hover = null;
-      line.visible = Boolean(controller);
+      line.visible = false; // the beam itself is not drawn; only the dot where it hits a window
       dot.visible = false;
       if (!controller) return;
 

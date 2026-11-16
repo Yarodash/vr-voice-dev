@@ -6,9 +6,18 @@ import aiohttp
 import pytest
 
 from bridge.config import load_config
-from bridge.server import HUB, create_app, load_or_create_pair_code
+from bridge.server import HUB, create_app, is_cancelled, load_or_create_pair_code
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_phrase_ending_with_cancel_word_is_dropped():
+    assert is_cancelled("добавь куб отмена")
+    assert is_cancelled("добавь куб, Отмена.")
+    assert is_cancelled("отмена")
+    assert not is_cancelled("отмена добавь куб")
+    assert not is_cancelled("добавь куб")
+    assert not is_cancelled("   ")
 
 
 def test_pair_code_is_created_once(tmp_path):

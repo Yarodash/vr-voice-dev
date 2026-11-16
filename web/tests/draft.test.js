@@ -37,6 +37,20 @@ describe('extractStatus', () => {
   });
 });
 
+describe('extractDraft without a bottom rule', () => {
+  it('reads the prompt below a lone top rule up to the cursor', () => {
+    const rows = screen('', RULE, '❯ сделай куб красным', '  и поставь его слева', '', '');
+
+    expect(extractDraft(rows, { cursor: { x: 22, y: 3 } })).toBe('сделай куб красным и поставь его слева');
+  });
+
+  it('does not take a footer under a lone bottom rule for a draft', () => {
+    const rows = screen('', RULE, '  ⏵⏵ auto mode on', '');
+
+    expect(extractDraft(rows, { cursor: { x: 0, y: 0 } })).toBe('');
+  });
+});
+
 describe('extractDraft', () => {
   const at = (x, y) => ({ cursor: { x, y } });
 

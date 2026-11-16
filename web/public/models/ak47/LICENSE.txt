@@ -1,0 +1,8 @@
+ak47.glb — "High-poly AK-47" by Lamoot
+Source: https://opengameart.org/content/high-poly-ak-47 (file highpoly_ak47.obj)
+License: CC0 1.0 Universal (public domain dedication) — https://creativecommons.org/publicdomain/zero/1.0/
+
+Converted with scripts/build-ak47-model.mjs: split into wood / steel / trigger meshes, scaled to
+metres (overall length 0.88 m), oriented to the scene's weapon axes (barrel −Z, up +Y, pistol grip
+at (0, −0.04, 0.045)), creased normals, planar UVs on the wood parts, plus a prebuilt outline mesh.
+No textures are embedded; the wood uses web/public/textures/wood (Poly Haven "rough_wood", CC0).

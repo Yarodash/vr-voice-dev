@@ -221,7 +221,8 @@ export async function createTerminalPanel({ cols, rows, renderer, domParent }) {
       markDirty();
     },
     tick(nowMs) {
-      if (!dirty || nowMs - paintedAt < REPAINT_MS) return;
+      // hidden (the usual case): nothing to draw; it stays dirty and is painted once shown again
+      if (!dirty || !mesh.visible || nowMs - paintedAt < REPAINT_MS) return;
       dirty = false;
       paintedAt = nowMs;
       paint();

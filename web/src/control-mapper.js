@@ -1,20 +1,25 @@
 // Left Touch controller (xr-standard gamepad) -> actions.
-//   Y (hold)            record: 'record-start' on press, 'record-stop' on release
-//   X                   'send'
-//   grip                'delete'
-//   stick click, 1 s    'reload'
-// The trigger is not here: it clicks on-screen buttons through WebXR select events.
+//   Y   pressed:                          'record-start' at once (the voice recording begins without waiting)
+//       let go after a long press (>= TAP_MS):  'record-stop'
+//       let go after a short press (< TAP_MS):  'record-cancel' (the recording is thrown away) and
+//                                         'wheel-toggle' (the radial menu opens, or closes if open)
+//       three quick presses (within 1 s):  'reload' (the first two were taps: the menu opened and closed)
+//   grip                  'grip': "back" in the radial menu while it is open (the scene uses the
+//                         grip to grab things the rest of the time, and leaves it alone then)
+// X, "=" and Z (the stick click) are free. The trigger is not here: it clicks on-screen buttons
+// through WebXR select events (and confirms a sector in the radial menu). A phrase is thrown
+// away by ending it with "отмена".
+const TAP_MS = 300; // a press of Y shorter than this is a tap: the menu, not a recording
+const TRIPLE_PRESS_MS = 1000; // the three presses of Y must fit into this time (from the first)
 const GRIP = 1;
-const STICK_CLICK = 3;
-const X = 4;
 const Y = 5;
 
 export class ControlMapper {
-  constructor({ holdMs = 1000 } = {}) {
-    this.holdMs = holdMs;
+  constructor() {
     this.previous = [];
-    this.clickStartedAt = null;
-    this.clickFired = false;
+    this.yPressedAt = null;
+    this.yPresses = [];
+    this.yIsReload = false; // the press that completed three: its release does nothing
   }
 
   step(nowMs, { buttons }) {
@@ -23,23 +28,30 @@ export class ControlMapper {
     const rising = (index) => pressed(index) && !this.previous[index];
     const falling = (index) => !pressed(index) && Boolean(this.previous[index]);
 
-    if (rising(Y)) actions.push('record-start');
-    if (falling(Y)) actions.push('record-stop');
-    if (rising(X)) actions.push('send');
-    if (rising(GRIP)) actions.push('delete');
-
-    if (pressed(STICK_CLICK)) {
-      if (rising(STICK_CLICK)) {
-        this.clickStartedAt = nowMs;
-        this.clickFired = false;
-      }
-      if (!this.clickFired && this.clickStartedAt !== null && nowMs - this.clickStartedAt >= this.holdMs) {
+    if (rising(Y)) {
+      this.yPresses = this.yPresses.filter((at) => nowMs - at <= TRIPLE_PRESS_MS);
+      this.yPresses.push(nowMs);
+      if (this.yPresses.length >= 3) {
+        this.yPresses = [];
+        this.yIsReload = true;
         actions.push('reload');
-        this.clickFired = true;
+      } else {
+        this.yPressedAt = nowMs;
+        actions.push('record-start');
       }
-    } else {
-      this.clickStartedAt = null;
     }
+    if (falling(Y)) {
+      if (this.yIsReload) {
+        this.yIsReload = false;
+      } else {
+        const heldMs = this.yPressedAt === null ? Infinity : nowMs - this.yPressedAt;
+        if (heldMs < TAP_MS) actions.push('record-cancel', 'wheel-toggle');
+        else actions.push('record-stop');
+      }
+      this.yPressedAt = null;
+    }
+
+    if (rising(GRIP)) actions.push('grip');
 
     this.previous = [...buttons];
     return actions;

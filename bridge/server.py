@@ -153,6 +153,17 @@ class _PendingEval:
 HUB = web.AppKey("hub", Hub)
 
 
+CANCEL_WORD = "отмена"
+
+
+def is_cancelled(text: str) -> bool:
+    # The user ends a dictated phrase with the word "отмена" to throw the whole phrase away.
+    words = text.lower().replace("ё", "е").split()
+    if not words:
+        return False
+    return words[-1].strip(" .,!?;:…-—\"'«»") == CANCEL_WORD
+
+
 def create_app(cfg, pty, dictation, status_path: Path, pair_code: str, console_log: Path,
                files_dir: Path, inbox_log: Path) -> web.Application:
     hub = Hub()
@@ -247,8 +258,11 @@ def create_app(cfg, pty, dictation, status_path: Path, pair_code: str, console_l
         elif kind == "send":
             text = message.get("text")
             if isinstance(text, str) and text.strip():
-                queue_prompt(text)
-                pty.write(KEYS["clear"])  # the words are on their way: empty the hidden prompt
+                if is_cancelled(text):  # "... отмена": the phrase is dropped, nothing is sent
+                    await ws.send_json({"t": "cancelled"})
+                else:
+                    queue_prompt(text)
+                pty.write(KEYS["clear"])  # the words are on their way (or dropped): empty the hidden prompt
         elif kind == "read":
             unread.pop(message.get("id"), None)
         elif kind == "eval-result":

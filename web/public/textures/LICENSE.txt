@@ -1,0 +1,4 @@
+Textures from Poly Haven (https://polyhaven.com), licence CC0 1.0 (public domain).
+
+wood/rough_wood_*_1k.jpg         "Rough Wood" by Rob Tuytel       https://polyhaven.com/a/rough_wood
+metal/blue_metal_plate_*_1k.jpg  "Blue Metal Plate" (Poly Haven)  https://polyhaven.com/a/blue_metal_plate

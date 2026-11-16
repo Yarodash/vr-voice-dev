@@ -23,12 +23,18 @@ function isRule(cells) {
 
 // Rows of the prompt box: [top, bottom] rule indexes, or null when it is not on screen.
 function promptBox(rows) {
-  let bottom = -1;
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (!isRule(rows[i])) continue;
-    if (bottom < 0) bottom = i;
-    else return [i, bottom];
-  }
+  const rules = [];
+  rows.forEach((cells, index) => {
+    if (isRule(cells)) rules.push(index);
+  });
+  if (!rules.length) return null;
+  const last = rules[rules.length - 1];
+  // The last rule has the prompt line right under it: it is the top of the box. The bottom rule
+  // was not repainted, so the prompt runs to the end. (Older rules higher up are leftovers of
+  // earlier screens that must not be taken for the top of the box.)
+  if (/^\s*[>❯]/.test(textOf(rows[last + 1] ?? []))) return [last, rows.length];
+  // Otherwise the last two rules are the top and the bottom of the box.
+  if (rules.length >= 2) return [rules[rules.length - 2], last];
   return null;
 }
 

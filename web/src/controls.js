@@ -6,8 +6,12 @@ import { ControlMapper } from './control-mapper.js';
 const isLeftPad = (source) => Boolean(source && source.handedness === 'left' && source.gamepad && !source.hand);
 
 // hitTest(): the action of the on-screen button the controller points at right now, or null.
-export function createControls({ renderer, scene, onPtt, onAction, hitTest = () => null }) {
-  const mapper = new ControlMapper();
+// onStick(x, y): the thumbstick every frame (right and down are positive).
+// getMapper(): the button map the scene has set, or null: then the built-in one is used.
+export function createControls({
+  renderer, scene, onPtt, onAction, onStick = () => {}, getMapper = () => null, hitTest = () => null,
+}) {
+  const builtInMapper = new ControlMapper();
   let holding = false;
   let leftGrip = null;
   let leftController = null;
@@ -25,8 +29,8 @@ export function createControls({ renderer, scene, onPtt, onAction, hitTest = () 
     }
   };
   const click = () => {
-    const action = hitTest();
-    if (action) onAction(action);
+    // the ray is on a button of a window: press it; otherwise it is a plain trigger press
+    onAction(hitTest() ?? 'trigger');
   };
 
   // three.js fills controller slots in connection order, not by hand, so listen on both.
@@ -78,11 +82,15 @@ export function createControls({ renderer, scene, onPtt, onAction, hitTest = () 
           buttons: source.gamepad.buttons.map((button) => button.pressed),
           axes: [...source.gamepad.axes],
         };
-        for (const action of mapper.step(nowMs, state)) {
+        for (const action of (getMapper() ?? builtInMapper).step(nowMs, state)) {
           if (action === 'record-start') press();
           else if (action === 'record-stop') release();
-          else onAction(action);
+          else if (action === 'record-cancel') {
+            release(); // a short press: the recording stops like any other, then the page throws it away
+            onAction(action);
+          } else onAction(action);
         }
+        onStick(state.axes[2] ?? 0, state.axes[3] ?? 0);
       }
     },
   };

@@ -74,14 +74,14 @@ describe('createControls', () => {
     expect(t.ptt).toEqual([]);
   });
 
-  it('X and the grip are passed on as actions', () => {
+  it('X and the grip are not actions', () => {
     const t = setup();
 
     t.frame([4]);
     t.frame([]);
     t.frame([1]);
 
-    expect(t.actions).toEqual(['send', 'delete']);
+    expect(t.actions).toEqual([]);
     expect(t.ptt).toEqual([]);
   });
 
