@@ -19,12 +19,14 @@
 const LIST_KEY = 'scene.compositions';
 const ACTIVE_KEY = 'scene.active';
 
-export const RANGE_FEATURES = { targets: true, spawn: true, xPlate: true, score: true, car: false, robodog: true }; // тир («Сцена 1»)
-// car — машина (car.js), её положение в data.car / live.car; robodog — робопёс (robodog.js), в
-// снимке только { alive } (data.robodog / live.robodog)
-export const EMPTY_FEATURES = { targets: false, spawn: false, xPlate: false, score: false, car: false, robodog: false }; // пустое поле
-// у сохранённых до появления счёта сцен флага score нет: счёт есть там, где мишени
-const features = (saved) => ({ ...EMPTY_FEATURES, score: Boolean(saved?.targets), ...saved });
+export const RANGE_FEATURES = { targets: true, spawn: true, xPlate: true, score: false, car: false, robodog: false, robodogHorde: false }; // тир («Сцена 1»)
+// car — машина (car.js), её положение в data.car / live.car; robodog — робопёс-одиночка
+// (robodog.js), в снимке только { alive } (data.robodog / live.robodog); robodogHorde — стая
+// робопсов бежит на игрока (robodog-horde.js, «Сцена 3»), в снимке ничего
+export const EMPTY_FEATURES = { targets: false, spawn: false, xPlate: false, score: false, car: false, robodog: false, robodogHorde: false }; // пустое поле
+// Счёт выключен везде (пользователь убрал его из всех сцен): score.js остался, чтобы вернуть —
+// убрать «score: false» отсюда и включить флаг сценам.
+const features = (saved) => ({ ...EMPTY_FEATURES, ...saved, score: false });
 
 export function loadCompositions() {
   try {
@@ -109,19 +111,27 @@ export function migrateCarScene() {
   }
 }
 
-// разовый перенос: «Сцена 1» (тир) получает робопса
-export function migrateRobodogScene() {
-  const KEY = 'scene.robodogMigrated';
+// Разовый перенос: счёт выключен во всех сценах, у «Сцены 1» робопса больше нет, и появляется
+// «Сцена 3» — пустое поле со стаей робопсов (без мишеней, оружие спавнится, X — тарелка).
+// Возвращает true, если список сцен поменялся (активную сцену надо перечитать).
+export const HORDE_FEATURES = { ...EMPTY_FEATURES, spawn: true, xPlate: true, robodogHorde: true };
+export function migrateHordeScenes() {
+  const KEY = 'scene.hordeMigrated';
   try {
     if (localStorage.getItem(KEY)) return false;
     const list = loadCompositions();
-    const entry = list.find((e) => e.name === 'Сцена 1');
-    if (entry) {
-      entry.features = { ...entry.features, robodog: true };
-      saveCompositions(list);
+    for (const entry of list) {
+      entry.features = { ...entry.features, score: false };
+      if (entry.name === 'Сцена 1') entry.features.robodog = false;
     }
+    if (!list.some((e) => e.features?.robodogHorde)) {
+      const empty = { version: 1, weapons: [], clays: [], targets: null, score: null };
+      const name = list.some((e) => e.name === 'Сцена 3') ? nextName(list) : 'Сцена 3';
+      list.push({ name, savedAt: new Date().toISOString(), features: { ...HORDE_FEATURES }, data: empty, live: empty });
+    }
+    saveCompositions(list);
     localStorage.setItem(KEY, '1');
-    return Boolean(entry);
+    return true;
   } catch {
     return false;
   }
@@ -165,5 +175,5 @@ export function snapshot({ pistols, clays, shooting, score, car, robodog }) {
 // своих стойках, без дырок, тарелок нет, счёт 0, робопёс жив (появится заново перед игроком).
 export function freshOf(data) {
   const targets = data?.targets?.stands ? { layout: data.targets.layout, stands: data.targets.stands } : data?.targets ? {} : null;
-  return { version: 1, weapons: data?.weapons ?? [], clays: [], targets, score: { score: 0, streak: 0 }, ...(data?.car ? { car: data.car } : {}) };
+  return { version: 1, weapons: [] /* рестарт: без оружия — его спавнят из меню */, clays: [], targets, score: { score: 0, streak: 0 }, ...(data?.car ? { car: data.car } : {}) };
 }

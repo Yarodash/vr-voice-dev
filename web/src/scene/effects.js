@@ -2,11 +2,13 @@
 // Живёт в сцене: правки подхватываются на лету. Дым — smoke.js (один вызов отрисовки на весь дым).
 import { createSmoke } from './smoke.js';
 import { createTracers } from './tracer.js';
+import { createImpacts } from './impact.js';
 
 export function createEffects({ THREE, group }) {
   const particles = [];
   const smoke = createSmoke({ THREE, group });
   const tracers = createTracers({ THREE, group });
+  const impacts = createImpacts({ THREE, group });
   const up = new THREE.Vector3(0, 1, 0);
 
   // Один источник света на всё время: если добавлять и убирать свет при каждом выстреле, three.js
@@ -47,7 +49,7 @@ export function createEffects({ THREE, group }) {
     particles.push({
       mesh,
       material,
-      born: performance.now(),
+      born: globalThis.__sceneState?.sceneNowMs ?? performance.now(), // сценовые часы (замедление времени)
       life: options.life,
       velocity: options.velocity ?? new THREE.Vector3(),
       gravity: options.gravity ?? 0,
@@ -97,7 +99,7 @@ export function createEffects({ THREE, group }) {
       // отблеск света на руке и сцене
       flashLight.position.copy(position);
       flashPower = 7;
-      flashUntil = performance.now() + 70;
+      flashUntil = (globalThis.__sceneState?.sceneNowMs ?? performance.now()) + 70;
       flashLight.intensity = flashPower;
     },
 
@@ -106,37 +108,15 @@ export function createEffects({ THREE, group }) {
       smoke.setMuzzle(position);
     },
 
-    // гильза вылетает вправо и вверх, вертится и падает
+    // дымок из окна выброса; сама гильза — casings.js (вылетает, когда затвор отошёл назад)
     eject(position, right, up_) {
       smoke.eject(position, right, up_);
-      const v = right.clone().multiplyScalar(random(1.4, 2.2)).addScaledVector(up_, random(1.2, 2)).add(new THREE.Vector3(0, 0, random(0.2, 0.6)));
-      spawn(casingGeometry, { color: 0xd9a441 }, position, {
-        life: 1100,
-        velocity: v,
-        gravity: 9.8,
-        scale0: 1,
-        scale1: 1,
-        spin: new THREE.Vector3(random(-18, 18), random(-18, 18), random(-18, 18)),
-        fadePower: 8, // почти не тает до самого конца
-      });
     },
 
-    // искры, вспышка и пыль в точке попадания; normal — наружу от мишени
+    // попадание в сталь: звёздочка-вспышка, веер искр, тлеющая точка (impact.js) и пыль краски (smoke.js);
+    // normal — наружу от мишени
     impact(point, normal) {
-      spawn(sphere, { color: 0xffffff, additive: true }, point, { life: 70, scale0: 0.05, scale1: 0.005 });
-      spawn(sphere, { color: 0xffa24a, additive: true, opacity: 0.7 }, point, { life: 130, scale0: 0.03, scale1: 0.12 });
-      for (let i = 0; i < 16; i += 1) {
-        const v = scatter(normal, 0.8).multiplyScalar(random(1.5, 6));
-        const q = new THREE.Quaternion().setFromUnitVectors(up, v.clone().normalize());
-        spawn(unitBox, { color: i % 3 ? 0xffd27a : 0xffffff, additive: true }, point, {
-          life: random(220, 520),
-          velocity: v,
-          gravity: 7,
-          quaternion: q,
-          scale0: new THREE.Vector3(0.003, 0.028, 0.003),
-          scale1: new THREE.Vector3(0.0015, 0.008, 0.0015),
-        });
-      }
+      impacts.hit(point, normal);
       smoke.impact(point, normal);
     },
 
@@ -156,7 +136,8 @@ export function createEffects({ THREE, group }) {
     update(dt) {
       smoke.update(dt);
       tracers.update(dt);
-      const now = performance.now();
+      impacts.update(dt);
+      const now = globalThis.__sceneState?.sceneNowMs ?? performance.now();
       if (flashUntil) {
         const left = (flashUntil - now) / 70;
         flashLight.intensity = left > 0 ? flashPower * left : 0;
@@ -192,6 +173,7 @@ export function createEffects({ THREE, group }) {
       particles.length = 0;
       smoke.dispose();
       tracers.dispose();
+      impacts.dispose();
       group.remove(flashLight);
       flashLight.dispose?.();
       for (const geometry of [sphere, cone, unitBox, casingGeometry]) geometry.dispose();

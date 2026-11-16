@@ -83,7 +83,13 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
 - New shootable thing: either add its mesh to `rayObjects` in shooting.js, or register a
   `cast/hit` handler with `shooting.addShootable` (pattern: `robodog.js`). `aim()` also casts
   shootables (laser stops on them; clays are still not aimed at).
-- Robodog enemy (feature `robodog`, on in «Сцена 1»): `robodog.js` (+ `robodog-model/gait/ai/
-  ragdoll/fx.js`, sound `zap`/`powerDown`), 5 hits to kill, kill = `score.bonus(500)` from main.js,
-  corpse hits return `null`. Debug: `__sceneState.robodog.debug.info()`.
-- Score rules: `score.js` only.
+- Robot dogs: one dog = `robodog-unit.js` (model `robodog-model.js`, gait/IK `robodog-gait.js`,
+  ragdoll `robodog-ragdoll.js`, cast/hit, death); shared sparks/arcs `robodog-fx.js` (1 draw call);
+  sounds `robodog-sound.js` (own module on `__sceneState.audioGraph`, voice cap 10: zap, crackle,
+  powerDown, clank, thud, servo). Controllers: `robodog.js` (feature `robodog`, wanderer, brain
+  `robodog-ai.js`, 5 HP) and `robodog-horde.js` (feature `robodogHorde`, «Сцена 3»: pool of 5
+  models = 55 draw calls max, ≤3 alive, 2 HP, leap at the chest → red vignette on the camera +
+  `onPlayerHit` haptic in main.js; corpses sink after 8 s). Corpse hits return `null`. All
+  gameplay timers run on `dt` (slow-mo safe). Debug: `__sceneState.robodog.debug.info()`,
+  `__sceneState.horde.debug.info()`.
+- Score is off in every scene (compositions.js); `score.js` (+ `bonus(points)`) kept for later.

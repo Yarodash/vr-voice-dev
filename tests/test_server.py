@@ -6,6 +6,7 @@ import aiohttp
 import pytest
 
 from bridge.config import load_config
+from bridge.config_agent import is_config_phrase
 from bridge.server import HUB, create_app, is_cancelled, load_or_create_pair_code
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +19,15 @@ def test_phrase_ending_with_cancel_word_is_dropped():
     assert not is_cancelled("отмена добавь куб")
     assert not is_cancelled("добавь куб")
     assert not is_cancelled("   ")
+
+
+def test_phrase_starting_with_config_word_goes_to_the_config_agent():
+    assert is_config_phrase("Конфиг: собаки быстрее")
+    assert is_config_phrase("  «конфик дым гуще")
+    assert is_config_phrase("Config smoke")
+    assert not is_config_phrase("добавь конфиг")
+    assert not is_config_phrase("конфигурируй меню")
+    assert not is_config_phrase("   ")
 
 
 def test_pair_code_is_created_once(tmp_path):

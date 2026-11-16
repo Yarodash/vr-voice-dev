@@ -29,53 +29,27 @@ export function createShooting({ THREE, root, camera }) {
   const RANGE = 60; // дальше самого дальнего ряда (38 м)
   raycaster.far = RANGE;
 
-  // ---- Следы от пуль на мишенях: тёмная дырка с опалённым краем. Они крепятся к мишени (качаются
-  // вместе с ней) и переживают подмену сцены; на каждой мишени не больше MAX_DECALS последних.
-  const MAX_DECALS = 40;
-  const decalCanvas = document.createElement("canvas");
-  decalCanvas.width = decalCanvas.height = 64;
-  const dg = decalCanvas.getContext("2d");
-  const burn = dg.createRadialGradient(32, 32, 0, 32, 32, 31);
-  burn.addColorStop(0, "rgba(8,8,8,1)");
-  burn.addColorStop(0.28, "rgba(12,10,9,1)");
-  burn.addColorStop(0.42, "rgba(45,38,34,0.85)");
-  burn.addColorStop(0.7, "rgba(60,52,46,0.35)");
-  burn.addColorStop(1, "rgba(60,52,46,0)");
-  dg.fillStyle = burn;
-  dg.fillRect(0, 0, 64, 64);
-  const decalTexture = new THREE.CanvasTexture(decalCanvas);
-  decalTexture.colorSpace = THREE.SRGBColorSpace;
-  const decalGeometry = new THREE.CircleGeometry(0.016, 18);
-  const decalMaterial = new THREE.MeshBasicMaterial({ map: decalTexture, transparent: true, depthWrite: false });
+  // ---- Пробоины в мишенях: сквозные дырки с рваным краем рисует шейдер мишени (targets.js setHoles).
+  // Список следов переживает подмену сцены и сохраняется в сценах; на мишени не больше MAX_DECALS
+  // последних. След: [x, y, z, поворот, размер] в системе мишени.
+  const MAX_DECALS = 120; // столько же, сколько MAX_HOLES в targets.js
   if (shared.targetDecals?.length !== targets.length) shared.targetDecals = targets.map(() => []);
-  const decalsOf = shared.targetDecals; // [x, y, z, поворот, размер] в системе мишени
-  const placeDecal = (target, [x, y, z, turn, size]) => {
-    const decal = new THREE.Mesh(decalGeometry, decalMaterial);
-    decal.position.set(x, y, z);
-    decal.rotation.z = turn;
-    decal.scale.setScalar(size);
-    decal.renderOrder = 1;
-    target.add(decal);
-    (target.userData.decals ??= []).push(decal);
-  };
-  targets.forEach((target, index) => (decalsOf[index] ?? []).forEach((saved) => placeDecal(target, saved)));
+  const decalsOf = shared.targetDecals;
+  const syncHoles = (index) => targetSet.setHoles(index, decalsOf[index]);
+  targets.forEach((_, index) => syncHoles(index));
   const addDecal = (target, worldPoint) => {
     const local = target.worldToLocal(worldPoint.clone());
-    const saved = [local.x, local.y, local.z + 0.0015, Math.random() * Math.PI * 2, 0.8 + Math.random() * 0.5];
-    placeDecal(target, saved);
-    const list = decalsOf[targets.indexOf(target)];
-    list.push(saved);
-    if (list.length > MAX_DECALS) {
-      list.shift();
-      target.remove(target.userData.decals.shift());
-    }
+    const index = targets.indexOf(target);
+    const list = decalsOf[index];
+    list.push([local.x, local.y, local.z + 0.0015, Math.random() * Math.PI * 2, 0.8 + Math.random() * 0.5]);
+    if (list.length > MAX_DECALS) list.shift();
+    syncHoles(index);
   };
 
   const clearDecals = () =>
-    targets.forEach((target, index) => {
-      for (const decal of target.userData.decals ?? []) target.remove(decal);
-      target.userData.decals = [];
+    targets.forEach((_, index) => {
       decalsOf[index] = [];
+      syncHoles(index);
     });
 
   // Где стоят стойки: [{ x, z, yaw, near }] — переживает подмену сцены.
@@ -164,6 +138,14 @@ export function createShooting({ THREE, root, camera }) {
       return { layout: TARGET_LAYOUT, stands: spots, bodies: targetSet.getBodies(), decals: decalsOf };
     },
     // state: как из getTargets(); {} — мишени заново перед игроком; null — мишеней нет
+    // «Зареспавнить мишени»: все мишени снова на своих стойках (на тех же местах), пробоины стёрты
+    respawnTargets() {
+      if (!Array.isArray(spots) || spots.length !== targets.length) return placeInFront(false);
+      targetSet.place(spots, { resetFallen: true });
+      clearDecals();
+      targets.forEach((_, index) => syncHoles(index));
+      saveTargets();
+    },
     setTargets(state) {
       if (!state) {
         setEnabled(false);
@@ -177,10 +159,8 @@ export function createShooting({ THREE, root, camera }) {
         clearDecals();
         (state.decals ?? []).forEach((list, index) => {
           if (!targets[index] || !Array.isArray(list)) return;
-          for (const saved of list.slice(-MAX_DECALS)) {
-            placeDecal(targets[index], saved);
-            decalsOf[index].push(saved);
-          }
+          decalsOf[index].push(...list.slice(-MAX_DECALS));
+          syncHoles(index);
         });
         saveTargets();
       } else placeInFront(false);
@@ -188,20 +168,23 @@ export function createShooting({ THREE, root, camera }) {
     },
     // Прицел (каждый кадр): тот же луч, что у shoot(); мишень, в которую попадёт выстрел, получает
     // белый контур. aim(null) — оружия в руке нет.
-    aim(muzzle, direction) {
+    // range — дальность оружия (дальнобойное — больше; по умолчанию RANGE)
+    aim(muzzle, direction, range = RANGE) {
       effects.setMuzzle(muzzle); // струйка дыма идёт от дула, где бы оно ни было
       let target = null;
       let point = null;
       if (muzzle) {
         raycaster.set(muzzle, direction);
+        raycaster.far = range;
         aimHits.length = 0;
         raycaster.intersectObjects(rayObjects, false, aimHits);
+        raycaster.far = RANGE;
         const hit = aimHits[0];
         if (hit?.object === targetSet.plateMesh) target = targets[hit.instanceId];
         if (hit) point = hit.point; // для лазерного прицела (laser.js); объект из raycaster, не копия
         // другая цель (робопёс) ближе — лазер упирается в неё (тарелки — как раньше, насквозь)
         if (shootables.length) {
-          const d = castExtra(muzzle, direction, hit ? hit.distance : RANGE, false);
+          const d = castExtra(muzzle, direction, hit ? hit.distance : range, false);
           if (d >= 0) {
             target = null;
             point = aimPoint.copy(muzzle).addScaledVector(direction, d);
@@ -213,12 +196,16 @@ export function createShooting({ THREE, root, camera }) {
     },
     // muzzle, direction: мировые координаты дула и направления ствола; ejector, right, up — где
     // вылетает гильза (мировые координаты). Возвращает true при попадании.
-    shoot(muzzle, direction, { ejector, right, up } = {}) {
+    // range — дальность пули (по умолчанию RANGE; дальнобойному оружию — больше)
+    // big — крупный калибр: вторая вспышка с дымом чуть впереди дула
+    shoot(muzzle, direction, { ejector, right, up, range = RANGE, big = false } = {}) {
       raycaster.set(muzzle, direction);
+      raycaster.far = range;
       // все мишени (и стоящие, и лежащие) и стойки; в стойку — пуля просто останавливается
       const hits = raycaster.intersectObjects(rayObjects, false);
+      raycaster.far = RANGE;
       let target = null;
-      let end = muzzle.clone().addScaledVector(direction, RANGE);
+      let end = muzzle.clone().addScaledVector(direction, range);
       if (hits.length) {
         const hit = hits[0];
         end = hit.point.clone();
@@ -229,7 +216,7 @@ export function createShooting({ THREE, root, camera }) {
       }
       // глиняная тарелка (clays.js) или другая цель (робопёс) ближе мишени — пуля попадает в неё и
       // дальше не летит
-      const far = hits.length ? hits[0].distance : RANGE;
+      const far = hits.length ? hits[0].distance : range;
       const extraDistance = castExtra(muzzle, direction, far, true);
       const extra = extraHit;
       for (let i = 0; i < shootables.length; i += 1) shootables[i].shot?.(muzzle, direction, extraDistance >= 0 ? extraDistance : far);
@@ -246,6 +233,7 @@ export function createShooting({ THREE, root, camera }) {
       }
 
       effects.muzzleFlash(muzzle, direction);
+      if (big) effects.muzzleFlash(muzzle.clone().addScaledVector(direction, 0.07), direction);
       effects.tracer(muzzle, end);
       if (ejector && right && up) effects.eject(ejector, right, up);
       sound.shot({ position: muzzle });
@@ -312,9 +300,6 @@ export function createShooting({ THREE, root, camera }) {
       saveTargets();
       effects.dispose();
       targetSet.dispose();
-      decalGeometry.dispose();
-      decalMaterial.dispose();
-      decalTexture.dispose();
     },
   });
   return api;

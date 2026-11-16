@@ -28,9 +28,8 @@ const ROWS = [
   // зазорами, поэтому ближние мишени не загораживают дальние
   [5, [-0.36, 0, 0.36]],
   [10, [-0.52, -0.18, 0.18, 0.52]],
-  [17, [-0.27, -0.09, 0.09, 0.27]],
-  [26, [-0.45, -0.135, 0.135, 0.45]],
-  [38, [-0.62, -0.225, 0.225]],
+  // дальние ряды убраны по просьбе пользователя (были 17, 26 и 38 м):
+  // [17, [-0.27, -0.09, 0.09, 0.27]], [26, [-0.45, -0.135, 0.135, 0.45]], [38, [-0.62, -0.225, 0.225]],
 ];
 export const TARGET_LAYOUT = JSON.stringify(ROWS); // поменялась расстановка — мишени встают заново
 export const TARGET_COUNT = ROWS.reduce((sum, [, angles]) => sum + angles.length, 0);
@@ -41,7 +40,9 @@ const BACK_Z = -0.015; // толщина мишени: диски от BACK_Z д
 const FRONT_Z = 0.031;
 const POST_TOP = 1.05; // верх столба
 const CLEAT_H = 0.04; // брусок-упор на столбе
-const PLATE_Y = POST_TOP + CLEAT_H + R; // центр мишени над землёй (~1.39 м)
+const PLATE_Y = POST_TOP + CLEAT_H + R;
+const MAX_HOLES = 120; // пробоин на мишени (старые уходят); было 40
+const HOLE_R = 0.019; // радиус пробоины, м (было 0.0075 — пользователю мало видно) (умножается на размер следа 0.8…1.3) // центр мишени над землёй (~1.39 м)
 
 const MASS = 3; // кг
 const GRAVITY = 9.81;
@@ -173,6 +174,110 @@ export function createTargets({ THREE, group, shared, camera }) {
     roughness: 1, // по карте
     normalScale: new THREE.Vector2(0.7, 0.7),
   }));
+
+  // ---- пробоины: настоящие сквозные дырки (сквозь них видно небо и траву). Список дырок каждой
+  // мишени — строка маленькой текстуры (x, y в системе мишени, радиус, зерно: знак — с какой стороны
+  // вошла пуля); шейдер мишени выбрасывает пиксели внутри рваного круга, вокруг — ободок: со стороны
+  // входа тёмный след пули, содранная до металла краска и копоть, с выхода — светлый задранный
+  // металл. Текстура обновляется только когда появляется дырка.
+  const holeData = new Float32Array(MAX_HOLES * count * 4);
+  const holeTexture = keep(new THREE.DataTexture(holeData, MAX_HOLES, count, THREE.RGBAFormat, THREE.FloatType));
+  holeTexture.minFilter = holeTexture.magFilter = THREE.NearestFilter;
+  holeTexture.generateMipmaps = false;
+  holeTexture.needsUpdate = true;
+  plateMaterial.customProgramCacheKey = () => `target-holes-2-${MAX_HOLES}`; // номер поднимать при правке шейдера
+  plateMaterial.onBeforeCompile = (shader) => {
+    shader.uniforms.targetHoles = { value: holeTexture };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        flat varying float vHoleRow;
+        varying vec3 vPlatePos;`)
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vPlatePos = position;
+        #ifdef USE_INSTANCING
+          vHoleRow = float(gl_InstanceID);
+        #else
+          vHoleRow = 0.0;
+        #endif`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform highp sampler2D targetHoles;
+        flat varying float vHoleRow;
+        varying vec3 vPlatePos;`,
+      )
+      .replace(
+        '#include <clipping_planes_fragment>',
+        `#include <clipping_planes_fragment>
+        float holeMetal = 0.0; // содранная краска / задранный металл
+        float holeSoot = 0.0;  // копоть
+        float holeWipe = 0.0;  // тёмный след пули по краю входа
+        {
+          int row = int(vHoleRow + 0.5);
+          bool front = vPlatePos.z > ${((FRONT_Z + BACK_Z) / 2).toFixed(4)};
+          for (int i = 0; i < ${MAX_HOLES}; i++) {
+            vec4 h = texelFetch(targetHoles, ivec2(i, row), 0);
+            if (h.z <= 0.0) break;
+            vec2 d = vPlatePos.xy - h.xy;
+            float dist = length(d);
+            if (dist > h.z * 3.0) continue;
+            float a = atan(d.y, d.x);
+            float seed = abs(h.w);
+            float jag = 1.0 + 0.1 * sin(a * 7.0 + seed) + 0.06 * sin(a * 13.0 + seed * 2.3) + 0.04 * sin(a * 29.0 + seed * 5.1);
+            float rj = h.z * jag;
+            if (dist < rj) discard;
+            float t = (dist - rj) / h.z;
+            bool entry = (h.w > 0.0) == front;
+            if (entry) {
+              holeWipe = max(holeWipe, 1.0 - smoothstep(0.05, 0.25, t));
+              holeMetal = max(holeMetal, 1.0 - smoothstep(0.3, 0.7 + 0.2 * sin(a * 5.0 + seed), t));
+              holeSoot = max(holeSoot, 1.0 - smoothstep(0.3, 1.8, t));
+            } else {
+              holeMetal = max(holeMetal, 1.0 - smoothstep(0.25, 0.75 * jag, t));
+              holeSoot = max(holeSoot, (1.0 - smoothstep(0.5, 1.2, t)) * 0.5);
+            }
+          }
+        }`,
+      )
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+        diffuseColor.rgb *= 1.0 - 0.7 * holeSoot;
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.2, 0.195, 0.19), holeMetal);
+        diffuseColor.rgb *= 1.0 - 0.85 * holeWipe;`,
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+        roughnessFactor = mix(roughnessFactor, 0.4, holeMetal);`,
+      )
+      .replace(
+        '#include <metalnessmap_fragment>',
+        `#include <metalnessmap_fragment>
+        metalnessFactor = mix(metalnessFactor, 0.6, holeMetal);`,
+      );
+  };
+  // Дырки мишени index: список сохранённых следов [x, y, z, поворот, размер] (shooting.js).
+  const setHoles = (index, list) => {
+    if (index < 0 || index >= count) return;
+    const rowStart = index * MAX_HOLES * 4;
+    holeData.fill(0, rowStart, rowStart + MAX_HOLES * 4);
+    const from = Math.max(0, (list?.length ?? 0) - MAX_HOLES);
+    for (let k = from; k < (list?.length ?? 0); k += 1) {
+      const [x, y, z, turn, size] = list[k];
+      const o = rowStart + (k - from) * 4;
+      holeData[o] = x;
+      holeData[o + 1] = y;
+      holeData[o + 2] = HOLE_R * size;
+      holeData[o + 3] = (1 + turn) * (z > (FRONT_Z + BACK_Z) / 2 ? 1 : -1); // знак: вошла спереди
+    }
+    holeTexture.needsUpdate = true;
+  };
+
   const plateMesh = new THREE.InstancedMesh(plateGeometry, plateMaterial, count);
   plateMesh.name = 'target-plates';
   plateMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -554,6 +659,7 @@ export function createTargets({ THREE, group, shared, camera }) {
   const inverse = new THREE.Matrix4();
   return {
     plates,
+    setHoles,
     plateMesh,
     standMesh,
     // spots: [{ x, z, yaw, near }] — где стоят стойки (yaw: куда смотрит лицо мишени, near: тень —

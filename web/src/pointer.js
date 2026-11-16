@@ -4,7 +4,7 @@ import * as THREE from 'three';
 const RAY_LENGTH_M = 3;
 
 // panels: [{ mesh, actionAt(uv) }]
-export function createPointer({ scene, panels }) {
+export function createPointer({ scene, panels, aim = null }) {
   const raycaster = new THREE.Raycaster();
   const origin = new THREE.Vector3();
   const direction = new THREE.Vector3();
@@ -35,7 +35,8 @@ export function createPointer({ scene, panels }) {
       line.visible = false;
       dot.visible = false;
       if (!controller) return;
-      line.visible = true;
+      const hideBeam = Boolean(aim?.hideBeam); // the scene hides the beam while something is held
+      line.visible = !hideBeam;
 
       origin.setFromMatrixPosition(controller.matrixWorld);
       direction.set(0, 0, -1).transformDirection(controller.matrixWorld);
@@ -49,7 +50,7 @@ export function createPointer({ scene, panels }) {
         hover = visible.find((panel) => panel.mesh === hit.object).actionAt(hit.uv);
         dot.position.copy(hit.point);
         dot.material.color.set(hover ? 0x22c55e : 0xffffff);
-        dot.visible = true;
+        dot.visible = !hideBeam;
       }
       const positions = line.geometry.attributes.position;
       positions.setXYZ(0, origin.x, origin.y, origin.z);

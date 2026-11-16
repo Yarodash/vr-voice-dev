@@ -19,11 +19,15 @@ Numbers are rounded to 5 decimals.
 
 Feature flags (only main.js and menu.js read them):
 ```js
-RANGE_FEATURES = { targets: true, spawn: true, xPlate: true, score: true, car: false, robodog: true }
-EMPTY_FEATURES = { targets: false, spawn: false, xPlate: false, score: false, car: false, robodog: false }
+RANGE_FEATURES = { targets: true, spawn: true, xPlate: true, score: false, car: false, robodog: false, robodogHorde: false }
+EMPTY_FEATURES = { ...all false }
 ```
-`robodog` — robot dog enemy (robodog.js); snapshot keeps only `robodog: { alive }`; enabled for
-«Сцена 1» by `migrateRobodogScene()` (`scene.robodogMigrated`).
+`score` is forced off everywhere (the `features()` normalizer sets `score: false`; menu item
+«Сбросить счёт» removed; score.js kept unused). `robodog` — single wandering robot dog (robodog.js,
+on in no scene now; snapshot `robodog: { alive }`). `robodogHorde` — «Сцена 3»: dogs spawn
+25–40 m ahead, run at the player and leap (robodog-horde.js; nothing in the snapshot; Restart/Continue
+= fresh horde). One-time `migrateHordeScenes()` (`scene.hordeMigrated`): score off in all scenes,
+robodog off in «Сцена 1», adds «Сцена 3» (empty world, `HORDE_FEATURES`).
 `targets` — targets exist + `Мишени ▸`; `spawn` — `Заспавнить ▸` and `Хват:`; `xPlate` — X spawns
 a clay; `score` — score plate + `Сбросить счёт` (defaults to `targets` for old saves); `car` — car.
 

@@ -15,7 +15,7 @@
 //   gpu=… — таймеров GPU (EXT_disjoint_timer_query_webgl2) в Quest Browser нет. Запасной замер —
 //   gl.finish раз в GPU_SAMPLE_MS (от начала render до конца работы GPU) — на Quest ненадёжен
 //   (1–46 мс вразнобой) и сам роняет кадр, поэтому выключен (GPU_SAMPLE_MS = 0): тогда gpu=-.
-export const TARGET_HZ = 120;
+export const TARGET_HZ = 90; // шлем умеет только 72/80/90/120: «100» → ближайшее ниже, 90
 const PERF_EVERY_MS = 5000;
 const GPU_SAMPLE_MS = 0; // 0 — не замерять
 

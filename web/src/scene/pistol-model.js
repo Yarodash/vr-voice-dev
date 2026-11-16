@@ -24,29 +24,131 @@ const PORT_F1 = 0.04;
 export function buildPistol(THREE, { outlineM = 0 } = {}) {
   const group = new THREE.Group();
 
-  // Карты окружения в сцене нет, поэтому металл не делаем «зеркальным» — иначе он уходит в чёрное.
-  const slideMat = new THREE.MeshStandardMaterial({ color: 0x4a5058, roughness: 0.38, metalness: 0.6 });
-  const polymerMat = new THREE.MeshStandardMaterial({ color: 0x33363b, roughness: 0.78, metalness: 0.0 });
-  const gripMat = new THREE.MeshStandardMaterial({ color: 0x2c2f33, roughness: 1.0, metalness: 0.0 });
-  const grooveMat = new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.6, metalness: 0.4 });
+  // Окружение (weapon-env.js) только у металла оружия: без него металл уходит в чёрное.
+  const env = globalThis.__sceneState?.weaponEnv ?? null;
+  const shared = (globalThis.__sceneState ??= {});
+  const noiseTex = (size, dots, light, dark, bumpOnly = false) => {
+    // мелкое зерно: tile 2 см, повторяется по UV (planar, см. boxUv)
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d');
+    g.fillStyle = bumpOnly ? '#808080' : '#a0a0a0';
+    g.fillRect(0, 0, size, size);
+    for (let i = 0; i < dots; i++) {
+      const v = Math.random();
+      g.fillStyle = v < 0.5 ? dark : light;
+      const r = 0.6 + Math.random() * 0.9;
+      g.beginPath();
+      g.arc(Math.random() * size, Math.random() * size, r, 0, Math.PI * 2);
+      g.fill();
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    return t;
+  };
+  // Текстура затвора: тёмная сталь, продольная шлифовка, потёртые кромки, гравировка из линий. 1024×512, раз и в кэш.
+  const slideTex = () => {
+    const W = 1024, H = 512;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const g = c.getContext('2d');
+    g.fillStyle = '#2c3036';
+    g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 2600; i++) { // шлифовка вдоль ствола (u)
+      const y = Math.random() * H, x = Math.random() * W, l = 30 + Math.random() * 260;
+      g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.045)' : 'rgba(0,0,0,0.10)';
+      g.fillRect(x, y, l, 1);
+    }
+    // потёртости на кромках (бока: v≈0.9 верх боковины, v≈0 низ; торцы u≈0 и u≈1)
+    const wear = (x, y, w, h, n) => {
+      for (let i = 0; i < n; i++) {
+        g.fillStyle = `rgba(150,156,162,${0.15 + Math.random() * 0.35})`;
+        const l = 4 + Math.random() * 26;
+        g.fillRect(x + Math.random() * w, y + Math.random() * h, l, 1 + Math.random() * 2);
+      }
+    };
+    wear(0, H * 0.1, W, 10, 420); wear(0, H * 0.9 - 8, W, 10, 220); wear(0, 0, 14, H, 260); wear(W - 14, 0, 14, H, 260);
+    for (let i = 0; i < 40; i++) { // редкие царапины
+      g.strokeStyle = 'rgba(170,176,182,0.25)';
+      g.lineWidth = 1;
+      const x = Math.random() * W, y = Math.random() * H;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + (Math.random() - 0.5) * 120, y + (Math.random() - 0.5) * 30); g.stroke();
+    }
+    // табличка с гравировкой (только линии, без текста): тёмные штрихи с чуть светлой фаской
+    for (let i = 0; i < 6; i++) {
+      const y = H * (0.42 + i * 0.022), x0 = W * 0.3, x1 = W * (0.52 + (i % 3) * 0.05);
+      g.fillStyle = 'rgba(0,0,0,0.55)'; g.fillRect(x0, y, x1 - x0, 2);
+      g.fillStyle = 'rgba(190,196,202,0.18)'; g.fillRect(x0, y + 2, x1 - x0, 1);
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    return t;
+  };
+  const tex = (shared.pistolTex ??= {
+    gripBump: noiseTex(256, 2600, '#ffffff', '#000000', true), // крупная «шагрень» накладок
+    frameBump: noiseTex(256, 900, '#b0b0b0', '#505050', true), // мелкое зерно рамки
+    steelRough: noiseTex(256, 1500, '#d0d0d0', '#707070'), // разбивает блики на металле
+    slideMap: slideTex(),
+  });
+  const { gripBump, frameBump, steelRough, slideMap } = tex;
+  const slideMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: slideMap, roughness: 0.62, metalness: 0.62, roughnessMap: steelRough, envMap: env, envMapIntensity: 0.4 });
+  const polymerMat = new THREE.MeshStandardMaterial({ color: 0x26282b, roughness: 0.8, metalness: 0.0, bumpMap: frameBump, bumpScale: 0.6 });
+  const gripMat = new THREE.MeshStandardMaterial({ color: 0x26282b, roughness: 0.85, metalness: 0.0, bumpMap: gripBump, bumpScale: 1.6 });
+  const grooveMat = new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.7, metalness: 0.5, envMap: env, envMapIntensity: 0.25 });
   const cutMat = new THREE.MeshStandardMaterial({ color: 0x16181b, roughness: 0.7, metalness: 0.3 });
-  const steelMat = new THREE.MeshStandardMaterial({ color: 0x8c939b, roughness: 0.35, metalness: 0.45 });
+  const steelMat = new THREE.MeshStandardMaterial({ color: 0x7a8088, roughness: 0.58, metalness: 0.65, roughnessMap: steelRough, envMap: env, envMapIntensity: 0.4 });
   const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf2f4f7, roughness: 0.4, metalness: 0, emissive: 0x2a2a2a });
-  // Оранжевый спуск светится, пока пистолет рядом или в руке (см. glow в main.js).
-  const accent = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.45, metalness: 0.1, emissive: 0x000000 });
+  // Спуск (тёмная сталь) чуть светится, пока пистолет рядом или в руке (см. glow в main.js).
+  const accent = new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.55, metalness: 0.6, emissive: 0x000000, envMap: env, envMapIntensity: 0.35 });
 
   // Деталь из геометрии в координатах пистолета: геометрия центрируется, деталь запоминается со своим
   // центром. В конце детали одного материала сливаются в один меш (меньше вызовов отрисовки), а
   // обводка — в одну геометрию из всех деталей, каждая растянута от своего центра.
-  const parts = []; // { geometry (отцентрована), center, material }
+  const parts = []; // { geometry (отцентрована), center, material, trigger }
+  let tag = null; // 'trigger' | 'slide': такие детали уходят в свои подвижные узлы
+  // Плоские UV по доминирующей оси нормали (в координатах пистолета, 1 тайл = 2 см): у выдавленных профилей UV не годятся для зерна.
+  const boxUv = (geometry) => {
+    const g = geometry.index ? geometry.toNonIndexed() : geometry;
+    const p = g.attributes.position;
+    const n = g.attributes.normal;
+    const uv = new Float32Array(p.count * 2);
+    for (let i = 0; i < p.count; i++) {
+      const ax = Math.abs(n.getX(i)), ay = Math.abs(n.getY(i)), az = Math.abs(n.getZ(i));
+      let u, v;
+      if (ax >= ay && ax >= az) { u = p.getZ(i); v = p.getY(i); } else if (ay >= az) { u = p.getX(i); v = p.getZ(i); } else { u = p.getX(i); v = p.getY(i); }
+      uv[i * 2] = u * 50; uv[i * 2 + 1] = v * 50;
+    }
+    g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    if (g !== geometry) geometry.dispose();
+    return g;
+  };
+  // Затвор: вся боковина = одна текстура (u вдоль ствола, v по высоте), сверху — по ширине.
+  const slideUv = (geometry) => {
+    const g = geometry.index ? geometry.toNonIndexed() : geometry;
+    const p = g.attributes.position;
+    const n = g.attributes.normal;
+    const uv = new Float32Array(p.count * 2);
+    for (let i = 0; i < p.count; i++) {
+      const u = (-p.getZ(i) + 0.08) / 0.2;
+      const side = Math.abs(n.getX(i)) >= Math.abs(n.getY(i));
+      uv[i * 2] = u;
+      uv[i * 2 + 1] = side ? (p.getY(i) - 0.002) / 0.036 * 0.8 + 0.1 : p.getX(i) / 0.025 * 0.8 + 0.5;
+    }
+    g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    if (g !== geometry) geometry.dispose();
+    return g;
+  };
   const place = (geometry, material) => {
+    if (material === polymerMat || material === gripMat) geometry = boxUv(geometry);
+    else if (material === slideMat) geometry = slideUv(geometry);
     geometry.computeBoundingBox();
     const center = geometry.boundingBox.getCenter(new THREE.Vector3());
     geometry.translate(-center.x, -center.y, -center.z);
     const indexed = geometry.index ? geometry.toNonIndexed() : geometry;
     if (indexed !== geometry) geometry.dispose();
     indexed.computeBoundingBox();
-    parts.push({ geometry: indexed, center, material });
+    parts.push({ geometry: indexed, center, material, tag });
   };
 
   // Профиль в (f, y) → тело шириной width по X, с фаской bevel по всем рёбрам.
@@ -93,6 +195,7 @@ export function buildPistol(THREE, { outlineM = 0 } = {}) {
     return s;
   };
 
+  tag = 'slide';
   // --- затвор: плоские бока, скошенный «нос» снизу спереди, скруглённые рёбра
   extrudeSide(
     shape([
@@ -150,6 +253,7 @@ export function buildPistol(THREE, { outlineM = 0 } = {}) {
     place(dot, whiteMat);
   }
 
+  tag = null;
   // --- рамка: полоса под затвором с пылезащитной частью спереди
   extrudeSide(
     shape([
@@ -190,6 +294,7 @@ export function buildPistol(THREE, { outlineM = 0 } = {}) {
   }
 
   // спуск: изогнутая пластина (вогнутая спереди) и предохранительная клавиша в ней
+  tag = 'trigger';
   extrudeSide(
     shape([
       [0.0068, -0.0062],
@@ -201,6 +306,7 @@ export function buildPistol(THREE, { outlineM = 0 } = {}) {
     0.0058, 0.0009, accent, 6,
   );
   rbox(0.0016, 0.009, 0.0022, 0.0005, cutMat, 0, -0.0165, 0.0089);
+  tag = null;
 
   // --- рукоятка: строго вертикальная, с бобровым хвостом сверху сзади и раструбом шахты снизу
   // Рукоятка доходит до самого затвора: скруглённые рёбра прячут её верх под затвор без «полки».
@@ -244,14 +350,24 @@ export function buildPistol(THREE, { outlineM = 0 } = {}) {
   rbox(0.0016, 0.0035, 0.017, 0.0006, cutMat, -0.012, 0.0045, -0.012); // затворная задержка слева
   rbox(0.0026, 0.0055, 0.0085, 0.001, cutMat, -0.0145, -0.012, -0.0262); // кнопка магазина слева
 
-  // Детали одного материала — одним мешом.
-  const byMaterial = new Map();
+  // Детали одного материала — одним мешом; спуск и затвор — каждый в своём подвижном узле (pivot).
+  // Спуск: пивот в верхней точке пластины у рамки. Затвор: пивот в начале координат, ходит по +Z.
+  const trigger = { pivot: new THREE.Object3D(), maxAngle: 0.35 }; // ≈20°
+  trigger.pivot.position.set(0, -0.0062, -0.0088);
+  const slide = { pivot: new THREE.Object3D(), travel: 0.023 }; // ход назад, м
+  group.add(trigger.pivot, slide.pivot);
+  const holders = { trigger, slide };
+  const byKey = new Map(); // материал + узел → геометрии
   for (const part of parts) {
-    if (!byMaterial.has(part.material)) byMaterial.set(part.material, []);
-    byMaterial.get(part.material).push(part.geometry.clone().translate(part.center.x, part.center.y, part.center.z));
+    const key = part.material.uuid + (part.tag ?? '');
+    if (!byKey.has(key)) byKey.set(key, { material: part.material, tag: part.tag, geometries: [] });
+    byKey.get(key).geometries.push(part.geometry.clone().translate(part.center.x, part.center.y, part.center.z));
   }
-  for (const [material, geometries] of byMaterial) {
-    group.add(new THREE.Mesh(mergeGeometries(geometries), material));
+  for (const { material, tag: owner, geometries } of byKey.values()) {
+    const merged = mergeGeometries(geometries);
+    const mesh = new THREE.Mesh(merged, material);
+    if (owner === 'trigger') merged.translate(-trigger.pivot.position.x, -trigger.pivot.position.y, -trigger.pivot.position.z);
+    (owner ? holders[owner].pivot : group).add(mesh);
     geometries.forEach((g) => g.dispose());
   }
 
@@ -260,7 +376,7 @@ export function buildPistol(THREE, { outlineM = 0 } = {}) {
   let outlineGeometry = null;
   if (outlineM > 0) {
     const size = new THREE.Vector3();
-    const shells = parts.map(({ geometry, center }) => {
+    const shells = parts.filter((p) => p.tag !== 'trigger').map(({ geometry, center }) => {
       geometry.boundingBox.getSize(size);
       return geometry.clone()
         .scale(
@@ -279,6 +395,8 @@ export function buildPistol(THREE, { outlineM = 0 } = {}) {
     group,
     accent,
     outlineGeometry, // null без outlineM
+    slide, // { pivot, travel }: pivot.position.z = сдвиг затвора назад
+    trigger, // { pivot, maxAngle }: вращение pivot.rotation.x = −значение × maxAngle тянет спуск назад
     muzzle: new THREE.Vector3(0, BORE_Y, -(SLIDE_FRONT + 0.0018)), // откуда вылетает пуля
     ejector: new THREE.Vector3(SLIDE_W / 2 + 0.001, SLIDE_TOP - 0.006, -(PORT_F0 + PORT_F1) / 2), // окно выброса гильзы
   };

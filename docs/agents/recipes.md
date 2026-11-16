@@ -147,7 +147,7 @@ Example kind `'shotgun'`.
 4. `menu.js`: add `{ label: 'Заспавнить дробовик' }` to the `Заспавнить` children; title:
    `heldKind === 'ak' ? 'Калаш' : heldKind === 'shotgun' ? 'Дробовик' : 'Пистолет'`.
 5. Sound (`sound.js`): add files to `web/public/sounds/guns/`, `GUN_FILES.shotgun = [...]`,
-   `shared.gunSamples = { key, pistol: [], ak: [], shotgun: [] }`, map the kind in `setWeapon`
+   `shared.soundBank = { …, pistol: [], ak: [], shotgun: [] }` in `loadBank`, map the kind in `setWeapon`
    and `shot()` (they currently collapse everything that is not `'ak'` to `'pistol'`), bump
    `SOUND_VERSION`.
 
@@ -249,48 +249,29 @@ For a seat that the user can tune later, copy the weapon calibration idea
 
 ## Add a sound
 
-Synth sound in `scene/sound.js` — add a method to the returned object, next to `shatter`:
+Never build a node graph per call (that broke audio under rapid fire, see
+[effects-and-sound.md](effects-and-sound.md#soundjs)). In `scene/sound.js`, synth sounds are
+recipes baked once into buffers and played through pooled voices:
 ```js
-    // Колокольчик в точке position
+// 1. RECIPES: draw into `out` at time t (works in OfflineAudioContext)
+  bell(c, out, t) {
+    tone(c, out, t, { from: 1760, gain: 0.3, decay: 0.8 });
+    tone(c, out, t, { type: 'triangle', from: 2640, gain: 0.12, decay: 0.5 });
+    noise(c, out, t, { seconds: 0.03, type: 'highpass', from: 6000, to: 4000, gain: 0.2, decay: 0.02 });
+  },
+// 2. BAKES: [recipe, variants, seconds]
+  bell: ['bell', 3, 0.85],
+// 3. method on the returned object (pool 'fx' = HRTF, 'small' = equalpower, 'gun' = near field)
     bell(position) {
-      try {
-        const c = ensure();
-        const t = c.currentTime;
-        const dest = c.createGain();
-        dest.gain.value = 0.6;
-        dest.connect(makePanner(c, position, 1.5));
-        tone(c, t, { from: 1760, gain: 0.3, decay: 0.8, send: 0.4, dest });
-        tone(c, t, { type: 'triangle', from: 2640, gain: 0.12, decay: 0.5, send: 0.4, dest });
-        noise(c, t, { seconds: 0.03, type: 'highpass', from: 6000, to: 4000, gain: 0.2, decay: 0.02, send: 0.1, dest });
-      } catch {
-        // без звука
-      }
+      return safe(() => play('fx', pick(shared.soundBank?.fx.bell), { position, gain: 0.6, wet: 0.4 }));
     },
 ```
-Then **bump `SOUND_VERSION`** (17 -> 18) so scene/main.js rebuilds `shared.sound` on the swap.
-Call it: `shared.sound?.bell?.(worldPosition)`. Without a position the sound plays at the
-listener (`makePanner` returns `master`). For your own sound right at the hand use the near
-field like `shot()`: `const near = makeNear(c, position); const dest = near ? near.dest : makePanner(c, position);`.
+Then bump **`BAKE_VERSION`** (rebakes the bank) and **`SOUND_VERSION`**. Call it:
+`shared.sound?.bell?.(worldPosition)`; without a position it plays at the listener.
 
-Sample sound: put `web/public/sounds/<name>.ogg` (record the licence), decode once into
-`shared` with a key, play through a panner:
-```js
-const bellBuffer = () => {
-  const key = 'bell-v1';
-  if (shared.bellSample?.key !== key) {
-    const entry = (shared.bellSample = { key, buffer: null });
-    fetch('/sounds/bell.ogg')
-      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.status))))
-      .then((data) => ensure().decodeAudioData(data))
-      .then((buffer) => { entry.buffer = buffer; })
-      .catch((e) => console.warn('[sound] bell', e?.message ?? e));
-  }
-  return shared.bellSample.buffer;
-};
-// in the method: const buffer = bellBuffer(); if (!buffer) return;  // or synth fallback
-// const src = c.createBufferSource(); src.buffer = buffer; src.connect(makePanner(c, position)); src.start();
-```
-Rate-limit bursts (see `SOUND_BURST` in clays.js).
+Sample sound: put `web/public/sounds/<name>.ogg` (record the licence) and decode it in
+`loadBank` into `bank.fx.<name>` (like the gun files), then `play(...)` it the same way.
+Rate-limit bursts (see `SOUND_BURST` in clays.js); pools also cap and steal the oldest voice.
 
 ## Add an effect
 

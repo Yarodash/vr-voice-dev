@@ -21,6 +21,7 @@ from bridge.claude_pty import (
     transcripts_dir_for,
 )
 from bridge.config import Config, load_config
+# режим «конфиг» выключен по просьбе пользователя: все фразы идут в основную сессию (bridge/config_agent.py оставлен)
 from bridge.dictation import Dictation
 from bridge.server import HUB, create_app, load_or_create_pair_code
 from bridge.virtual_mic import VirtualMicPlayer

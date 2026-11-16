@@ -45,36 +45,46 @@ gradient texture, visible 45 ms after a shot at the shooter's muzzle (`placeFlas
 ## sound.js
 
 ```js
-export const SOUND_VERSION = 17;     // bump when the returned object must be rebuilt
+export const SOUND_VERSION = 20;     // bump when the returned object must be rebuilt
 export const GUN_FILES = { pistol: ['pistolB1', 'pistolB2'], ak: ['ak1', 'ak2', 'ak3'] };
 const sound = createSound();          // lives in __sceneState.sound
 sound.version
-sound.update(camera)                  // listener = head; called every frame from scene/main.js
+sound.update(camera)                  // listener = head + watchdog; called every frame from scene/main.js
 sound.setWeapon('pistol' | 'ak')      // what shot() without kind sounds like
-sound.shot({ kind, position })        // sample (random variant, ±3 % pitch) or synth fallback
-sound.hit(position)                   // metal ping (synth), 3D
-sound.shatter(position)               // clay break (synth), 3D
-sound.previewFile(name) -> Promise<duration|null>   // raw file at the listener (for a sound board; no board file exists now)
+sound.shot({ kind, position })        // sample (random variant, ±3 % pitch) or baked-synth fallback
+sound.hit(position) / shatter(position) / tink(position) / zap(position, strength) / powerDown(position)
+sound.stats()                         // {contextState, pools:{gun,fx,small:{active,fading}}, liveNodes, played, stolen, skipped, resumes, nanResets, …}
+sound.previewFile(name) -> Promise<duration|null>   // raw file at the listener (sound board)
 ```
 Lifecycle: scene/main.js does
 `if (shared.sound?.version !== SOUND_VERSION) shared.sound = createSound();` before
-`createShooting` (shooting.js captures `shared.sound` once). The `AudioContext`, master gain,
-compressor and convolver reverb live in `shared.audioGraph` and are reused across versions (a
-page can create only a few contexts). Samples are decoded once into `shared.gunSamples`, keyed
-by `JSON.stringify(GUN_FILES)`, loaded from `/sounds/guns/<name>.ogg` at creation. The context
-starts suspended and resumes on the first sound (`ensure()`).
+`createShooting` (shooting.js captures `shared.sound` once). `shared.audioGraph` holds the
+`AudioContext`, `master` (engine-sound.js connects here too), `reverbSend`, the output bus
+(`busVersion`) and the voice pools (`poolVersion`); they are reused across `SOUND_VERSION`s and
+rebuilt only when `BUS_VERSION` / `POOL_VERSION` change. `shared.soundBank` = decoded samples +
+baked synth, keyed by `GUN_FILES` + `BAKE_VERSION` + sample rate.
 
-Routing:
-- `makePanner(c, position, refDistance = 1.5, out = master)`: HRTF `PannerNode`, inverse model,
-  rolloff 0.5; returns `master` if no position.
-- `makeNear(c, position)`: within 1.2 m of the head an equal-power stereo path with low-shelf
-  "proximity" boost, crossfading into HRTF by 0.55–1.2 m; quieter, 30 ms delayed reverb send.
-  Used for your own gunshot near the hand.
-- Helpers: `noise(c, t, {seconds, type, from, to, gain, decay, send, dest, reverb})`,
-  `tone(c, t, {type, from, to, gain, decay, send, dest, reverb})`; `playSample(c, kind, dest,
-  reverb)` with max 6 voices.
-- Every public method wraps its body in `try { … } catch {}` — sound must never break a shot.
+Design (rapid fire used to break audio: ~11–24 new nodes + an HRTF panner per sound, never
+disconnected, 2.8 ms main thread per AK shot+hit+tink on Quest, and a compressor that barely
+limited so overlaps hard-clipped):
+- **No per-sound synthesis.** Every synth recipe (`RECIPES`: hit, shatter, tink, zap, powerDown,
+  synth gun fallback, pistol crack/ring) is rendered once into buffers with `OfflineAudioContext`
+  (`BAKES`: several random variants each). Pistol samples get the highshelf + crack baked in.
+- **Voice pools** (`POOLS`): permanent chains built once — `gun` (10 voices, 7 sounding; near-field
+  stereo + HRTF crossfade, near reverb via one shared 30 ms delay), `fx` (10/8, HRTF), `small`
+  (4/3, equalpower, casings). Per sound only `AudioBufferSourceNode` + a gain are created and
+  disconnected in `onended`. Over the cap the oldest voice fades in 20 ms (`steal`) and the new
+  sound takes another free voice.
+- **Output**: master → DynamicsCompressor (−3 dB, knee 3, ratio 12, attack 2 ms, release 100 ms)
+  → trim (cancels Chromium's auto makeup) → WaveShaper soft clip → destination. Measured offline:
+  unity below 0.5, +18 dB of overlap → 0.93; never collapses.
+- **Watchdog** in `update()` every 0.5 s: resume a `suspended`/`interrupted` context; an analyser
+  after the compressor checks for NaN (it would silence the compressor forever) → rebuild bus +
+  pools. All positions/params are `Number.isFinite`-guarded; bad listener matrices are skipped.
+- Every public method is wrapped (`safe`) — sound must never break a shot.
 
-Gotchas: bump `SOUND_VERSION` for any change in `createSound` (otherwise the old object keeps
-playing after the swap); change `GUN_FILES` to reload samples; keep per-burst limits (clays.js
-limits shatter/hit sounds to 6 per 80 ms).
+Gotchas: bump `SOUND_VERSION` for any change in `createSound`; bump `BAKE_VERSION` when a
+recipe changes, `BUS_VERSION` / `POOL_VERSION` when the output or voice chains change. New sound
+= add a recipe + a `BAKES` entry + a method calling `play(pool, pick(bank.fx.name), {...})`; do
+not build node graphs per call. Verify rapid fire with master muted (`audioGraph.master.gain`)
+and `sound.stats()` staying bounded.

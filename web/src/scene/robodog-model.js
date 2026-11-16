@@ -15,6 +15,20 @@ const BLACK = 0x1b1c1f;
 const DARK = 0x3a3d42; // шарниры, стопы
 const RUBBER = 0x111112;
 
+// мягкое тёмное пятно для тени под псом (одна текстура на всех псов)
+export function makeShadowTexture(THREE) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 64;
+  const g = canvas.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(0,0,0,0.55)');
+  grad.addColorStop(0.55, 'rgba(0,0,0,0.3)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(canvas);
+}
+
 export function buildRobodog(THREE) {
   const color = new THREE.Color();
   // деталь: геометрия без индексов и uv, с цветом в вершинах

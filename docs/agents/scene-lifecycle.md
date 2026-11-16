@@ -13,13 +13,31 @@ export function setup(ctx) {          // must be synchronous (async setup is rej
 }
 ```
 
-`SceneHost` (`scene-host.js`):
-- `swap(next)`: `dispose()` of the old instance (exceptions caught -> `console.warn`), then removes
-  every child of `ctx.root` and disposes their geometries, materials **and every texture found on
-  the materials**, then `setup(ctx)`. If the new `setup` throws, the previous module is started
-  again and the error is reported (`scene:check` shows it).
+`SceneHost` (`scene-host.js`) swaps in two phases, **prepare then commit**, so a scene edit does
+not freeze the headset:
+- `swap(next)` (synchronous, in the HMR callback): while it runs, `dispose()` of every
+  `BufferGeometry`, `Material`, `Texture` and `InstancedMesh` is **held back** (queued, not run).
+  Old `dispose()` (exceptions caught -> `console.warn`) -> old `ctx.root` children move into a
+  frozen group `scene-host-previous` that stays drawn (their own `onBeforeRender/onAfterRender`
+  are muted) -> new `setup(ctx)` fills `ctx.root`, which is **hidden** -> `renderer.compileAsync`
+  of what will be drawn (visible scene + the hidden root). If `setup` throws, the previous module
+  is started again and the error is reported (`scene:check` shows it).
+- prepare (next frames, inside `update`): programs that are really new get their link wait taken
+  one or two per frame (the Quest browser has no `KHR_parallel_shader_compile`, so this is where a
+  new shader costs), then textures of drawn objects not yet on the GPU are uploaded
+  (`renderer.initTexture`), ~6 ms of work per frame. The new `update` is not called yet; the old
+  scene is frozen on screen. Timeout 3 s.
+- commit (one frame): frozen group removed, `ctx.root` shown, new `update(dt)` runs the same frame.
+  Two frames later the held-back disposes run, **except for what the live scene still draws with**
+  (scene graph traversal: geometries, materials, material textures and uniform textures). So a
+  material with the same shader reuses the old program (three shares programs by cache key while
+  one user is alive), and textures/geometries cached in `__sceneState` are never re-uploaded.
+- Timings of the last swap: `npm run vr:eval -- "sceneHost.lastSwap"`; each commit logs
+  `[swap] dispose=… setup=… compile=… prepare=…ms/Nfr newProgs=N uploads=N` to the page console.
 - `update(dt)`: an exception marks the scene `broken`: `update` is not called again until the next
   swap. One report, not 72/s.
+- If the XR session is paused (headset off) a swap stays pending (root hidden, old copy frozen)
+  until frames resume or the next swap arrives.
 - `render(draw)`: an exception while drawing hides `ctx.root` and reports `ошибка отрисовки: …`.
 - `dt` is seconds, clamped to 0.1.
 
@@ -35,7 +53,7 @@ error keeps the old scene running and reports `сцена не загрузил�
 | Field | What |
 |---|---|
 | `THREE` | the three module |
-| `root` | `THREE.Group` owned by the scene; host clears + disposes it on swap |
+| `root` | `THREE.Group` owned by the scene; host empties it on swap and frees what the new scene no longer uses. Hidden (`visible=false`) while a swap is being prepared |
 | `scene`, `camera`, `renderer` | shell objects. `camera` is inside `rig` (recenter moves the rig) |
 | `getLeftController()` | left **grip** space `Object3D` or `null` (the "hand"). Ray space: `renderer.xr.getController(i)` whose grip is the hand (see `rayOf` in scene/main.js) |
 | `pointerAim` | `{ object }`: the wheel sits on this object; scene sets it to the controller axes group |
@@ -82,13 +100,22 @@ The real controller model (`shared.realModel`) is intentionally left on the hand
   `if (scene.onBeforeRender === hook) scene.onBeforeRender = prevBefore;` (ipd-panel.js).
 - **Long-lived objects in `__sceneState`** with a version/key; rebuild on mismatch:
   `if (shared.sound?.version !== SOUND_VERSION) shared.sound = createSound();`
-  (`gunSamples.key = JSON.stringify(GUN_FILES)`, `akModel.url`, `plateTextures.version`,
+  (`soundBank.key = GUN_FILES + BAKE_VERSION + sampleRate`, `akModel.url`, `plateTextures.version`,
   `globalThis.__skyCloudMap.key = 'clumps-v3'`, `messageHolesVersion = 3`).
 - **Find leftovers of an older scene version by name** and remove them before adding yours
   (score.js removes `scene-score*` children from the HUD).
-- Note: the host's root cleanup disposes textures on root materials even if they are cached in
-  `__sceneState` (wood, plate textures). three re-uploads a disposed texture on next use, so this
-  works, but costs an upload on swap.
+- Calling `dispose()` on something cached and reused is harmless during a swap: the host skips it
+  if the new scene still draws with it. Outside a swap `dispose()` runs at once as usual (three
+  re-uploads a disposed texture/geometry on next use: correct, but a hitch).
+- **Anything that costs > ~5 ms in `setup` must be cached** across swaps, keyed by the source of
+  the function that builds it, so it rebuilds only when its own code changes:
+  `if (shared.x?.key !== build.toString()) shared.x = { key: build.toString(), value: build() }`.
+  Done: `shared.worldCache` (world.js: key `createWorld.toString()` — noise/cloud `DataTexture`s,
+  ground geometry, grass instance matrices + attributes, baked grass-shadow render target; the stale
+  cache is freed 5 s later), `shared.smokeTexture` (smoke.js), `shared.modelCache`
+  (`scene/model-cache.js` `cachedBuild(buildFn, THREE, opts)`: weapon models built once, each item
+  is a clone with its own nodes and materials and shared geometries/textures; used by pistols.js for
+  pistol and AWP), plus the older `pistolTex`, wood/plate textures, `__skyCloudMap`, sounds.
 - `dispose()` must never throw: a throw skips the rest of your cleanup. Wrap risky steps:
   `for (const step of steps) { try { step(); } catch (e) { console.warn('[x] dispose:', e); } }`
   (world.js).
@@ -119,9 +146,10 @@ The real controller model (`shared.realModel`) is intentionally left on the hand
 `globalThis.__sceneState` (survives swap, not reload): `targetPhysics, aimOutline, laser,
 laserColor, activeScene, pistols, lastPistolStore, clays, score, targetStands, targetLayout,
 targetBodies, targetDecals, woodTextures, plateTextures, akModel, akWoodMap, realModel, sound,
-audioGraph, gunSamples, previewBuffers, messageHoles, messageHolesRev, messageHolesVersion,
+audioGraph, soundBank, soundCounters, previewBuffers, messageHoles, messageHolesRev, messageHolesVersion,
 textTestPose, ipdMm, ipdNativeMm` + debug handles `scenes, shooting, weaponDebug, clayDebug, car,
-ipd, laserPanel, textTest`. Also `globalThis.__skyCloudMap` (world.js).
+ipd, laserPanel, textTest`; swap caches `worldCache, smokeTexture, modelCache`. Also
+`globalThis.__skyCloudMap` (world.js).
 
 Reload vs swap: weapons "in hand" survive only a swap (`pistols.restore()` uses
 `shared.pistols`); after a reload targets and score come from the active scene's `live`

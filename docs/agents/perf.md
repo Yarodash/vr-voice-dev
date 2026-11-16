@@ -15,7 +15,36 @@ per frame (both eyes), `geo/tex/prog` live counts (watch for leaks: they must no
 swaps), `cpu` = scene update + render on CPU avg/worst (from `fps.beginFrame()` at the start of
 scene update to `scene.onAfterRender`), `rend` = `renderer.render` part. No GPU timer on Quest
 (`gpu=-`). Baseline tonight: fps ~119, calls 70–100, tris ~215k, cpu ~2 ms, prog ~38.
-A single `worst` spike right after a swap is shader compilation; repeated spikes are a bug.
+A `worst` spike right after a swap means something in the swap path is not cached (see below);
+repeated spikes are a bug. Each swap also logs `[swap] dispose=… setup=… compile=… prepare=…ms/Nfr
+newProgs=N uploads=N` (and `sceneHost.lastSwap` has the same plus `freed`, `slow` steps).
+
+## Scene swap (hot-reload) cost
+
+Model: [scene-lifecycle.md](scene-lifecycle.md#contract) (prepare then commit; disposes held back
+until the new scene draws, so programs/textures are reused). Measured 2026-11-17, Quest 3S:
+
+| | before | after |
+|---|---|---|
+| `setup()` (HMR task, blocks the main thread) | 550–680 ms (grass 36k blades ~420 ms, pistol model ~100 ms, smoke texture ~40 ms) | ~37 ms |
+| first frame of the new scene | 270–380 ms (17–23 shader programs recompiled ≈ 140 ms of link waits, 10–11 cached textures re-uploaded ≈ 100 ms) + a second 160 ms frame | 0 new programs, 0–1 uploads on an unchanged shader set |
+
+What costs on Quest and how it is avoided:
+- **Shader programs**: the Quest browser has no `KHR_parallel_shader_compile`; a new program costs
+  ~5–15 ms of link wait at first use. three shares a program between materials with the same
+  cache key only while one user is alive -> the host keeps old materials alive until the new ones
+  took the programs. Shader text that changes per swap (random numbers, timestamps in GLSL) defeats
+  this; keep shader strings deterministic. A genuinely new shader is linked during prepare, one or two
+  per frame, while the old scene stays on screen.
+- **Textures**: canvas/data textures built in `setup` are new objects -> new upload (1024² ≈ 10 ms,
+  2048² canvas far more). Cache them in `__sceneState` keyed by the builder's source.
+- **CPU in `setup`**: anything > ~5 ms (procedural placement, noise, merged models) -> cache by
+  `fn.toString()` key (`worldCache`, `smokeTexture`, `model-cache.js`).
+- Hidden objects are neither precompiled nor pre-uploaded (e.g. the cracked-glasses 2048² canvas);
+  they cost on first show, as before.
+
+Measure a swap: `npm run vr:eval -- "sceneHost.lastSwap"` after touching a comment in a scene file
+(only while `recording` is false).
 
 Read it: `Get-Content logs/page-console.log -Tail 20` (or Read with an offset near the end).
 FPS number under the HUD dot: green ≥ 114, yellow ≥ 70, red below.

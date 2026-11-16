@@ -16,6 +16,13 @@ Claude Code's own dictation types into its prompt -> the page reads the prompt b
 terminal stream (`draft.js`) -> on send the bridge queues the text for `/inbox` (phrases ending
 in «отмена» are dropped). The hidden Claude never executes anything.
 
+Config phrases: if the first word is «конфиг»/«конфик»/«config»/«конфигурация», the phrase skips
+`/inbox` (the main session never sees it; it is logged in `vr-inbox.log` as `[config agent] …`).
+`bridge/config_agent.py` runs a headless `claude -p --model haiku` in the project root, one phrase
+at a time (120 s timeout), prompt = `docs/agents/config.md` + the phrase; tools limited to
+Read/Edit/Grep/Glob + `npm run scene:check` / `npm run vr:eval`. The headset gets «⚙ меняю…» at
+once, then «⚙ <its answer>» (or «⚙ ошибка: …») as a say message. Start/finish/duration go to the bridge log.
+
 ## Endpoints (`bridge/server.py`)
 
 | Endpoint | Who | What |

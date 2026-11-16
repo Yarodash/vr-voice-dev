@@ -21,17 +21,31 @@ const SMALL = `500 36px ${FAMILY}`;
 // widthM: how wide the wheel is in the scene, in metres.
 export function createRadialMenu({ renderer, widthM = 0.45, getMenu = null }) {
   const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = SIZE;
+  // Crisp text: 2x canvas (the layout stays in SIZE units: the context is scaled), trilinear mipmaps,
+  // max anisotropy and a -0.5 LOD bias (same as the message windows, see message-panel.js).
+  const SCALE = 2;
+  const LOD_BIAS = -0.5;
+  canvas.width = canvas.height = SIZE * SCALE;
   const g = canvas.getContext('2d');
+  g.setTransform(SCALE, 0, 0, SCALE, 0, 0);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
   const mesh = new THREE.Mesh(
     new THREE.PlaneGeometry(widthM, widthM),
     // Part of the user's view, not an object in the scene: drawn over everything.
     new THREE.MeshBasicMaterial({ map: texture, toneMapped: false, transparent: true, depthTest: false }),
   );
+  mesh.material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      THREE.ShaderChunk.map_fragment.replace('texture2D( map, vMapUv )', `texture2D( map, vMapUv, ${LOD_BIAS.toFixed(2)} )`),
+    );
+  };
+  mesh.material.customProgramCacheKey = () => `radial-menu-lodbias-${LOD_BIAS}`;
   mesh.renderOrder = 900;
   mesh.visible = false;
 

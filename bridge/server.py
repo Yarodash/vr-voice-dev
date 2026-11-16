@@ -16,6 +16,8 @@ WebSocket /bridge — the page in the headset (reached through Vite's proxy):
 
 WebSocket /inbox — the Claude Code session on this PC listens here (its Monitor): every prompt
 the user sends from the headset arrives as one text frame. Prompts sent while nobody listens wait.
+Phrases starting with «конфиг» skip /inbox: a headless Haiku (bridge/config_agent.py) handles them
+and its answer is shown like a /say message, prefixed with «⚙ ».
 
 POST /say — shows a message from that session in a pop-up in the headset; it stays "unread"
 (and is shown again after a page reload) until the user closes it there.
@@ -37,6 +39,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aiohttp import WSMsgType, web
+
+from bridge.config_agent import is_config_phrase
 
 log = logging.getLogger(__name__)
 
@@ -164,9 +168,16 @@ def is_cancelled(text: str) -> bool:
     return words[-1].strip(" .,!?;:…-—\"'«»") == CANCEL_WORD
 
 
+CONFIG_PREFIX = "⚙ "
+
+
 def create_app(cfg, pty, dictation, status_path: Path, pair_code: str, console_log: Path,
-               files_dir: Path, inbox_log: Path) -> web.Application:
+               files_dir: Path, inbox_log: Path, config_agent=None) -> web.Application:
+    """`config_agent` (bridge.config_agent.ConfigAgent or None): phrases starting with «конфиг» go
+    to it instead of /inbox, one at a time; without it they go to /inbox like any other phrase."""
     hub = Hub()
+    config_phrases: asyncio.Queue[str] = asyncio.Queue()
+    config_state = {"pending": 0}  # config phrases queued or running
     status_path, console_log, files_dir = Path(status_path), Path(console_log), Path(files_dir)
     inbox_log = Path(inbox_log)
     monitors: set[web.WebSocketResponse] = set()  # who listens on /inbox right now
@@ -221,11 +232,14 @@ def create_app(cfg, pty, dictation, status_path: Path, pair_code: str, console_l
             monitors.discard(monitor)
             undelivered.append(line)
 
-    def queue_prompt(text: str) -> None:
-        line = " ".join(text.split())
+    def log_phrase(line: str) -> None:
         inbox_log.parent.mkdir(parents=True, exist_ok=True)
         with inbox_log.open("a", encoding="utf-8") as out:
             out.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {line}\n")
+
+    def queue_prompt(text: str) -> None:
+        line = " ".join(text.split())
+        log_phrase(line)
         if monitors:
             for monitor in list(monitors):
                 asyncio.ensure_future(deliver(monitor, line))
@@ -234,6 +248,40 @@ def create_app(cfg, pty, dictation, status_path: Path, pair_code: str, console_l
 
     def say_message(answer_id: str) -> str:
         return json.dumps({"t": "say", "id": answer_id, "text": unread[answer_id]}, ensure_ascii=False)
+
+    def push_say(text: str) -> str:
+        """Shows a message in the headset (unread until the user closes it there)."""
+        answer_id = uuid.uuid4().hex
+        unread[answer_id] = text.strip()
+        while len(unread) > MAX_UNREAD:
+            del unread[next(iter(unread))]
+        hub._put(say_message(answer_id))
+        return answer_id
+
+    async def run_config_agent() -> None:
+        while True:
+            phrase = await config_phrases.get()
+            try:
+                answer = await config_agent.run(phrase)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                if not isinstance(err, RuntimeError):
+                    log.exception("config agent crashed")
+                answer = f"ошибка: {err}"
+            finally:
+                config_state["pending"] -= 1
+            push_say(CONFIG_PREFIX + answer)
+
+    async def config_worker(app: web.Application):
+        task = asyncio.create_task(run_config_agent()) if config_agent is not None else None
+        yield
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def handle_text(ws, label: str, raw: str, holding: bool) -> bool:
         message = json.loads(raw)
@@ -260,6 +308,15 @@ def create_app(cfg, pty, dictation, status_path: Path, pair_code: str, console_l
             if isinstance(text, str) and text.strip():
                 if is_cancelled(text):  # "... отмена": the phrase is dropped, nothing is sent
                     await ws.send_json({"t": "cancelled"})
+                elif config_agent is not None and is_config_phrase(text):
+                    # "конфиг ...": a headless Haiku changes the setting; the main session never sees it
+                    line = " ".join(text.split())
+                    log.info("config phrase queued: %s", line)
+                    log_phrase(f"[config agent] {line}")
+                    busy = config_state["pending"] > 0
+                    config_state["pending"] += 1
+                    push_say(CONFIG_PREFIX + ("в очереди…" if busy else "меняю…"))
+                    config_phrases.put_nowait(line)
                 else:
                     queue_prompt(text)
                 pty.write(KEYS["clear"])  # the words are on their way (or dropped): empty the hidden prompt
@@ -383,15 +440,12 @@ def create_app(cfg, pty, dictation, status_path: Path, pair_code: str, console_l
         text = body.get("text") if isinstance(body, dict) else None
         if not isinstance(text, str) or not text.strip():
             raise web.HTTPBadRequest(text='expected {"text": "<message>"}')
-        answer_id = uuid.uuid4().hex
-        unread[answer_id] = text.strip()
-        while len(unread) > MAX_UNREAD:
-            del unread[next(iter(unread))]
-        hub._put(say_message(answer_id))
+        answer_id = push_say(text)
         return web.json_response({"id": answer_id, "pages": len(hub.pages())})
 
     app = web.Application()
     app[HUB] = hub
+    app.cleanup_ctx.append(config_worker)
     app.router.add_get("/bridge", bridge)
     app.router.add_get("/inbox", inbox)
     app.router.add_post("/say", say)

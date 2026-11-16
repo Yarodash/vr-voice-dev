@@ -1,252 +1,589 @@
 // Звуки выстрела и попадания. Выстрелы — записи настоящего оружия (web/public/sounds/guns, CC0, см. LICENSE.txt),
-// пока они не загрузились — синтез на лету (WebAudio). Попадание в металл — синтез.
+// пока они не загрузились — запечённый синтез. Попадание, тарелка, гильза, разряд — синтез, запечённый в буферы.
 // Живёт в сцене: правки подхватываются на лету.
 //
 // Объект звука живёт в globalThis.__sceneState.sound (его создаёт shooting.js один раз). Когда этот
 // файл меняется так, что нужен новый объект, увеличь SOUND_VERSION: main.js тогда пересоздаёт его,
 // а сам звуковой контекст (их число в странице ограничено) берётся прежний — __sceneState.audioGraph.
-export const SOUND_VERSION = 18;
+//
+// Почему так (очередь «ломала» звук): раньше каждый выстрел строил свой граф (~11 узлов у АК, ~22 у
+// пистолета, ~24 у звона мишени, на каждый — свой HRTF-паннер и задержка) и ничего не отключал; на
+// очереди это ~500 новых узлов в секунду (2,8 мс главного потока на выстрел в шлеме) и перегруз
+// аудиопотока Quest, а компрессор почти не ограничивал (сумма выстрелов жёстко клиповалась на выходе).
+// Теперь: всё синтезированное запекается в буферы один раз (OfflineAudioContext); голоса — постоянные
+// цепочки (паннер, стерео, посылы) в пулах с жёстким лимитом и мягким «отъёмом» старейшего; на звук
+// создаются только источник и его гейн, и они отключаются в onended; в конце — лимитер и мягкий клип;
+// сторож в update() поднимает приостановленный контекст и пересобирает выход, если в нём NaN.
+export const SOUND_VERSION = 23; // 23: AWP (shot { kind: 'awp' }) и затвор (bolt)
 // какие записи звучат в игре (sound-board.js помечает их «в игре»)
 export const GUN_FILES = { pistol: ['pistolB1', 'pistolB2'], ak: ['ak1', 'ak2', 'ak3'] };
 
+const BAKE_VERSION = 2; // 2: awpBoom, boltOpen, boltClose. Меняй, когда меняются рецепты ниже (банк звуков пересоберётся)
+const BUS_VERSION = 1; // меняй при изменении выхода (лимитер, реверб)
+const POOL_VERSION = 1; // меняй при изменении устройства голосов
+
+const NEAR_FAR = 1.2; // дальше — обычный HRTF; ближе — ближнее поле
+const NEAR_FULL = 0.55; // ближе — почти чистое стерео
+const STEAL_FADE = 0.02; // с, за сколько гасится отнятый голос
+const DRIVE = 3; // мягкий клип: вход ±3 → выход до ±1
+// Пулы голосов: size — постоянных цепочек, max — сколько звучит одновременно (остальные — гаснущие)
+const POOLS = {
+  gun: { size: 10, max: 7, near: true, model: 'HRTF' },
+  fx: { size: 10, max: 8, near: false, model: 'HRTF' },
+  small: { size: 4, max: 3, near: false, model: 'equalpower' }, // гильзы: тихо и часто, HRTF не нужен
+};
+
+const finite = (v, fallback = 0) => (Number.isFinite(v) ? v : fallback);
+const validPos = (p) => (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z) ? p : null);
+
+// ---------- рецепты синтеза (рисуют в любой контекст, в т. ч. OfflineAudioContext) ----------
+
+const noiseBuffers = new Map();
+const noiseBuffer = (c, seconds) => {
+  const key = `${c.sampleRate}:${seconds}`;
+  const cached = noiseBuffers.get(key);
+  if (cached) return cached;
+  const buffer = c.createBuffer(1, Math.max(1, Math.floor(c.sampleRate * seconds)), c.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i += 1) data[i] = Math.random() * 2 - 1;
+  noiseBuffers.set(key, buffer);
+  return buffer;
+};
+
+// шумовая вспышка через фильтр: type 'highpass' | 'lowpass' | 'bandpass', частота плавно меняется
+const noise = (c, out, t, { seconds, type, from, to, gain, decay }) => {
+  const source = c.createBufferSource();
+  source.buffer = noiseBuffer(c, seconds);
+  const filter = c.createBiquadFilter();
+  filter.type = type;
+  filter.frequency.setValueAtTime(from, t);
+  filter.frequency.exponentialRampToValueAtTime(to, t + decay);
+  const envelope = c.createGain();
+  envelope.gain.setValueAtTime(0.0001, t);
+  envelope.gain.exponentialRampToValueAtTime(gain, t + 0.002);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+  source.connect(filter).connect(envelope).connect(out);
+  source.start(t);
+  source.stop(t + seconds);
+};
+
+const tone = (c, out, t, { type = 'sine', from, to = from, gain, decay }) => {
+  const osc = c.createOscillator();
+  osc.type = type;
+  osc.frequency.setValueAtTime(from, t);
+  if (to !== from) osc.frequency.exponentialRampToValueAtTime(to, t + decay);
+  const envelope = c.createGain();
+  envelope.gain.setValueAtTime(0.0001, t);
+  envelope.gain.exponentialRampToValueAtTime(gain, t + 0.002);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+  osc.connect(envelope).connect(out);
+  osc.start(t);
+  osc.stop(t + decay + 0.02);
+};
+
+const PISTOL_GAIN = 1.7; // пистолет громче и звонче: запись глуховата и терялась на фоне звона попадания
+
+const RECIPES = {
+  // «хлёсткость» пистолета: короткий яркий треск и тонкий металлический звон поверх записи
+  // (громкости поделены на PISTOL_GAIN: при игре запись с ними умножается на него)
+  pistolCrack(c, out, t) {
+    const k = 1 / PISTOL_GAIN;
+    noise(c, out, t, { seconds: 0.05, type: 'highpass', from: 4500, to: 2500, gain: 0.5 * k, decay: 0.03 });
+    tone(c, out, t, { type: 'triangle', from: 2350, gain: 0.07 * k, decay: 0.16 });
+    tone(c, out, t, { type: 'sine', from: 3720, gain: 0.04 * k, decay: 0.12 });
+  },
+  // запасной выстрел, пока записи не загрузились
+  synthAk(c, out, t) {
+    const jitter = 1 + (Math.random() - 0.5) * 0.08;
+    noise(c, out, t, { seconds: 0.2, type: 'highpass', from: 1900 * jitter, to: 650, gain: 1, decay: 0.09 });
+    noise(c, out, t, { seconds: 0.6, type: 'lowpass', from: 3200 * jitter, to: 220, gain: 1, decay: 0.42 });
+    noise(c, out, t, { seconds: 0.3, type: 'bandpass', from: 900, to: 320, gain: 0.6, decay: 0.2 });
+    tone(c, out, t, { from: 125 * jitter, to: 28, gain: 1, decay: 0.32 });
+    tone(c, out, t + 0.003, { type: 'triangle', from: 68, to: 24, gain: 0.85, decay: 0.42 });
+    noise(c, out, t + 0.045, { seconds: 0.05, type: 'bandpass', from: 2600, to: 1800, gain: 0.22, decay: 0.035 }); // затвор
+  },
+  synthPistol(c, out, t) {
+    const jitter = 1 + (Math.random() - 0.5) * 0.08;
+    noise(c, out, t, { seconds: 0.2, type: 'highpass', from: 2500 * jitter, to: 900, gain: 1, decay: 0.07 });
+    noise(c, out, t, { seconds: 0.4, type: 'lowpass', from: 4200 * jitter, to: 380, gain: 0.85, decay: 0.3 });
+    noise(c, out, t, { seconds: 0.3, type: 'bandpass', from: 1200, to: 500, gain: 0.5, decay: 0.16 });
+    tone(c, out, t, { from: 170 * jitter, to: 38, gain: 1, decay: 0.24 });
+    tone(c, out, t + 0.004, { type: 'triangle', from: 90, to: 32, gain: 0.7, decay: 0.3 });
+  },
+  // Гильза звякнула о землю: тихий высокий «тинь» с коротким щелчком.
+  tink(c, out, t) {
+    const base = 3800 + Math.random() * 1400;
+    tone(c, out, t, { from: base, gain: 0.3, decay: 0.12 });
+    tone(c, out, t, { from: base * 1.62, gain: 0.15, decay: 0.07 });
+    noise(c, out, t, { seconds: 0.02, type: 'highpass', from: 6000, to: 4000, gain: 0.2, decay: 0.01 });
+  },
+  // Попадание в металл: звонкий «тинь» из нескольких негармоничных обертонов и сухой щелчок.
+  hit(c, out, t) {
+    const base = 1050 + Math.random() * 260;
+    const partials = [
+      [1, 0.34, 0.55],
+      [1.58, 0.28, 0.4],
+      [2.41, 0.2, 0.3],
+      [3.27, 0.13, 0.2],
+      [4.6, 0.07, 0.12],
+    ];
+    for (const [ratio, gain, decay] of partials) {
+      tone(c, out, t, { from: base * ratio * (1 + (Math.random() - 0.5) * 0.01), gain, decay });
+    }
+    noise(c, out, t, { seconds: 0.05, type: 'highpass', from: 5200, to: 3200, gain: 0.55, decay: 0.018 });
+    tone(c, out, t, { from: 380, to: 210, gain: 0.3, decay: 0.07 }); // удар по пластине
+  },
+  // Бьётся глиняная тарелка: сухой хруст, звонкий треск сверху, глухой «тук» и россыпь щелчков осколков.
+  shatter(c, out, t) {
+    noise(c, out, t, { seconds: 0.12, type: 'bandpass', from: 3200, to: 1400, gain: 0.95, decay: 0.08 });
+    noise(c, out, t, { seconds: 0.25, type: 'highpass', from: 7000, to: 3200, gain: 0.45, decay: 0.16 });
+    tone(c, out, t, { from: 460, to: 160, gain: 0.4, decay: 0.05 });
+    for (let i = 0; i < 9; i += 1) {
+      const at = t + 0.004 + Math.random() * 0.12;
+      tone(c, out, at, { type: 'triangle', from: 2400 + Math.random() * 4200, gain: 0.04 + Math.random() * 0.08, decay: 0.015 + Math.random() * 0.03 });
+      noise(c, out, at, { seconds: 0.02, type: 'highpass', from: 5500, to: 3800, gain: 0.12 + Math.random() * 0.2, decay: 0.01 });
+    }
+  },
+  // Электрический разряд (робопёс): щелчок, треск пачками шума и рваное жужжание двух «пил».
+  zap(c, out, t) {
+    noise(c, out, t, { seconds: 0.05, type: 'highpass', from: 6000, to: 3000, gain: 0.7, decay: 0.025 });
+    const bursts = 6 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < bursts; i += 1) {
+      const at = t + Math.random() * 0.22;
+      const f = 1800 + Math.random() * 5500;
+      noise(c, out, at, { seconds: 0.05, type: 'bandpass', from: f, to: f * 0.6, gain: 0.35 + Math.random() * 0.55, decay: 0.008 + Math.random() * 0.03 });
+    }
+    const length = 0.12 + Math.random() * 0.2;
+    const base = 70 + Math.random() * 180;
+    const hum = c.createGain();
+    hum.gain.setValueAtTime(0.0001, t);
+    hum.gain.exponentialRampToValueAtTime(0.24, t + 0.005);
+    hum.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    const chop = c.createGain();
+    chop.gain.value = 0.5;
+    const lfo = c.createOscillator();
+    lfo.type = 'square';
+    lfo.frequency.value = 30 + Math.random() * 40;
+    const depth = c.createGain();
+    depth.gain.value = 0.5;
+    lfo.connect(depth).connect(chop.gain);
+    const hp = c.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 400;
+    for (const detune of [1, 1.013 + Math.random() * 0.02]) {
+      const osc = c.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(base * detune * (2 + Math.random()), t);
+      osc.frequency.exponentialRampToValueAtTime(base * detune, t + length);
+      osc.connect(hp);
+      osc.start(t);
+      osc.stop(t + length + 0.02);
+    }
+    hp.connect(chop).connect(hum).connect(out);
+    lfo.start(t);
+    lfo.stop(t + length + 0.02);
+  },
+  // Робот отключается (смерть робопса): гудение съезжает вниз, фильтр закрывается, искрит
+  powerDown(c, out, t) {
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(3200, t);
+    lp.frequency.exponentialRampToValueAtTime(140, t + 1.1);
+    const envelope = c.createGain();
+    envelope.gain.setValueAtTime(0.0001, t);
+    envelope.gain.exponentialRampToValueAtTime(0.32, t + 0.02);
+    envelope.gain.setValueAtTime(0.32, t + 0.45);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
+    for (const [type, from, to] of [['sawtooth', 430, 36], ['square', 217, 19]]) {
+      const osc = c.createOscillator();
+      osc.type = type;
+      osc.frequency.setValueAtTime(from, t);
+      osc.frequency.exponentialRampToValueAtTime(to, t + 1.15);
+      osc.connect(lp);
+      osc.start(t);
+      osc.stop(t + 1.25);
+    }
+    lp.connect(envelope).connect(out);
+    tone(c, out, t, { from: 160, to: 40, gain: 0.5, decay: 0.2 }); // глухой удар
+    for (let i = 0; i < 9; i += 1) {
+      const at = t + Math.random() * 0.9;
+      const f = 2000 + Math.random() * 5000;
+      noise(c, out, at, { seconds: 0.05, type: 'bandpass', from: f, to: f * 0.6, gain: 0.2 + Math.random() * 0.4, decay: 0.01 + Math.random() * 0.03 });
+    }
+  },
+  // AWP: низкий «бум» под записью калаша (удар в грудь и раскат)
+  awpBoom(c, out, t) {
+    const jitter = 1 + (Math.random() - 0.5) * 0.06;
+    tone(c, out, t, { from: 78 * jitter, to: 30, gain: 1, decay: 0.55 });
+    tone(c, out, t + 0.004, { type: 'triangle', from: 46 * jitter, to: 22, gain: 0.85, decay: 0.7 });
+    noise(c, out, t, { seconds: 0.9, type: 'lowpass', from: 1100 * jitter, to: 90, gain: 0.9, decay: 0.75 });
+    noise(c, out, t, { seconds: 0.08, type: 'bandpass', from: 1500, to: 600, gain: 0.5, decay: 0.05 });
+  },
+  // Затвор открывают: щелчок рукоятки вверх, шорох хода назад, лязг в заднем положении (через ~0,38 с)
+  boltOpen(c, out, t) {
+    noise(c, out, t, { seconds: 0.03, type: 'highpass', from: 5200, to: 3500, gain: 0.5, decay: 0.012 });
+    tone(c, out, t, { type: 'triangle', from: 2900 + Math.random() * 300, gain: 0.18, decay: 0.05 });
+    tone(c, out, t + 0.002, { from: 1150, to: 900, gain: 0.2, decay: 0.04 });
+    noise(c, out, t + 0.16, { seconds: 0.25, type: 'bandpass', from: 2400, to: 1300, gain: 0.16, decay: 0.2 }); // скольжение
+    const back = t + 0.37;
+    noise(c, out, back, { seconds: 0.05, type: 'bandpass', from: 3000, to: 1800, gain: 0.55, decay: 0.03 });
+    tone(c, out, back, { type: 'triangle', from: 2300 + Math.random() * 200, gain: 0.16, decay: 0.07 });
+    tone(c, out, back, { from: 700, to: 480, gain: 0.25, decay: 0.05 });
+  },
+  // Затвор закрывают: удар вперёд (патрон в патроннике) и щелчок рукоятки вниз через 0,15 с
+  boltClose(c, out, t) {
+    noise(c, out, t, { seconds: 0.06, type: 'bandpass', from: 1700, to: 900, gain: 0.7, decay: 0.045 });
+    tone(c, out, t, { from: 820, to: 520, gain: 0.32, decay: 0.06 });
+    tone(c, out, t, { type: 'triangle', from: 3100 + Math.random() * 300, gain: 0.12, decay: 0.08 });
+    noise(c, out, t + 0.15, { seconds: 0.03, type: 'highpass', from: 4500, to: 3000, gain: 0.45, decay: 0.012 });
+    tone(c, out, t + 0.15, { type: 'triangle', from: 2500 + Math.random() * 200, gain: 0.15, decay: 0.04 });
+  },
+};
+// что запекается: [рецепт, вариантов, длина в секундах]
+const BAKES = {
+  tink: ['tink', 6, 0.15],
+  hit: ['hit', 5, 0.6],
+  shatter: ['shatter', 4, 0.3],
+  zap: ['zap', 6, 0.4],
+  powerDown: ['powerDown', 2, 1.3],
+  synthPistol: ['synthPistol', 3, 0.45],
+  synthAk: ['synthAk', 3, 0.65],
+  awpBoom: ['awpBoom', 2, 1.0],
+  boltOpen: ['boltOpen', 2, 0.5],
+  boltClose: ['boltClose', 2, 0.25],
+};
+
+const bake = (sampleRate, seconds, draw) => {
+  const oc = new OfflineAudioContext(1, Math.ceil(seconds * sampleRate), sampleRate);
+  draw(oc, oc.destination, 0);
+  return oc.startRendering();
+};
+
+// мягкий клип: до 0,7 — линейно, выше плавно (tanh) подходит к 1; вход шейпера — сигнал / DRIVE
+const softClipCurve = () => {
+  const curve = new Float32Array(2049);
+  for (let i = 0; i < curve.length; i += 1) {
+    const s = ((i / (curve.length - 1)) * 2 - 1) * DRIVE;
+    const a = Math.abs(s);
+    curve[i] = a <= 0.7 ? s : Math.sign(s) * (0.7 + 0.3 * Math.tanh((a - 0.7) / 0.3));
+  }
+  return curve;
+};
+
+const disconnect = (...nodes) => {
+  for (const n of nodes) {
+    try {
+      n?.disconnect();
+    } catch {
+      // уже отключён
+    }
+  }
+};
+
 export function createSound() {
   const shared = (globalThis.__sceneState ??= {});
-  let { context = null, master = null, reverbSend = null } = shared.audioGraph ?? {};
   let weapon = 'pistol'; // каким оружием звучит shot() без параметров (см. setWeapon)
+  const counters = (shared.soundCounters ??= { played: 0, stolen: 0, skipped: 0, resumes: 0, nanResets: 0, busBuilds: 0, errors: 0 });
+  const graph = () => shared.audioGraph;
 
-  const ensure = () => {
-    if (context) {
-      if (context.state === 'suspended') context.resume();
-      return context;
-    }
-    context = new AudioContext();
-    master = context.createGain();
-    master.gain.value = 0.85;
-    // компрессор не даёт выстрелу «хрипеть» на пике
-    const compressor = context.createDynamicsCompressor();
-    compressor.threshold.value = -6; // выше порога: выстрел не сжимается в кашу, звон попадания не громче его
-    compressor.ratio.value = 4;
-    master.connect(compressor).connect(context.destination);
-    // эхо помещения: свёртка с затухающим шумом
-    const convolver = context.createConvolver();
-    const length = Math.floor(context.sampleRate * 1.5);
-    const impulse = context.createBuffer(2, length, context.sampleRate);
+  // ---------- контекст и выход ----------
+  // master (громкость, к нему же подключён мотор машины — engine-sound.js) → компрессор-лимитер →
+  // подстройка → мягкий клип → динамики. Реверб: reverbSend → свёртка → master. Задержка ближнего
+  // поля (30 мс, эхо своего выстрела не слипается с ним) — одна общая.
+  const buildBus = (g) => {
+    const c = g.context;
+    disconnect(g.master, g.reverbSend, ...(g.busNodes ?? []));
+    const compressor = c.createDynamicsCompressor();
+    // замерено офлайн: до 0,5 — без изменений; сумма в 8 раз громче (+18 дБ) → 0,93, не глохнет
+    compressor.threshold.value = -3;
+    compressor.knee.value = 3;
+    compressor.ratio.value = 12;
+    compressor.attack.value = 0.002;
+    compressor.release.value = 0.1;
+    const trim = c.createGain();
+    trim.gain.value = 0.877 / DRIVE; // снимает автоподъём компрессора Chromium (×1,14)
+    const clip = c.createWaveShaper();
+    clip.curve = softClipCurve();
+    clip.oversample = 'none';
+    const probe = c.createAnalyser(); // сторож: NaN после компрессора → пересобрать выход
+    probe.fftSize = 256;
+    g.master.connect(compressor).connect(trim).connect(clip).connect(c.destination);
+    compressor.connect(probe);
+    const convolver = c.createConvolver();
+    const length = Math.floor(c.sampleRate * 1.5);
+    const impulse = c.createBuffer(2, length, c.sampleRate);
     for (let channel = 0; channel < 2; channel += 1) {
       const data = impulse.getChannelData(channel);
       for (let i = 0; i < length; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / length) ** 3.2;
     }
     convolver.buffer = impulse;
-    reverbSend = context.createGain();
-    reverbSend.gain.value = 0.5;
-    reverbSend.connect(convolver).connect(master);
-    shared.audioGraph = { context, master, reverbSend };
-    loadSamples(context);
-    return context;
+    g.reverbSend.gain.value = 0.5;
+    g.reverbSend.connect(convolver).connect(g.master);
+    const nearDelay = c.createDelay(0.1);
+    nearDelay.delayTime.value = 0.03;
+    nearDelay.connect(g.reverbSend);
+    Object.assign(g, { busVersion: BUS_VERSION, busNodes: [compressor, trim, clip, probe, convolver, nearDelay], probe, nearDelay });
+    counters.busBuilds += 1;
   };
 
-  // Записи выстрелов грузятся один раз и живут в __sceneState.gunSamples (подмена сцены их не перезагружает).
-  // pistolB: только дубль A_34P (яркий, с эхом по полю); дубль A_42P был глухим и звучал по-другому
-  const MAX_VOICES = 6;
-  const voices = [];
-  const loadSamples = (c) => {
-    // кэш привязан к списку файлов: после смены набора записей новый подгружается без перезагрузки страницы
-    const key = JSON.stringify(GUN_FILES);
-    if (shared.gunSamples?.key === key) return;
-    const samples = (shared.gunSamples = { key, pistol: [], ak: [] });
+  // Голос — постоянная цепочка. Ближний (gun): input → prox (низкая полка) → стерео → sg → master
+  // и prox → hg → паннер → master; посылы в реверб: sendNear (через задержку) и sendFar.
+  // Обычный: input → паннер → master, sendFar → реверб.
+  const makeVoice = (g, { near, model }) => {
+    const c = g.context;
+    const input = c.createGain();
+    const panner = c.createPanner();
+    panner.panningModel = model;
+    panner.distanceModel = 'inverse';
+    panner.refDistance = 1.5;
+    panner.rolloffFactor = 0.5; // на 38 м ≈ -22 дБ
+    panner.maxDistance = 200;
+    panner.coneInnerAngle = 360;
+    const sendFar = c.createGain();
+    sendFar.connect(g.reverbSend);
+    const v = { near, input, panner, sendFar, shot: null, nodes: [input, panner, sendFar] };
+    if (near) {
+      const prox = c.createBiquadFilter();
+      prox.type = 'lowshelf';
+      prox.frequency.value = 250;
+      prox.gain.value = 0;
+      const stereo = c.createStereoPanner();
+      const sg = c.createGain();
+      const hg = c.createGain();
+      const sendNear = c.createGain();
+      input.connect(prox);
+      prox.connect(stereo).connect(sg).connect(g.master);
+      prox.connect(hg).connect(panner).connect(g.master);
+      sendNear.connect(g.nearDelay);
+      Object.assign(v, { prox, stereo, sg, hg, sendNear });
+      v.nodes.push(prox, stereo, sg, hg, sendNear);
+    } else {
+      input.connect(panner).connect(g.master);
+    }
+    return v;
+  };
+
+  const buildPools = (g) => {
+    for (const pool of Object.values(g.pools ?? {})) for (const v of pool.voices) disconnect(...v.nodes);
+    g.pools = {};
+    for (const [name, cfg] of Object.entries(POOLS)) {
+      g.pools[name] = { name, max: cfg.max, voices: Array.from({ length: cfg.size }, () => makeVoice(g, cfg)) };
+    }
+    g.poolVersion = POOL_VERSION;
+  };
+
+  const ensure = () => {
+    let g = graph();
+    if (g?.context && g.context.state === 'closed') g = shared.audioGraph = null;
+    if (!g?.context) {
+      const context = new AudioContext();
+      const master = context.createGain();
+      master.gain.value = 0.85;
+      const reverbSend = context.createGain();
+      g = shared.audioGraph = { context, master, reverbSend };
+    }
+    if (g.busVersion !== BUS_VERSION) buildBus(g);
+    if (g.poolVersion !== POOL_VERSION) buildPools(g);
+    const c = g.context;
+    if (c.state !== 'running' && c.state !== 'closed') {
+      c.resume().catch(() => {});
+    }
+    loadBank(c);
+    return g;
+  };
+
+  // ---------- банк звуков: записи + запечённый синтез, один раз, живёт в __sceneState.soundBank ----------
+  const filesKey = `${JSON.stringify(GUN_FILES)}|${BAKE_VERSION}|`;
+  const loadBank = (c) => {
+    const bankNow = shared.soundBank;
+    if (bankNow && bankNow.rate === c.sampleRate && bankNow.files === filesKey) return;
+    const key = filesKey + c.sampleRate;
+    delete shared.gunSamples; // старый кэш (до SOUND_VERSION 20)
+    const bank = (shared.soundBank = { key, files: filesKey, rate: c.sampleRate, pistol: [], ak: [], fx: {} });
     for (const [kind, names] of Object.entries(GUN_FILES)) {
       for (const name of names) {
         fetch(`/sounds/guns/${name}.ogg`)
           .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.status))))
           .then((data) => c.decodeAudioData(data))
-          .then((buffer) => samples[kind].push(buffer))
+          .then((raw) => {
+            if (kind !== 'pistol') return raw;
+            // пистолет: чуть хруста сверху (highshelf +3 дБ) и треск со звоном — запекаются в запись
+            return bake(c.sampleRate, raw.duration + 0.05, (oc, out, t) => {
+              const source = oc.createBufferSource();
+              source.buffer = raw;
+              const bright = oc.createBiquadFilter();
+              bright.type = 'highshelf';
+              bright.frequency.value = 2500;
+              bright.gain.value = 3;
+              source.connect(bright).connect(out);
+              source.start(t);
+              RECIPES.pistolCrack(oc, out, t);
+            }).catch(() => raw);
+          })
+          .then((buffer) => bank[kind].push(buffer))
           .catch((e) => console.warn('[sound] не загрузился', name, e?.message ?? e));
       }
     }
+    (async () => {
+      for (const [name, [recipe, count, seconds]] of Object.entries(BAKES)) {
+        const list = (bank.fx[name] = []);
+        for (let i = 0; i < count; i += 1) {
+          try {
+            list.push(await bake(c.sampleRate, seconds, RECIPES[recipe]));
+          } catch (e) {
+            console.warn('[sound] не запёкся', name, e?.message ?? e);
+            break;
+          }
+        }
+      }
+    })();
   };
-  // Записи грузятся сразу, при создании звука, а не на первом выстреле: иначе первый выстрел после
-  // загрузки страницы звучал запасным синтезатором (записи ещё декодировались). AudioContext без
-  // жеста пользователя создаётся приостановленным — декодировать это не мешает; запустится на выстреле.
+  const pick = (list) => (list?.length ? list[Math.floor(Math.random() * list.length)] : null);
+
+  // ---------- голоса ----------
+  // поза головы (из update): позиция и вектор «вправо» — для ближнего поля
+  const head = { x: 0, y: 0, z: 0, rx: 1, ry: 0, rz: 0, ok: false };
+
+  const release = (v, shot) => {
+    disconnect(shot.source, shot.env);
+    if (v.shot === shot) v.shot = null;
+  };
+  const steal = (v, t) => {
+    const shot = v.shot;
+    if (!shot || shot.fading) return;
+    shot.fading = true;
+    counters.stolen += 1;
+    try {
+      const gain = shot.env.gain;
+      gain.cancelScheduledValues(t);
+      gain.setValueAtTime(finite(gain.value), t);
+      gain.linearRampToValueAtTime(0, t + STEAL_FADE);
+      shot.source.stop(t + STEAL_FADE + 0.005);
+    } catch {
+      release(v, shot);
+    }
+  };
+  // Свободный голос пула. Звучащих не больше max: иначе старейший мягко гаснет (20 мс), а новый звук
+  // берёт другой, свободный голос — паннер гаснущего не прыгает.
+  const acquire = (pool, t) => {
+    let active = 0;
+    let oldest = null;
+    let free = null;
+    for (const v of pool.voices) {
+      const shot = v.shot;
+      if (shot && t > shot.endAt + 0.5) release(v, shot); // onended потерялся
+      if (!v.shot) {
+        free ??= v;
+      } else if (!v.shot.fading) {
+        active += 1;
+        if (!oldest || v.shot.startedAt < oldest.shot.startedAt) oldest = v;
+      }
+    }
+    if (active >= pool.max && oldest) steal(oldest, t);
+    return free;
+  };
+
+  const setPos = (panner, x, y, z) => {
+    if (panner.positionX) {
+      panner.positionX.value = x;
+      panner.positionY.value = y;
+      panner.positionZ.value = z;
+    } else panner.setPosition(x, y, z);
+  };
+
+  // Настроить голос под точку звука: ближнее поле (свой выстрел у руки), дальнее (HRTF) или у слушателя.
+  // Ближнее: HRTF браузера снят для дальнего поля и «уносит» источник на метр, поэтому вблизи основной
+  // путь — equal-power стерео с сильной ILD, плавно переходящий в HRTF с расстоянием; низкая полка —
+  // эффект близости; реверб тише и с задержкой (сухой сигнал — главный признак близости).
+  const configure = (v, position, refDistance, wet) => {
+    const p = validPos(position);
+    if (p) setPos(v.panner, p.x, p.y, p.z);
+    else if (head.ok) setPos(v.panner, head.x, head.y, head.z);
+    v.panner.refDistance = refDistance;
+    if (!v.near) {
+      v.sendFar.gain.value = wet;
+      return;
+    }
+    let mode = p ? 'far' : 'head';
+    let w = 1;
+    let pan = 0;
+    if (p && head.ok) {
+      const dx = p.x - head.x;
+      const dy = p.y - head.y;
+      const dz = p.z - head.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d < NEAR_FAR) {
+        mode = 'near';
+        const side = (dx * head.rx + dy * head.ry + dz * head.rz) / Math.max(d, 0.05);
+        const k = Math.min(1, Math.max(0, (d - NEAR_FULL) / (NEAR_FAR - NEAR_FULL)));
+        w = k * k * (3 - 2 * k); // smoothstep
+        // не до упора: у выстрела у левого уха правое ухо всё равно слышит его громко (~-8 дБ)
+        pan = Math.max(-0.5, Math.min(0.5, finite(side) * 0.8));
+      }
+    }
+    const isNear = mode === 'near';
+    v.input.gain.value = isNear ? 1.15 : 1; // свой выстрел остаётся самым громким
+    v.prox.gain.value = isNear ? 4 * (1 - w) : 0;
+    v.stereo.pan.value = pan;
+    v.sg.gain.value = isNear ? Math.cos((w * Math.PI) / 2) : mode === 'head' ? 1 : 0;
+    v.hg.gain.value = isNear ? Math.sin((w * Math.PI) / 2) : mode === 'head' ? 0 : 1;
+    v.sendNear.gain.value = isNear ? wet * (0.3 + 0.7 * w) : 0;
+    v.sendFar.gain.value = isNear ? 0 : wet;
+  };
+
+  // Проиграть буфер голосом пула: создаются только источник и его гейн, в onended отключаются.
+  const play = (poolName, buffer, { position, gain = 1, rate = 1, refDistance = 1.5, wet = 0.25 } = {}) => {
+    if (!buffer) return false;
+    const g = ensure();
+    const c = g.context;
+    const t = c.currentTime;
+    const v = acquire(g.pools[poolName], t);
+    if (!v) {
+      counters.skipped += 1;
+      return false;
+    }
+    configure(v, position, finite(refDistance, 1.5), finite(wet, 0.25));
+    const source = c.createBufferSource();
+    source.buffer = buffer;
+    source.playbackRate.value = finite(rate, 1);
+    const env = c.createGain();
+    env.gain.value = finite(gain, 0);
+    source.connect(env);
+    env.connect(v.input);
+    env.connect(v.sendFar);
+    if (v.sendNear) env.connect(v.sendNear);
+    const shot = { source, env, startedAt: t, endAt: t + buffer.duration / finite(rate, 1), fading: false };
+    v.shot = shot;
+    source.onended = () => release(v, shot);
+    source.start(t);
+    counters.played += 1;
+    return true;
+  };
+  const safe = (fn) => {
+    try {
+      return fn();
+    } catch (e) {
+      counters.errors += 1;
+      counters.lastError = String(e?.message ?? e);
+      return false;
+    }
+  };
+
+  // Предзагрузка сразу, при создании звука: иначе первый выстрел звучал запасным синтезом. AudioContext
+  // без жеста пользователя создаётся приостановленным — декодировать это не мешает; запустится на выстреле.
   try {
     ensure();
-    loadSamples(context);
   } catch (e) {
     console.warn('[sound] предзагрузка не удалась', e?.message ?? e);
   }
 
-  // 3D: PannerNode (HRTF, inverse) в точке position (THREE.Vector3 / {x,y,z}) → master. Без position —
-  // обычный master (звук у слушателя). Реверб остаётся неспатиальным: он берёт сигнал до паннера.
-  // поза головы (из update): позиция и вектор «вправо» — для ближнего поля
-  const head = { x: 0, y: 0, z: 0, rx: 1, ry: 0, rz: 0, ok: false };
-  const NEAR_FAR = 1.2; // дальше — обычный HRTF; ближе — ближнее поле
-  const NEAR_FULL = 0.55; // ближе — почти чистое стерео
-  // Ближнее поле (свой выстрел у руки). HRTF браузера снят для дальнего поля и "уносит" источник
-  // метра на 1, поэтому вблизи основной путь — equal-power стерео с сильной ILD (направление от головы),
-  // плавно переходящий в HRTF с расстоянием; низкая полка — эффект близости; реверб тише и с задержкой
-  // (сухой сигнал — главный признак близости). Возвращает { dest, reverb } или null.
-  const makeNear = (c, position) => {
-    if (!head.ok) return null;
-    const dx = position.x - head.x;
-    const dy = position.y - head.y;
-    const dz = position.z - head.z;
-    const d = Math.hypot(dx, dy, dz);
-    if (d >= NEAR_FAR) return null;
-    const side = (dx * head.rx + dy * head.ry + dz * head.rz) / Math.max(d, 0.05);
-    const k = Math.min(1, Math.max(0, (d - NEAR_FULL) / (NEAR_FAR - NEAR_FULL)));
-    const wHrtf = k * k * (3 - 2 * k); // smoothstep
-    const input = c.createGain();
-    input.gain.value = 1.15; // остаётся самым громким
-    const prox = c.createBiquadFilter();
-    prox.type = 'lowshelf';
-    prox.frequency.value = 250;
-    prox.gain.value = 4 * (1 - wHrtf); // близость: чуть больше низов
-    input.connect(prox);
-    const stereo = c.createStereoPanner();
-    // не до упора: у выстрела у левого уха правое ухо всё равно слышит его громко (~-8 дБ, а не тишина)
-    stereo.pan.value = Math.max(-0.5, Math.min(0.5, side * 0.8));
-    const sg = c.createGain();
-    sg.gain.value = Math.cos(wHrtf * Math.PI / 2);
-    prox.connect(stereo).connect(sg).connect(master);
-    if (wHrtf > 0.01) {
-      const hg = c.createGain();
-      hg.gain.value = Math.sin(wHrtf * Math.PI / 2);
-      prox.connect(makePanner(c, position, 1.5, hg));
-      hg.connect(master);
-    }
-    // реверб: тихий и чуть позже (эхо по полю не слипается с выстрелом)
-    const rev = c.createGain();
-    rev.gain.value = 0.3 + 0.7 * wHrtf;
-    const delay = c.createDelay(0.1);
-    delay.delayTime.value = 0.03;
-    rev.connect(delay).connect(reverbSend);
-    return { dest: input, reverb: rev };
-  };
-
-  const makePanner = (c, position, refDistance = 1.5, out = master) => {
-    if (!position) return master;
-    const p = c.createPanner();
-    p.panningModel = 'HRTF';
-    p.distanceModel = 'inverse';
-    p.refDistance = refDistance;
-    p.rolloffFactor = 0.5; // на 38 м ≈ -22 дБ
-    p.maxDistance = 200;
-    p.coneInnerAngle = 360;
-    const t = c.currentTime;
-    if (p.positionX) {
-      p.positionX.setValueAtTime(position.x, t);
-      p.positionY.setValueAtTime(position.y, t);
-      p.positionZ.setValueAtTime(position.z, t);
-    } else p.setPosition(position.x, position.y, position.z);
-    p.connect(out);
-    return p;
-  };
-
-  // Проигрывает случайную запись: чуть другая высота и громкость, не больше MAX_VOICES голосов сразу.
-  const playSample = (c, kind, dest = master, reverb = reverbSend) => {
-    const list = shared.gunSamples?.[kind];
-    if (!list?.length) return false;
-    const t = c.currentTime;
-    while (voices.length >= MAX_VOICES) {
-      const old = voices.shift();
-      try {
-        old.gain.gain.cancelScheduledValues(t);
-        old.gain.gain.setValueAtTime(old.gain.gain.value, t);
-        old.gain.gain.linearRampToValueAtTime(0, t + 0.03);
-        old.source.stop(t + 0.04);
-      } catch {
-        // уже закончился
-      }
-    }
-    const source = c.createBufferSource();
-    source.buffer = list[Math.floor(Math.random() * list.length)];
-    source.playbackRate.value = 1 + (Math.random() - 0.5) * 0.06; // ±3%
-    const gain = c.createGain();
-    // пистолет громче и звонче: запись глуховата и терялась на фоне звона попадания
-    gain.gain.value = (kind === 'ak' ? 1 : 1.7) * (0.88 + Math.random() * 0.24);
-    if (kind === 'ak') {
-      source.connect(gain).connect(dest);
-    } else {
-      const bright = c.createBiquadFilter();
-      bright.type = 'highshelf';
-      bright.frequency.value = 2500;
-      bright.gain.value = 3; // записи 1911 уже звонкие, добавка лишь чуть добавляет хруста
-      source.connect(bright).connect(gain).connect(dest);
-    }
-    if (kind !== 'ak') {
-      // «хлёсткость»: короткий яркий треск и тонкий металлический звон поверх записи
-      noise(c, t, { seconds: 0.05, type: 'highpass', from: 4500, to: 2500, gain: 0.5, decay: 0.03, send: 0.1, dest, reverb });
-      tone(c, t, { type: 'triangle', from: 2350, gain: 0.07, decay: 0.16, send: 0.5, dest, reverb });
-      tone(c, t, { type: 'sine', from: 3720, gain: 0.04, decay: 0.12, send: 0.5, dest, reverb });
-    }
-    const wet = c.createGain();
-    wet.gain.value = kind === 'ak' ? 0.22 : 0.24; // эхо по полю чуть гуще
-    gain.connect(wet).connect(reverb);
-    const voice = { source, gain };
-    voices.push(voice);
-    source.onended = () => {
-      const i = voices.indexOf(voice);
-      if (i >= 0) voices.splice(i, 1);
-    };
-    source.start(t);
-    return true;
-  };
-
-  // Буферы шума готовятся один раз на длину (очередь из автомата — 10 выстрелов в секунду).
-  const noiseBuffers = new Map();
-  const noiseBuffer = (c, seconds) => {
-    const cached = noiseBuffers.get(seconds);
-    if (cached) return cached;
-    const buffer = c.createBuffer(1, Math.floor(c.sampleRate * seconds), c.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i += 1) data[i] = Math.random() * 2 - 1;
-    noiseBuffers.set(seconds, buffer);
-    return buffer;
-  };
-
-  // шумовая вспышка через фильтр: type 'highpass' | 'lowpass' | 'bandpass', частота плавно меняется
-  const noise = (c, t, { seconds, type, from, to, gain, decay, send = 0.3, dest = master, reverb = reverbSend }) => {
-    const source = c.createBufferSource();
-    source.buffer = noiseBuffer(c, seconds);
-    const filter = c.createBiquadFilter();
-    filter.type = type;
-    filter.frequency.setValueAtTime(from, t);
-    filter.frequency.exponentialRampToValueAtTime(to, t + decay);
-    const envelope = c.createGain();
-    envelope.gain.setValueAtTime(0.0001, t);
-    envelope.gain.exponentialRampToValueAtTime(gain, t + 0.002);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, t + decay);
-    source.connect(filter).connect(envelope);
-    envelope.connect(dest);
-    const wet = c.createGain();
-    wet.gain.value = send;
-    envelope.connect(wet).connect(reverb);
-    source.start(t);
-    source.stop(t + seconds);
-  };
-
-  const tone = (c, t, { type = 'sine', from, to = from, gain, decay, send = 0.2, dest = master, reverb = reverbSend }) => {
-    const osc = c.createOscillator();
-    osc.type = type;
-    osc.frequency.setValueAtTime(from, t);
-    if (to !== from) osc.frequency.exponentialRampToValueAtTime(to, t + decay);
-    const envelope = c.createGain();
-    envelope.gain.setValueAtTime(0.0001, t);
-    envelope.gain.exponentialRampToValueAtTime(gain, t + 0.002);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, t + decay);
-    osc.connect(envelope);
-    envelope.connect(dest);
-    const wet = c.createGain();
-    wet.gain.value = send;
-    envelope.connect(wet).connect(reverb);
-    osc.start(t);
-    osc.stop(t + decay + 0.02);
-  };
-
-  // Прослушка записи для звуковой доски (sound-board.js): сырой файл без обработки, у слушателя,
-  // через тот же master, что и выстрелы. Одна за раз. Промис: длительность по окончании, null — перебили.
+  // Прослушка записи для звуковой доски: сырой файл без обработки, у слушателя, через master.
+  // Одна за раз. Промис: длительность по окончании, null — перебили.
   let preview = null;
   let previewToken = null;
   const previewFile = (name) => {
-    const c = ensure();
+    const g = ensure();
+    const c = g.context;
     try {
       preview?.stop();
     } catch {
@@ -268,10 +605,11 @@ export function createSound() {
       if (previewToken !== token) return null;
       const source = c.createBufferSource();
       source.buffer = buffer;
-      source.connect(master);
+      source.connect(g.master);
       preview = source;
       return new Promise((resolve) => {
         source.onended = () => {
+          disconnect(source);
           if (preview === source) preview = null;
           resolve(previewToken === token ? buffer.duration : null);
         };
@@ -280,39 +618,97 @@ export function createSound() {
     });
   };
 
+  // Сторож (из update, раз в 0,5 с): контекст приостановлен/прерван — resume; в выходе NaN (он навсегда
+  // глушит компрессор) — пересобрать выход и голоса.
+  let nextWatch = 0;
+  let probeData = null;
+  const watch = (g) => {
+    const now = performance.now();
+    if (now < nextWatch) return;
+    nextWatch = now + 500;
+    const c = g.context;
+    if (c.state === 'suspended' || c.state === 'interrupted') {
+      counters.resumes += 1;
+      c.resume().catch(() => {});
+      return;
+    }
+    if (!g.probe) return;
+    probeData ??= new Float32Array(g.probe.fftSize);
+    g.probe.getFloatTimeDomainData(probeData);
+    for (let i = 0; i < probeData.length; i += 1) {
+      if (!Number.isFinite(probeData[i])) {
+        counters.nanResets += 1;
+        console.warn('[sound] NaN в выходе — пересобираю выход и голоса');
+        buildBus(g);
+        buildPools(g);
+        return;
+      }
+    }
+  };
+
   return {
     version: SOUND_VERSION,
     previewFile,
-    // Слушатель = голова: вызывать каждый кадр. Позиция и ориентация — AudioParam, сглаживание 20 мс
-    // (без «ступенек» при повороте головы).
-    update(camera) {
-      if (!context || !camera) return;
-      try {
-      camera.updateWorldMatrix(true, false);
-      const e = camera.matrixWorld.elements; // колонки: 0 — вправо, 1 — вверх, 2 — назад (без масштаба)
-      const norm = (x, y, z) => { const n = Math.hypot(x, y, z) || 1; return [x / n, y / n, z / n]; };
-      const lp = [e[12], e[13], e[14]];
-      const lf = norm(-e[8], -e[9], -e[10]);
-      const lu = norm(e[4], e[5], e[6]);
-      head.x = lp[0]; head.y = lp[1]; head.z = lp[2];
-      head.rx = e[0]; head.ry = e[1]; head.rz = e[2];
-      head.ok = true;
-      const l = context.listener;
-      const t = context.currentTime;
-      if (l.positionX) {
-        l.positionX.setTargetAtTime(lp[0], t, 0.02);
-        l.positionY.setTargetAtTime(lp[1], t, 0.02);
-        l.positionZ.setTargetAtTime(lp[2], t, 0.02);
-        l.forwardX.setTargetAtTime(lf[0], t, 0.02);
-        l.forwardY.setTargetAtTime(lf[1], t, 0.02);
-        l.forwardZ.setTargetAtTime(lf[2], t, 0.02);
-        l.upX.setTargetAtTime(lu[0], t, 0.02);
-        l.upY.setTargetAtTime(lu[1], t, 0.02);
-        l.upZ.setTargetAtTime(lu[2], t, 0.02);
-      } else {
-        l.setPosition(lp[0], lp[1], lp[2]);
-        l.setOrientation(lf[0], lf[1], lf[2], lu[0], lu[1], lu[2]);
+    // Отладка: sound.stats() → голоса по пулам, счётчики, состояние контекста
+    stats() {
+      const g = graph();
+      const pools = {};
+      let liveNodes = 0;
+      for (const [name, pool] of Object.entries(g?.pools ?? {})) {
+        let active = 0;
+        let fading = 0;
+        for (const v of pool.voices) {
+          liveNodes += v.nodes.length;
+          if (v.shot) {
+            liveNodes += 2;
+            if (v.shot.fading) fading += 1;
+            else active += 1;
+          }
+        }
+        pools[name] = { size: pool.voices.length, max: pool.max, active, fading };
       }
+      const bank = shared.soundBank;
+      return {
+        contextState: g?.context?.state ?? 'none',
+        pools,
+        voices: Object.values(pools).reduce((s, p) => s + p.active + p.fading, 0),
+        liveNodes,
+        bank: bank && { pistol: bank.pistol.length, ak: bank.ak.length, fx: Object.fromEntries(Object.entries(bank.fx).map(([k, l]) => [k, l.length])) },
+        ...counters,
+      };
+    },
+    // Слушатель = голова: вызывать каждый кадр. Позиция и ориентация — AudioParam, сглаживание 20 мс.
+    update(camera) {
+      const g = graph();
+      if (!g?.context || !camera) return;
+      try {
+        watch(g);
+        camera.updateWorldMatrix(true, false);
+        const e = camera.matrixWorld.elements; // колонки: 0 — вправо, 1 — вверх, 2 — назад (без масштаба)
+        for (let i = 0; i < 15; i += 1) if (!Number.isFinite(e[i])) return; // NaN в слушателе заглушил бы всё
+        const norm = (x, y, z) => { const n = Math.hypot(x, y, z) || 1; return [x / n, y / n, z / n]; };
+        const lp = [e[12], e[13], e[14]];
+        const lf = norm(-e[8], -e[9], -e[10]);
+        const lu = norm(e[4], e[5], e[6]);
+        head.x = lp[0]; head.y = lp[1]; head.z = lp[2];
+        head.rx = e[0]; head.ry = e[1]; head.rz = e[2];
+        head.ok = true;
+        const l = g.context.listener;
+        const t = g.context.currentTime;
+        if (l.positionX) {
+          l.positionX.setTargetAtTime(lp[0], t, 0.02);
+          l.positionY.setTargetAtTime(lp[1], t, 0.02);
+          l.positionZ.setTargetAtTime(lp[2], t, 0.02);
+          l.forwardX.setTargetAtTime(lf[0], t, 0.02);
+          l.forwardY.setTargetAtTime(lf[1], t, 0.02);
+          l.forwardZ.setTargetAtTime(lf[2], t, 0.02);
+          l.upX.setTargetAtTime(lu[0], t, 0.02);
+          l.upY.setTargetAtTime(lu[1], t, 0.02);
+          l.upZ.setTargetAtTime(lu[2], t, 0.02);
+        } else {
+          l.setPosition(lp[0], lp[1], lp[2]);
+          l.setOrientation(lf[0], lf[1], lf[2], lu[0], lu[1], lu[2]);
+        }
       } catch {
         // слушатель не обновился — звук просто останется на прошлой позе
       }
@@ -320,178 +716,51 @@ export function createSound() {
     // Каким оружием звучит следующий shot() без параметров: 'pistol' | 'ak'. shooting.js зовёт
     // shot() без параметров, поэтому main.js ставит оружие перед выстрелом.
     setWeapon(kind) {
-      weapon = kind === 'ak' ? 'ak' : 'pistol';
+      weapon = kind === 'ak' || kind === 'awp' ? kind : 'pistol';
     },
-    // Выстрел: резкий хлопок (высокий шум), плотное «тело» (шум, фильтр уходит вниз), глухой удар в
-    // грудь (синус вниз по частоте) и хвост эха. { kind: 'ak' } — автомат: громче, ниже, длиннее
-    // хвост, с лязгом затвора; без параметров — оружие из setWeapon (по умолчанию пистолет).
+    // затвор AWP (awp-model.js cycleBolt): phase 'open' — вверх и назад, 'close' — вперёд и вниз
+    bolt(position, phase = 'open') {
+      return safe(() => play('small', pick(shared.soundBank?.fx[phase === 'close' ? 'boltClose' : 'boltOpen']), { position, gain: 0.6, refDistance: 1.0, wet: 0.12 }));
+    },
+    // Выстрел: случайная запись (±3 % высоты, ±12 % громкости); пока записи не загрузились —
+    // запечённый синтез. { kind: 'ak' } — автомат; без параметров — оружие из setWeapon.
     shot({ kind = weapon, position } = {}) {
-      try {
-        const c = ensure();
-        loadSamples(c);
-        const near = position ? makeNear(c, position) : null;
-        const dest = near ? near.dest : makePanner(c, position);
-        const reverb = near ? near.reverb : reverbSend;
-        if (playSample(c, kind === 'ak' ? 'ak' : 'pistol', dest, reverb)) return;
-        const t = c.currentTime;
-        if (kind === 'ak') {
-          const jitter = 1 + (Math.random() - 0.5) * 0.08; // очередь не звучит одинаковыми щелчками
-          noise(c, t, { seconds: 0.2, type: 'highpass', from: 1900 * jitter, to: 650, gain: 1, decay: 0.09, send: 0.55, dest, reverb });
-          noise(c, t, { seconds: 0.6, type: 'lowpass', from: 3200 * jitter, to: 220, gain: 1, decay: 0.42, send: 0.75, dest, reverb });
-          noise(c, t, { seconds: 0.3, type: 'bandpass', from: 900, to: 320, gain: 0.6, decay: 0.2, send: 0.5, dest, reverb });
-          tone(c, t, { from: 125 * jitter, to: 28, gain: 1, decay: 0.32, send: 0.35, dest, reverb });
-          tone(c, t + 0.003, { type: 'triangle', from: 68, to: 24, gain: 0.85, decay: 0.42, send: 0.3, dest, reverb });
-          noise(c, t + 0.045, { seconds: 0.05, type: 'bandpass', from: 2600, to: 1800, gain: 0.22, decay: 0.035, send: 0.05, dest, reverb }); // затвор
-          return;
+      return safe(() => {
+        ensure();
+        // AWP: записи калаша ниже (×0,68), под ними та же запись ещё ниже (×0,48) и запечённый низкий
+        // «бум»; хвост длиннее (больше реверба)
+        const awp = kind === 'awp';
+        const ak = kind === 'ak' || awp;
+        const bank = shared.soundBank;
+        const sample = pick(ak ? bank?.ak : bank?.pistol);
+        const level = 0.88 + Math.random() * 0.24;
+        if (sample && awp) {
+          play('gun', pick(bank.fx.awpBoom), { position, gain: 0.95 * level, wet: 0.5 });
+          play('gun', pick(bank.ak), { position, gain: 0.7 * level, rate: 0.48, wet: 0.5 });
+          return play('gun', sample, { position, gain: 1.3 * level, rate: 0.66 + Math.random() * 0.04, wet: 0.42 });
         }
-        noise(c, t, { seconds: 0.2, type: 'highpass', from: 2500, to: 900, gain: 1, decay: 0.07, send: 0.5, dest, reverb });
-        noise(c, t, { seconds: 0.4, type: 'lowpass', from: 4200, to: 380, gain: 0.85, decay: 0.3, send: 0.6, dest, reverb });
-        noise(c, t, { seconds: 0.3, type: 'bandpass', from: 1200, to: 500, gain: 0.5, decay: 0.16, send: 0.4, dest, reverb });
-        tone(c, t, { from: 170, to: 38, gain: 1, decay: 0.24, send: 0.3, dest, reverb });
-        tone(c, t + 0.004, { type: 'triangle', from: 90, to: 32, gain: 0.7, decay: 0.3, send: 0.2, dest, reverb });
-      } catch {
-        // без звука
-      }
+        if (sample) {
+          return play('gun', sample, { position, gain: (ak ? 1 : PISTOL_GAIN) * level, rate: 1 + (Math.random() - 0.5) * 0.06, wet: ak ? 0.22 : 0.24 });
+        }
+        return play('gun', pick(bank?.fx[ak ? 'synthAk' : 'synthPistol']), { position, gain: level, wet: 0.5 });
+      });
     },
-    // Попадание в металл: звонкий «тинь» из нескольких негармоничных обертонов и сухой щелчок.
+    tink(position) {
+      return safe(() => play('small', pick(shared.soundBank?.fx.tink), { position, gain: 0.25, refDistance: 1.0, wet: 0.2 }));
+    },
+    // звон тише выстрела на ~6 дБ и затухает с расстоянием (ref 1.5 м): мишень в 5 м ≈ -7 дБ ещё
     hit(position) {
-      try {
-        const c = ensure();
-        const t = c.currentTime;
-        // звон тише выстрела на ~6 дБ и затухает с расстоянием (ref 1.5 м): мишень в 5 м ≈ -7 дБ ещё
-        const dest = c.createGain();
-        dest.gain.value = 0.5;
-        dest.connect(makePanner(c, position, 1.5));
-        const base = 1050 + Math.random() * 260;
-        const partials = [
-          [1, 0.34, 0.55],
-          [1.58, 0.28, 0.4],
-          [2.41, 0.2, 0.3],
-          [3.27, 0.13, 0.2],
-          [4.6, 0.07, 0.12],
-        ];
-        for (const [ratio, gain, decay] of partials) {
-          tone(c, t, { from: base * ratio * (1 + (Math.random() - 0.5) * 0.01), gain, decay, send: 0.35, dest });
-        }
-        noise(c, t, { seconds: 0.05, type: 'highpass', from: 5200, to: 3200, gain: 0.55, decay: 0.018, send: 0.1, dest });
-        tone(c, t, { from: 380, to: 210, gain: 0.3, decay: 0.07, send: 0.1, dest }); // удар по пластине
-      } catch {
-        // без звука
-      }
+      return safe(() => play('fx', pick(shared.soundBank?.fx.hit), { position, gain: 0.5, rate: 0.97 + Math.random() * 0.06, wet: 0.3 }));
     },
-    // Бьётся глиняная тарелка: сухой хруст (шум в середине частот), звонкий треск сверху, глухой
-    // «тук» и россыпь коротких щелчков разлетающихся осколков.
     shatter(position) {
-      try {
-        const c = ensure();
-        const t = c.currentTime;
-        const dest = c.createGain();
-        dest.gain.value = 0.75;
-        dest.connect(makePanner(c, position, 1.5));
-        noise(c, t, { seconds: 0.12, type: 'bandpass', from: 3200, to: 1400, gain: 0.95, decay: 0.08, send: 0.3, dest });
-        noise(c, t, { seconds: 0.25, type: 'highpass', from: 7000, to: 3200, gain: 0.45, decay: 0.16, send: 0.25, dest });
-        tone(c, t, { from: 460, to: 160, gain: 0.4, decay: 0.05, send: 0.1, dest });
-        for (let i = 0; i < 9; i += 1) {
-          const at = t + 0.004 + Math.random() * 0.12;
-          tone(c, at, { type: 'triangle', from: 2400 + Math.random() * 4200, gain: 0.04 + Math.random() * 0.08, decay: 0.015 + Math.random() * 0.03, send: 0.3, dest });
-          noise(c, at, { seconds: 0.02, type: 'highpass', from: 5500, to: 3800, gain: 0.12 + Math.random() * 0.2, decay: 0.01, send: 0.15, dest });
-        }
-      } catch {
-        // без звука
-      }
+      return safe(() => play('fx', pick(shared.soundBank?.fx.shatter), { position, gain: 0.75, rate: 0.95 + Math.random() * 0.1, wet: 0.25 }));
     },
-    // Электрический разряд (робопёс, robodog.js): сухой щелчок, треск — пачки коротких щелчков шума
-    // через полосовой фильтр на случайных частотах, и жужжание — две расстроенные «пилы» на случайной
-    // высоте, рваные (амплитуду режет квадратная волна 30–70 Гц). strength 0..1 — громкость.
+    // strength 0..1 — громкость
     zap(position, strength = 1) {
-      try {
-        const c = ensure();
-        const t = c.currentTime;
-        const dest = c.createGain();
-        dest.gain.value = 0.6 * strength;
-        dest.connect(makePanner(c, position, 1.5));
-        noise(c, t, { seconds: 0.05, type: 'highpass', from: 6000, to: 3000, gain: 0.7, decay: 0.025, send: 0.1, dest });
-        const bursts = 6 + Math.floor(Math.random() * 5);
-        for (let i = 0; i < bursts; i += 1) {
-          const at = t + Math.random() * 0.22;
-          const f = 1800 + Math.random() * 5500;
-          noise(c, at, { seconds: 0.05, type: 'bandpass', from: f, to: f * 0.6, gain: 0.35 + Math.random() * 0.55, decay: 0.008 + Math.random() * 0.03, send: 0.15, dest });
-        }
-        const length = 0.12 + Math.random() * 0.2;
-        const base = 70 + Math.random() * 180;
-        const hum = c.createGain();
-        hum.gain.setValueAtTime(0.0001, t);
-        hum.gain.exponentialRampToValueAtTime(0.24, t + 0.005);
-        hum.gain.exponentialRampToValueAtTime(0.0001, t + length);
-        const chop = c.createGain();
-        chop.gain.value = 0.5;
-        const lfo = c.createOscillator();
-        lfo.type = 'square';
-        lfo.frequency.value = 30 + Math.random() * 40;
-        const depth = c.createGain();
-        depth.gain.value = 0.5;
-        lfo.connect(depth).connect(chop.gain);
-        const hp = c.createBiquadFilter();
-        hp.type = 'highpass';
-        hp.frequency.value = 400;
-        for (const detune of [1, 1.013 + Math.random() * 0.02]) {
-          const osc = c.createOscillator();
-          osc.type = 'sawtooth';
-          osc.frequency.setValueAtTime(base * detune * (2 + Math.random()), t);
-          osc.frequency.exponentialRampToValueAtTime(base * detune, t + length);
-          osc.connect(hp);
-          osc.start(t);
-          osc.stop(t + length + 0.02);
-        }
-        hp.connect(chop).connect(hum).connect(dest);
-        const wet = c.createGain();
-        wet.gain.value = 0.15;
-        hum.connect(wet).connect(reverbSend);
-        lfo.start(t);
-        lfo.stop(t + length + 0.02);
-      } catch {
-        // без звука
-      }
+      return safe(() => play('fx', pick(shared.soundBank?.fx.zap), { position, gain: 0.6 * Math.max(0, Math.min(1, finite(strength, 1))), wet: 0.15 }));
     },
-    // Робот отключается (смерть робопса): гудение съезжает вниз, фильтр закрывается, искрит
     powerDown(position) {
-      try {
-        const c = ensure();
-        const t = c.currentTime;
-        const dest = c.createGain();
-        dest.gain.value = 0.6;
-        dest.connect(makePanner(c, position, 1.5));
-        const lp = c.createBiquadFilter();
-        lp.type = 'lowpass';
-        lp.frequency.setValueAtTime(3200, t);
-        lp.frequency.exponentialRampToValueAtTime(140, t + 1.1);
-        const envelope = c.createGain();
-        envelope.gain.setValueAtTime(0.0001, t);
-        envelope.gain.exponentialRampToValueAtTime(0.32, t + 0.02);
-        envelope.gain.setValueAtTime(0.32, t + 0.45);
-        envelope.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
-        for (const [type, from, to] of [['sawtooth', 430, 36], ['square', 217, 19]]) {
-          const osc = c.createOscillator();
-          osc.type = type;
-          osc.frequency.setValueAtTime(from, t);
-          osc.frequency.exponentialRampToValueAtTime(to, t + 1.15);
-          osc.connect(lp);
-          osc.start(t);
-          osc.stop(t + 1.25);
-        }
-        lp.connect(envelope).connect(dest);
-        const wet = c.createGain();
-        wet.gain.value = 0.25;
-        envelope.connect(wet).connect(reverbSend);
-        tone(c, t, { from: 160, to: 40, gain: 0.5, decay: 0.2, send: 0.2, dest }); // глухой удар
-        for (let i = 0; i < 9; i += 1) {
-          const at = t + Math.random() * 0.9;
-          const f = 2000 + Math.random() * 5000;
-          noise(c, at, { seconds: 0.05, type: 'bandpass', from: f, to: f * 0.6, gain: 0.2 + Math.random() * 0.4, decay: 0.01 + Math.random() * 0.03, send: 0.15, dest });
-        }
-      } catch {
-        // без звука
-      }
+      return safe(() => play('fx', pick(shared.soundBank?.fx.powerDown), { position, gain: 0.6, wet: 0.25 }));
     },
   };
 }

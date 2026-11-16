@@ -204,7 +204,10 @@ const remoteConsole = createRemoteConsole({
     mic,
     controls,
     // screenshot({ eyes: 'both' | 'left' | 'right', width }) -> a picture of what the headset shows
-    screenshot: (options) => screenshotter.request(options),
+    screenshot: (options) => {
+      screenshotFlashUntil = performance.now() + 1000; // the dot flashes violet: a screenshot is being taken
+      return screenshotter.request(options);
+    },
     draft: draftText,
     recording: triggerPressed || releaseTimer !== null, // true while the user is dictating: do not touch the shell then
     messages: shown, // the messages shown now, newest first
@@ -331,8 +334,9 @@ hud.add(triggerDot);
 // cancelled with the word "отмена" and dropped.
 const DOT = {
   idle: 0x6b7280, waiting: 0xf97316, recording: 0xffffff, pending: 0x3b82f6, ready: 0x67e8f9, sent: 0x22c55e,
-  cancelled: 0xef4444,
+  cancelled: 0xef4444, screenshot: 0xa855f7,
 };
+let screenshotFlashUntil = 0;
 let sentFlashUntil = 0;
 let cancelFlashUntil = 0;
 // Light blue: everything that was said is already text, nothing is still being recognised, so it
@@ -341,7 +345,8 @@ function draftIsFinal(time) {
   return voiceState === 'idle' && releaseTimer === null && time - draftChangedAt >= SETTLE_MS;
 }
 function paintDot(time) {
-  const color = time < cancelFlashUntil ? DOT.cancelled
+  const color = time < screenshotFlashUntil ? DOT.screenshot
+    : time < cancelFlashUntil ? DOT.cancelled
     : time < sentFlashUntil ? DOT.sent
       : triggerPressed ? DOT.recording
         : !draftText ? (awaitingAnswer ? DOT.waiting : DOT.idle)
@@ -372,6 +377,7 @@ const hudConfig = {
   windowTopM: 0.0756, // the top edge of the newest window, in the HUD's space
   sideShift: 1 / 14, // the fraction of a window's width the windows are pushed aside by
   distanceM: HUD.distance, // how far from the eyes the HUD hangs; it is scaled so it looks the same size
+  messageTtlS: 15, // a message disappears this long after it appeared (0: never); it counts as read
   occluded: false, // true: things nearer than the HUD (the pistol in the hand) cover it
 };
 const STORE_KEY = 'vr.messages';
@@ -400,7 +406,8 @@ function showMessage() {
     messagePanel.show(all[index] ?? null);
     const age = typing ? index - 1 : index; // the messages fade by their own age; the preview does not
     const faint = hudConfig.opacity;
-    messagePanel.setOpacity(age < 0 ? 1 : (faint[age] ?? faint[faint.length - 1] ?? 1));
+    const base = age < 0 ? 1 : (faint[age] ?? faint[faint.length - 1] ?? 1);
+    messagePanel.setOpacity(base * (age < 0 ? 1 : (fadeOf.get(all[index]?.id) ?? 1)));
   });
 }
 
@@ -462,11 +469,37 @@ function layoutMessages() {
 // A new message is added at the bottom; the oldest of those above falls off (it counts as read).
 function addMessage(message) {
   if (shown.some((m) => m.id === message.id)) return; // the bridge re-sends unread ones after a reconnect
+  message.at = Date.now();
   shown.unshift(message);
   while (shown.length > hudConfig.maxShown) bridge.send({ t: 'read', id: shown.pop().id });
   saveShown();
   showMessage();
 }
+
+// Auto-hide: every message (not the unsent preview) fades out messageTtlS after it appeared.
+const FADE_S = 0.5;
+const fadeOf = new Map(); // id -> alpha multiplier while fading
+function expireMessages() {
+  const ttl = hudConfig.messageTtlS;
+  const now = Date.now();
+  let changed = false;
+  for (let i = shown.length - 1; i >= 0; i--) {
+    const m = shown[i];
+    if (!(ttl > 0)) { fadeOf.delete(m.id); continue; }
+    if (typeof m.at !== 'number') m.at = now;
+    const left = (m.at + ttl * 1000 - now) / 1000;
+    if (left <= 0) {
+      fadeOf.delete(m.id);
+      bridge.send({ t: 'read', id: shown.splice(i, 1)[0].id });
+      changed = true;
+    } else if (left < FADE_S) {
+      fadeOf.set(m.id, left / FADE_S);
+      changed = true;
+    }
+  }
+  if (changed) { saveShown(); showMessage(); }
+}
+setInterval(expireMessages, 100);
 
 // Takes one message off the screen by its id (a phrase the bridge dropped, a page warning).
 function closeMessage(id) {
@@ -484,7 +517,7 @@ function closeMessage(id) {
 try {
   const saved = JSON.parse(localStorage.getItem(STORE_KEY) ?? '[]');
   if (Array.isArray(saved)) {
-    shown.push(...saved.filter((m) => m && typeof m.id === 'string' && typeof m.text === 'string').slice(0, hudConfig.maxShown));
+    shown.push(...saved.filter((m) => m && typeof m.id === 'string' && typeof m.text === 'string' && !(hudConfig.messageTtlS > 0 && typeof m.at === 'number' && Date.now() - m.at > hudConfig.messageTtlS * 1000)).slice(0, hudConfig.maxShown));
   }
 } catch {
   // unreadable storage: start with none
@@ -492,7 +525,7 @@ try {
 showMessage();
 
 // The ray of the left controller presses the cross of the unsent preview (the light green window).
-const pointer = createPointer({ scene, panels: messagePanels });
+const pointer = createPointer({ scene, panels: messagePanels, aim: pointerAim });
 
 // "Send" may be pressed while the last words are still being recognised. The text is sent only
 // once the trigger is up, the bridge has finished the dictation and the text has stopped changing.

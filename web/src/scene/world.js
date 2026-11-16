@@ -8,6 +8,25 @@
 // шейдером (мерцают, прячутся за облаками). Земля — свой маленький шейдер: пятна разных оттенков
 // зелени из шума и дымка у горизонта под цвет неба.
 export function createWorld({ THREE, scene, root, camera, renderer }) {
+  // Дорогое (шум, земля, звёзды, ~36 000 травинок, запечённые тени травы, текстуры на GPU) строится
+  // один раз и переживает подмену сцены: на шлеме это ~0,5 с работы и заливки текстур на каждой
+  // подмене. Ключ — исходный текст createWorld: любая правка этой функции строит всё заново.
+  const shared = (globalThis.__sceneState ??= {});
+  const WORLD_KEY = createWorld.toString();
+  if (shared.worldCache?.key !== WORLD_KEY) {
+    const stale = shared.worldCache;
+    // старое освобождается позже: пока подменяется сцена, его ещё может рисовать прежняя версия
+    if (stale) setTimeout(() => stale.free?.(), 5000);
+    shared.worldCache = {
+      key: WORLD_KEY,
+      free() {
+        for (const item of [this.noiseTexture, this.cloudTexture, this.shadowTarget, this.ground, this.starGeometry]) item?.dispose();
+        for (const lod of this.lods ?? []) lod.geometry.dispose();
+      },
+    };
+  }
+  const cache = shared.worldCache;
+
   // --- дальность: небо и земля уходят далеко за 100 м, которые выставляет страница
   const oldFar = camera.far;
   camera.far = 5000;
@@ -48,8 +67,10 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   };
   const NOISE_SIZE = 256;
   const NOISE_CELLS = 32;
-  const noiseData = new Uint8Array(NOISE_SIZE * NOISE_SIZE * 4);
-  for (let channel = 0; channel < 4; channel += 1) {
+  const noiseFresh = !cache.noiseData;
+  const noiseData = (cache.noiseData ??= new Uint8Array(NOISE_SIZE * NOISE_SIZE * 4));
+  if (!noiseFresh) seed = cache.seedAfterNoise; // травинки дальше берут случайные числа с того же места
+  for (let channel = 0; noiseFresh && channel < 4; channel += 1) {
     const lattice = Array.from({ length: NOISE_CELLS * NOISE_CELLS }, seeded);
     const at = (x, y) => lattice[(y % NOISE_CELLS) * NOISE_CELLS + (x % NOISE_CELLS)];
     const cell = NOISE_SIZE / NOISE_CELLS;
@@ -65,12 +86,15 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
       }
     }
   }
-  const noiseTexture = new THREE.DataTexture(noiseData, NOISE_SIZE, NOISE_SIZE, THREE.RGBAFormat, THREE.UnsignedByteType);
-  noiseTexture.wrapS = noiseTexture.wrapT = THREE.RepeatWrapping;
-  noiseTexture.magFilter = THREE.LinearFilter;
-  noiseTexture.minFilter = THREE.LinearMipmapLinearFilter;
-  noiseTexture.generateMipmaps = true;
-  noiseTexture.needsUpdate = true;
+  if (noiseFresh) cache.seedAfterNoise = seed;
+  const noiseTexture = (cache.noiseTexture ??= new THREE.DataTexture(noiseData, NOISE_SIZE, NOISE_SIZE, THREE.RGBAFormat, THREE.UnsignedByteType));
+  if (noiseTexture.version === 0) {
+    noiseTexture.wrapS = noiseTexture.wrapT = THREE.RepeatWrapping;
+    noiseTexture.magFilter = THREE.LinearFilter;
+    noiseTexture.minFilter = THREE.LinearMipmapLinearFilter;
+    noiseTexture.generateMipmaps = true;
+    noiseTexture.needsUpdate = true;
+  }
 
   // ---------- небо: шейдер на сфере, которая следует за головой
   // Цвета линейные и уже готовые для экрана (тональной компрессии нет, только мягкий потолок яркости
@@ -169,12 +193,15 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     }
     globalThis.__skyCloudMap = { key: CLOUD_MAP_KEY, data: cloudMapData };
   }
-  const cloudTexture = new THREE.DataTexture(cloudMapData, CLOUD_MAP, CLOUD_MAP, THREE.RGBAFormat, THREE.UnsignedByteType);
-  cloudTexture.wrapS = cloudTexture.wrapT = THREE.RepeatWrapping;
-  cloudTexture.magFilter = THREE.LinearFilter;
-  cloudTexture.minFilter = THREE.LinearMipmapLinearFilter;
-  cloudTexture.generateMipmaps = true;
-  cloudTexture.needsUpdate = true;
+  if (cache.cloudTexture?.image.data !== cloudMapData) cache.cloudTexture = null;
+  const cloudTexture = (cache.cloudTexture ??= new THREE.DataTexture(cloudMapData, CLOUD_MAP, CLOUD_MAP, THREE.RGBAFormat, THREE.UnsignedByteType));
+  if (cloudTexture.version === 0) {
+    cloudTexture.wrapS = cloudTexture.wrapT = THREE.RepeatWrapping;
+    cloudTexture.magFilter = THREE.LinearFilter;
+    cloudTexture.minFilter = THREE.LinearMipmapLinearFilter;
+    cloudTexture.generateMipmaps = true;
+    cloudTexture.needsUpdate = true;
+  }
 
   const WIND = 0.02; // нижний слой, высот слоя в секунду: спокойно, заметно за 20–30 с
   const HIGH_SCALE = 1.45; // верхний слой мельче
@@ -482,15 +509,18 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     const amplitude = smooth(6, 70, Math.hypot(x, z)); // рядом с игроком ровно
     return amplitude * (1.2 * Math.sin(x * 0.019) * Math.cos(z * 0.016) + 0.6 * Math.sin(x * 0.052 + z * 0.041) + 0.3 * Math.sin(z * 0.1 - x * 0.07));
   };
-  const ground = new THREE.PlaneGeometry(SIZE, SIZE, SEGMENTS, SEGMENTS);
-  ground.rotateX(-Math.PI / 2);
-  const positions = ground.attributes.position;
-  for (let i = 0; i < positions.count; i += 1) {
-    const x = warp(positions.getX(i));
-    const z = warp(positions.getZ(i));
-    positions.setXYZ(i, x, height(x, z), z);
+  const groundFresh = !cache.ground;
+  const ground = (cache.ground ??= new THREE.PlaneGeometry(SIZE, SIZE, SEGMENTS, SEGMENTS));
+  if (groundFresh) {
+    ground.rotateX(-Math.PI / 2);
+    const positions = ground.attributes.position;
+    for (let i = 0; i < positions.count; i += 1) {
+      const x = warp(positions.getX(i));
+      const z = warp(positions.getZ(i));
+      positions.setXYZ(i, x, height(x, z), z);
+    }
+    ground.computeVertexNormals();
   }
-  ground.computeVertexNormals();
   const land = new THREE.Mesh(
     ground,
     new THREE.ShaderMaterial({
@@ -601,7 +631,8 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   farBlade.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0.5, 1], 2));
   // на травинку: оттенок кустика, своя случайность (0..1) и пятно луга под ней (meadowPatch из шейдера,
   // посчитанный здесь заранее: выборка текстуры в вершинном шейдере на Quest дорогая)
-  const lods = [blade, farBlade].map((geometry) => ({
+  const grassFresh = !cache.lods; // травинки уже расставлены (подмена сцены): берём готовые
+  const lods = cache.lods ?? [blade, farBlade].map((geometry) => ({
     geometry,
     count: 0,
     matrices: new Float32Array(GRASS_COUNT * 16),
@@ -667,7 +698,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         #include <colorspace_fragment>
       }`,
   });
-  {
+  if (grassFresh) {
     const up = new THREE.Vector3(0, 1, 0);
     const axis = new THREE.Vector3();
     const tilt = new THREE.Quaternion();
@@ -735,17 +766,22 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   const grass = new THREE.Group();
   grass.name = 'scene-grass';
   root.add(grass);
+  if (grassFresh) {
+    for (const lod of lods) {
+      lod.geometry.setAttribute('aVariation', new THREE.InstancedBufferAttribute(lod.variation.subarray(0, lod.count * 3), 3));
+      lod.instanceMatrix = new THREE.InstancedBufferAttribute(lod.matrices.slice(0, lod.count * 16), 16);
+    }
+    cache.lods = lods;
+  }
+  // меши травы — новые, а матрицы травинок (и их буфер на GPU) общие из кэша: ни расчёта, ни заливки
   const makeBlades = (lod, material) => {
-    const mesh = new THREE.InstancedMesh(lod.geometry, material, lod.count);
-    mesh.instanceMatrix.array.set(lod.matrices.subarray(0, lod.count * 16));
-    mesh.instanceMatrix.needsUpdate = true;
+    const mesh = new THREE.InstancedMesh(lod.geometry, material, 0);
+    mesh.instanceMatrix = lod.instanceMatrix;
+    mesh.count = lod.count;
     mesh.frustumCulled = false;
     return mesh;
   };
-  for (const lod of lods) {
-    lod.geometry.setAttribute('aVariation', new THREE.InstancedBufferAttribute(lod.variation.subarray(0, lod.count * 3), 3));
-    grass.add(makeBlades(lod, grassMaterial));
-  }
+  for (const lod of lods) grass.add(makeBlades(lod, grassMaterial));
 
   // Тени травинок на земле. Солнце для теней выше настоящего (иначе тени слишком длинные): справа,
   // SHADOW_ELEVATION над горизонтом. Силуэты всех травинок один раз рисуются в текстуру камерой со
@@ -753,11 +789,12 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   // затемняет себя там, где на неё падает силуэт. Форма тени — настоящая форма травинки.
   const SHADOW_ELEVATION = 22; // градусов
   const SHADOW_SIZE = 2048;
-  const shadowTarget = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE);
+  // запекается один раз (кэш): при подмене сцены земля сразу берёт готовую текстуру теней
+  const shadowTarget = (cache.shadowTarget ??= new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE));
   const shadowScene = new THREE.Scene();
   shadowScene.background = new THREE.Color(1, 1, 1);
   const silhouetteMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide });
-  for (const lod of lods) shadowScene.add(makeBlades(lod, silhouetteMaterial));
+  if (!cache.shadowBaked) for (const lod of lods) shadowScene.add(makeBlades(lod, silhouetteMaterial));
   const shadowSun = new THREE.Vector3().setFromSphericalCoords(
     1,
     THREE.MathUtils.degToRad(90 - SHADOW_ELEVATION),
@@ -771,6 +808,13 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   shadowCamera.updateMatrixWorld(true);
   const shadowMatrix = new THREE.Matrix4().multiplyMatrices(shadowCamera.projectionMatrix, shadowCamera.matrixWorldInverse);
   let shadowBaked = false;
+  const useGrassShadows = () => {
+    land.material.uniforms.grassShadow.value = shadowTarget.texture;
+    land.material.uniforms.shadowMatrix.value.copy(shadowMatrix);
+    land.material.uniforms.shadowOn.value = 1;
+    shadowBaked = true;
+  };
+  if (cache.shadowBaked) useGrassShadows();
   const bakeGrassShadows = () => {
     const xrEnabled = renderer.xr.enabled;
     const previous = renderer.getRenderTarget();
@@ -779,10 +823,9 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     renderer.render(shadowScene, shadowCamera);
     renderer.setRenderTarget(previous);
     renderer.xr.enabled = xrEnabled;
-    land.material.uniforms.grassShadow.value = shadowTarget.texture;
-    land.material.uniforms.shadowMatrix.value.copy(shadowMatrix);
-    land.material.uniforms.shadowOn.value = 1;
-    shadowBaked = true;
+    useGrassShadows();
+    cache.shadowBaked = true;
+    shadowScene.clear(); // силуэты больше не нужны (их матрицы общие с травой — не освобождать)
   };
 
   const cameraPosition = new THREE.Vector3();
@@ -819,9 +862,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         () => { if (grid) grid.visible = gridWasVisible ?? true; },
         () => { camera.far = oldFar; camera.updateProjectionMatrix(); },
         () => { renderer.toneMapping = oldToneMapping; renderer.toneMappingExposure = oldExposure; },
-        () => shadowTarget.dispose(),
-        () => noiseTexture.dispose(),
-        () => cloudTexture.dispose(),
+        // shadowTarget, noiseTexture, cloudTexture, земля и трава — в кэше (shared.worldCache), не освобождать
         () => silhouetteMaterial.dispose(),
         () => { sky.geometry.dispose(); skyMaterial.dispose(); },
         () => { stars.geometry.dispose(); stars.material.dispose(); },

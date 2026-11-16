@@ -4,16 +4,28 @@
 // страницы (localStorage; в старых сохранениях вида нет — это пистолет). Живёт в сцене.
 import { buildPistol } from './pistol-model.js';
 import { buildAk } from './ak-model.js';
+import { buildAwp, cycleBolt } from './awp-model.js';
+import { cachedBuild } from './model-cache.js';
 
 const STORE_KEY = 'scene.pistols';
 const OLD_STORE_KEY = 'scene.pistol'; // прежний формат: один пистолет
 const OUTLINE_M = 0.0025; // толщина белой обводки, метры (у калаша обводка готовая, в файле модели)
-const KINDS = ['pistol', 'ak'];
+const KINDS = ['pistol', 'ak', 'awp']; // 'awp' — снайперка с продольным затвором (awp-model.js), пока без прицела
 
 export function createPistols({ THREE, root }) {
   const shared = (globalThis.__sceneState ??= {});
   const items = []; // { kind, group, accent, outline, muzzle, ejector }
-  const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.BackSide });
+  // Обводка рисуется ПОСЛЕ мира (renderOrder 1) и не пишет глубину, а само оружие — после неё
+  // (renderOrder 2): оружие целиком закрывает оболочку, белой остаётся только кайма по силуэту. Так
+  // обводка не зависит от того, куда смотрят нормали и обход граней (у скачанного калаша магазин и
+  // цевьё вывернуты — раньше оболочка белила их целиком).
+  const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.BackSide, depthWrite: false });
+  const liftModel = (group, outline) => {
+    outline.renderOrder = 1;
+    group.traverse((o) => {
+      if (o.isMesh && o !== outline) o.renderOrder = 2;
+    });
+  };
 
   // Обводка всего оружия по контуру: те же детали чуть крупнее (одна геометрия, см.
   // pistol-model.js), нарисованные только изнутри (BackSide); внутри силуэта их закрывает само оружие.
@@ -32,13 +44,16 @@ export function createPistols({ THREE, root }) {
         outline.geometry.dispose();
         outline.geometry = geometry;
         model.group.add(outline);
+        liftModel(model.group, outline);
       });
     } else {
-      const { outlineGeometry, ...pistol } = buildPistol(THREE, { outlineM: OUTLINE_M });
+      // готовая модель из кэша (model-cache.js): построение пистолета на шлеме ~0,1 с — при каждой подмене сцены
+      const { outlineGeometry, ...pistol } = cachedBuild(kind === 'awp' ? buildAwp : buildPistol, THREE, { outlineM: OUTLINE_M });
       model = pistol;
       outline = new THREE.Mesh(outlineGeometry, outlineMaterial);
       outline.visible = false;
       model.group.add(outline);
+      liftModel(model.group, outline);
     }
     const item = { kind, ...model, outline };
     if (pose?.position && pose?.quaternion) {
@@ -83,6 +98,39 @@ export function createPistols({ THREE, root }) {
     items,
     add,
     remove,
+    // Спуск оружия идёт за курком: у того, что в руке, — value (0..1) × maxAngle, у остальных — назад в 0.
+    // Без аллокаций; вызывается каждый кадр.
+    // Выстрел: затвор откатывается (25 мс), возвращается (75 мс); onEject(item) — когда он в крайней точке.
+    kick(item) {
+      item.shotAt = shared.sceneNowMs ?? performance.now(); // сценовые часы (замедление времени)
+      item.ejected = false;
+    },
+    updateTriggers(heldItem, value, dt, onEject) {
+      const now = shared.sceneNowMs ?? performance.now();
+      const k = 1 - Math.exp(-30 * Math.min(dt, 0.1));
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (item.shotAt && item.bolt) {
+          // продольный затвор (AWP): вверх, назад (гильза), вперёд, вниз — ≈ 1 с (awp-model.js)
+          if (cycleBolt(item, now - item.shotAt, onEject)) item.shotAt = 0;
+        } else if (item.shotAt) {
+          const age = now - item.shotAt;
+          let s = 0;
+          if (age < 25) s = 1 - (1 - age / 25) ** 2;
+          else if (age < 100) s = (1 - (age - 25) / 75) ** 2;
+          if (age >= 25 && !item.ejected) {
+            item.ejected = true;
+            onEject?.(item);
+          }
+          if (item.slide) item.slide.pivot.position.z = s * item.slide.travel;
+          if (age >= 100) item.shotAt = 0;
+        }
+        if (!item.trigger) continue;
+        const target = item === heldItem ? -value * item.trigger.maxAngle : 0; // −X: нижний конец лезвия к рукоятке (+Z)
+        const rot = item.trigger.pivot.rotation;
+        rot.x += (target - rot.x) * k;
+      }
+    },
     // Достать сохранённые пистолеты. Возвращает { held: индекс в items или −1, heldMatrix } .
     restore() {
       const saved = readSaved();

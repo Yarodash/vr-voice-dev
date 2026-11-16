@@ -3,6 +3,7 @@
 // повёрнутые спрайты из процедурной текстуры, освещённые закатным солнцем справа (+X).
 // Частицы считаются на процессоре без выделения памяти в кадре; пока дыма нет — ни одного вызова.
 
+const DENSITY = 0.5; // густота всего дыма: 1 — как было, 0,5 — вдвое реже
 const CAP = 200; // не больше стольких клубов одновременно; лишний заменяет самый старый
 
 // Ветер и солнце: солнце низко справа (+X), ветер оттуда же — дым сносит к −X.
@@ -161,7 +162,11 @@ const fragmentShader = /* glsl */ `
 `;
 
 export function createSmoke({ THREE, group }) {
-  const texture = makeSmokeTexture(THREE);
+  // текстура считается ~40 мс на шлеме: один раз, при подмене сцены — из памяти (ключ — код функции)
+  const shared = (globalThis.__sceneState ??= {});
+  const textureKey = makeSmokeTexture.toString();
+  if (shared.smokeTexture?.key !== textureKey) shared.smokeTexture = { key: textureKey, texture: makeSmokeTexture(THREE) };
+  const texture = shared.smokeTexture.texture;
 
   const geometry = new THREE.InstancedBufferGeometry();
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
@@ -241,7 +246,7 @@ export function createSmoke({ THREE, group }) {
     size1[i] = o.size1;
     rot[i] = Math.random() * Math.PI * 2;
     spin[i] = o.spin ?? random(-1.2, 1.2);
-    alpha[i] = o.alpha;
+    alpha[i] = o.alpha * DENSITY; // DENSITY: общая густота дыма (пользователь попросил вдвое реже)
     drag[i] = o.drag;
     rise[i] = o.rise;
     turb[i] = o.turb ?? 0.06;
@@ -309,7 +314,7 @@ export function createSmoke({ THREE, group }) {
         );
       }
       heat = Math.min(5, heat + 1);
-      wisp.until = time + 0.6 + heat * 0.25;
+      wisp.until = time + 1.8 + heat * 0.6; // струйка из дула дольше (было 0,6 + 0,25·нагрев)
       wisp.next = time + 0.1;
     },
 
@@ -341,12 +346,12 @@ export function createSmoke({ THREE, group }) {
 
     // облачко пыли в месте попадания; normal — наружу от поверхности
     impact(point, normal) {
-      for (let k = 0; k < 6; k += 1) {
-        const s = random(0.4, 1.6);
+      for (let k = 0; k < 5; k += 1) {
+        const s = random(0.4, 1.4);
         emit(
           point.x, point.y, point.z,
           (normal.x + random(-0.6, 0.6)) * s, (normal.y + random(-0.4, 0.8)) * s, (normal.z + random(-0.6, 0.6)) * s,
-          set(random(1.4, 2.4), 0.02, random(0.12, 0.22), random(0.22, 0.32), 5, 0.06, 0.08, 1),
+          set(random(1.3, 2.2), 0.015, random(0.09, 0.17), random(0.2, 0.28), 5, 0.06, 0.08, 1),
         );
       }
     },
@@ -364,7 +369,7 @@ export function createSmoke({ THREE, group }) {
         emit(
           wisp.x + random(-0.002, 0.002), wisp.y + 0.003, wisp.z + random(-0.002, 0.002),
           random(-0.015, 0.015), random(0.05, 0.1), random(-0.015, 0.015),
-          set(random(0.9, 1.3), 0.003, random(0.014, 0.022), 0.04 + left * 0.08, 3, 0.12, 0.06),
+          set(random(2.2, 3.2), 0.003, random(0.018, 0.03), 0.04 + left * 0.08, 3, 0.12, 0.06),
         );
         wisp.next += 0.06;
       }
@@ -456,8 +461,7 @@ export function createSmoke({ THREE, group }) {
     dispose() {
       group.remove(mesh);
       geometry.dispose();
-      material.dispose();
-      texture.dispose();
+      material.dispose(); // texture живёт в shared.smokeTexture
       count = 0;
     },
   };
