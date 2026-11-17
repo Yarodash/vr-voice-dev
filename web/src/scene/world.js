@@ -736,7 +736,8 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
       const single = seeded() < 0.45;
       const count = single ? 1 : 4 + Math.floor(seeded() * 7);
       const radius = single ? 0 : (0.07 + seeded() * 0.16) * grow;
-      const clumpTall = (0.22 + seeded() ** 1.5 * 0.5) * (1 + far / 120);
+      const GRASS_HEIGHT = 0.5; // общий множитель высоты травы (пользователь: «в 2 раза ниже»; было 1)
+      const clumpTall = (0.22 + seeded() ** 1.5 * 0.5) * (1 + far / 120) * GRASS_HEIGHT;
       const clumpTone = seeded();
       for (let k = 0; k < count && i < GRASS_COUNT; k += 1, i += 1) {
         const angle = seeded() * Math.PI * 2;

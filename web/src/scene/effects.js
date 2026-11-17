@@ -24,74 +24,104 @@ export function createEffects({ THREE, group }) {
   const casingGeometry = new THREE.CylinderGeometry(0.0042, 0.0042, 0.019, 10);
 
   const random = (a, b) => a + Math.random() * (b - a);
-  const scatter = (direction, spread) =>
-    new THREE.Vector3(
+  const scatter = (direction, spread, out) =>
+    out.set(
       direction.x + random(-spread, spread),
       direction.y + random(-spread, spread),
       direction.z + random(-spread, spread),
     ).normalize();
+  // временные (spawn копирует их в частицу)
+  const tmpDir = new THREE.Vector3();
+  const tmpTip = new THREE.Vector3();
+  const tmpQ = new THREE.Quaternion();
+  const tmpS0 = new THREE.Vector3();
+  const tmpS1 = new THREE.Vector3(0.3, 0.25, 0.3);
+  const sparkS0 = new THREE.Vector3(0.0035, 0.03, 0.0035);
+  const sparkS1 = new THREE.Vector3(0.002, 0.008, 0.002);
+
+  // Частицы — из пула: меш и материал не создаются и не освобождаются на каждый выстрел. Иначе
+  // (было так) после паузы > 0,3 с между выстрелами все материалы вспышки освобождались, three.js
+  // выбрасывал их шейдерную программу, и следующий выстрел заново собирал её (~10 мс на Quest), плюс
+  // 17 новых материалов и мешей — мусор для GC. Свободные частицы остаются в группе, невидимые.
+  const pool = [];
+  const makeParticle = () => {
+    const material = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false });
+    const mesh = new THREE.Mesh(sphere, material);
+    mesh.visible = false;
+    group.add(mesh);
+    return {
+      mesh, material, born: 0, life: 1, velocity: new THREE.Vector3(), gravity: 0, drag: 0,
+      scale0: new THREE.Vector3(), scale1: new THREE.Vector3(), opacity0: 1, spin: null, fadePower: 1,
+    };
+  };
+  // первые кадры одна частица видна (прозрачная, крошечная): шейдер собирается сразу при подмене
+  // сцены, а не на первом выстреле
+  const warmParticle = makeParticle();
+  warmParticle.material.opacity = 0;
+  warmParticle.mesh.scale.setScalar(1e-4);
+  warmParticle.mesh.frustumCulled = false;
+  warmParticle.mesh.visible = true;
+  let warm = 0;
 
   // geometry/color + движение. life — мс; scale0 → scale1 за время жизни; opacity гаснет до нуля.
   function spawn(geometry, { color, additive = false, opacity = 1 }, position, options) {
-    const material = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity,
-      depthWrite: false,
-      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
+    const p = pool.pop() ?? makeParticle();
+    const { mesh, material } = p;
+    material.color.set(color);
+    material.opacity = opacity;
+    material.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+    mesh.geometry = geometry;
     mesh.position.copy(position);
     if (options.quaternion) mesh.quaternion.copy(options.quaternion);
+    else mesh.quaternion.identity();
     const scale0 = options.scale0 ?? 1;
-    mesh.scale.copy(scale0 instanceof THREE.Vector3 ? scale0 : new THREE.Vector3(scale0, scale0, scale0));
-    group.add(mesh);
-    particles.push({
-      mesh,
-      material,
-      born: globalThis.__sceneState?.sceneNowMs ?? performance.now(), // сценовые часы (замедление времени)
-      life: options.life,
-      velocity: options.velocity ?? new THREE.Vector3(),
-      gravity: options.gravity ?? 0,
-      drag: options.drag ?? 0,
-      scale0: mesh.scale.clone(),
-      scale1: options.scale1 instanceof THREE.Vector3 ? options.scale1 : new THREE.Vector3().setScalar(options.scale1 ?? scale0),
-      opacity0: opacity,
-      spin: options.spin ?? null,
-      fadePower: options.fadePower ?? 1,
-    });
+    if (scale0 instanceof THREE.Vector3) p.scale0.copy(scale0);
+    else p.scale0.setScalar(scale0);
+    mesh.scale.copy(p.scale0);
+    if (options.scale1 instanceof THREE.Vector3) p.scale1.copy(options.scale1);
+    else p.scale1.setScalar(options.scale1 ?? scale0);
+    mesh.visible = true;
+    p.born = globalThis.__sceneState?.sceneNowMs ?? performance.now(); // сценовые часы (замедление времени)
+    p.life = options.life;
+    if (options.velocity) p.velocity.copy(options.velocity);
+    else p.velocity.set(0, 0, 0);
+    p.gravity = options.gravity ?? 0;
+    p.drag = options.drag ?? 0;
+    p.opacity0 = opacity;
+    p.spin = options.spin ?? null;
+    p.fadePower = options.fadePower ?? 1;
+    particles.push(p);
   }
 
   return {
     // position/direction: дуло и направление ствола (мировые координаты)
     muzzleFlash(position, direction) {
-      const orient = new THREE.Quaternion().setFromUnitVectors(up, direction);
       // яркое ядро и тёплое облако вокруг
       spawn(sphere, { color: 0xffffff, additive: true }, position, { life: 55, scale0: 0.028, scale1: 0.002 });
       spawn(sphere, { color: 0xff9a3c, additive: true, opacity: 0.8 }, position, { life: 90, scale0: 0.05, scale1: 0.012 });
       // лепестки пламени веером вперёд
       for (let i = 0; i < 6; i += 1) {
-        const petal = scatter(direction, 0.3);
-        const q = new THREE.Quaternion().setFromUnitVectors(up, petal);
-        const tip = position.clone().addScaledVector(petal, 0.07);
-        spawn(cone, { color: i % 2 ? 0xffd27a : 0xff7a1a, additive: true, opacity: 0.95 }, tip, {
+        const petal = scatter(direction, 0.3, tmpDir);
+        tmpQ.setFromUnitVectors(up, petal);
+        tmpTip.copy(position).addScaledVector(petal, 0.07);
+        spawn(cone, { color: i % 2 ? 0xffd27a : 0xff7a1a, additive: true, opacity: 0.95 }, tmpTip, {
           life: 70,
-          quaternion: q,
-          scale0: new THREE.Vector3(1, random(0.8, 1.3), 1),
-          scale1: new THREE.Vector3(0.3, 0.25, 0.3),
+          quaternion: tmpQ,
+          scale0: tmpS0.set(1, random(0.8, 1.3), 1),
+          scale1: tmpS1,
         });
       }
       // искры из дула
       for (let i = 0; i < 9; i += 1) {
-        const v = scatter(direction, 0.35).multiplyScalar(random(3, 8));
-        const q = new THREE.Quaternion().setFromUnitVectors(up, v.clone().normalize());
+        const dir = scatter(direction, 0.35, tmpDir);
+        tmpQ.setFromUnitVectors(up, dir);
         spawn(unitBox, { color: 0xffcf6b, additive: true }, position, {
           life: random(150, 320),
-          velocity: v,
+          velocity: tmpTip.copy(dir).multiplyScalar(random(3, 8)),
           gravity: 6,
-          quaternion: q,
-          scale0: new THREE.Vector3(0.0035, 0.03, 0.0035),
-          scale1: new THREE.Vector3(0.002, 0.008, 0.002),
+          quaternion: tmpQ,
+          scale0: sparkS0,
+          scale1: sparkS1,
         });
       }
       // клуб дыма из дула и струйка над стволом
@@ -128,9 +158,18 @@ export function createEffects({ THREE, group }) {
       spawn(sphere, { color: 0xffb27a, opacity: 0.35 }, point, { life: 260, scale0: 0.03, scale1: 0.18 });
     },
 
-    // след пули: короткая раскалённая чёрточка летит от дула к цели (tracer.js)
-    tracer(from, to) {
-      tracers.fire(from, to);
+    // пуля упала в землю: облачко пыли без глиняной рыжины
+    groundHit(point) {
+      smoke.impact(point, up);
+    },
+
+    // след пули: раскалённая чёрточка летит от дула по параболе (tracer.js); вернёт номер для tracerLand
+    tracer(from, dir, speed, gravity, maxLen) {
+      return tracers.fire(from, dir, speed, gravity, maxLen);
+    },
+    // пуля номер id остановилась через along м (вдоль ствола)
+    tracerLand(id, along) {
+      tracers.land(id, along);
     },
 
     update(dt) {
@@ -138,6 +177,11 @@ export function createEffects({ THREE, group }) {
       tracers.update(dt);
       impacts.update(dt);
       const now = globalThis.__sceneState?.sceneNowMs ?? performance.now();
+      if (warm < 3 && ++warm === 3) {
+        warmParticle.mesh.visible = false;
+        warmParticle.mesh.frustumCulled = true;
+        pool.push(warmParticle);
+      }
       if (flashUntil) {
         const left = (flashUntil - now) / 70;
         flashLight.intensity = left > 0 ? flashPower * left : 0;
@@ -147,9 +191,9 @@ export function createEffects({ THREE, group }) {
         const p = particles[i];
         const age = (now - p.born) / p.life;
         if (age >= 1) {
-          group.remove(p.mesh);
-          p.material.dispose();
+          p.mesh.visible = false;
           particles.splice(i, 1);
+          pool.push(p);
           continue;
         }
         if (p.drag) p.velocity.multiplyScalar(Math.max(0, 1 - p.drag * dt));
@@ -166,11 +210,16 @@ export function createEffects({ THREE, group }) {
     },
 
     dispose() {
-      for (const p of particles) {
+      for (const p of [...particles, ...pool]) {
         group.remove(p.mesh);
         p.material.dispose();
       }
+      if (warm < 3) {
+        group.remove(warmParticle.mesh);
+        warmParticle.material.dispose();
+      }
       particles.length = 0;
+      pool.length = 0;
       smoke.dispose();
       tracers.dispose();
       impacts.dispose();

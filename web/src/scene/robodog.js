@@ -9,20 +9,22 @@
 import { createDogSfx, createDogUnit } from './robodog-unit.js';
 import { createBrain, createDog, yawTo } from './robodog-ai.js';
 import { createZapFx } from './robodog-fx.js';
-import { makeShadowTexture } from './robodog-model.js';
+import { makeDogTextures, makeShadowTexture } from './robodog-model.js';
+import { ensureWeaponEnv } from './weapon-env.js';
 
 const HEALTH = 5;
 const DEAD_S = 20; // лежит, потом новый
 const NEAR_MISS_M = 2.2;
 const LOG_EVERY_MS = 10000;
 
-export function createRobodog({ THREE, root, camera, shooting, onKill }) {
+export function createRobodog({ THREE, root, camera, renderer = null, shooting, onKill }) {
   const shared = (globalThis.__sceneState ??= {});
   const brain = createBrain();
   const sfx = createDogSfx(shared);
   const shadowTexture = makeShadowTexture(THREE);
   let unit = null;
   let fx = null;
+  let textures = null;
   let removeShootable = null;
   let enabled = false;
   // { dog, mode, health, deadLeft, pending, rag } — переживает подмену файла сцены
@@ -101,7 +103,9 @@ export function createRobodog({ THREE, root, camera, shooting, onKill }) {
     if (unit) return;
     const anchors = [];
     fx = createZapFx({ THREE, root, anchors });
-    unit = createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera });
+    textures = makeDogTextures(THREE);
+    const env = renderer ? ensureWeaponEnv(THREE, renderer) : null;
+    unit = createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera, textures, env, shared });
     removeShootable = shooting?.addShootable?.({ cast, hit, shot }) ?? null;
   };
   const teardown = () => {
@@ -111,6 +115,8 @@ export function createRobodog({ THREE, root, camera, shooting, onKill }) {
     unit = null;
     fx?.dispose();
     fx = null;
+    textures?.dispose();
+    textures = null;
   };
   const newRun = (alive) => {
     run = shared.robodogRun = { dog: null, mode: alive ? 'alive' : 'dead', health: HEALTH, deadLeft: DEAD_S, pending: true, rag: null };

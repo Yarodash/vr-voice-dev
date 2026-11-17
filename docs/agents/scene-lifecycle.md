@@ -19,10 +19,14 @@ not freeze the headset:
   `BufferGeometry`, `Material`, `Texture` and `InstancedMesh` is **held back** (queued, not run).
   Old `dispose()` (exceptions caught -> `console.warn`) -> old `ctx.root` children move into a
   frozen group `scene-host-previous` that stays drawn (their own `onBeforeRender/onAfterRender`
-  are muted) -> new `setup(ctx)` fills `ctx.root`, which is **hidden** -> `renderer.compileAsync`
+  are muted) -> new `setup(ctx)` fills `ctx.root` -> `renderer.compileAsync`
   of what will be drawn (visible scene + the hidden root). If `setup` throws, the previous module
-  is started again and the error is reported (`scene:check` shows it).
-- prepare (next frames, inside `update`): programs that are really new get their link wait taken
+  is started again and the error is reported (`scene:check` shows it). **Usual case:** no new
+  program and no texture to upload -> committed right inside `swap()`, the frozen copy is never
+  drawn. Lights of the frozen copy are switched off and lights of the new root stay on (only its
+  drawable objects are hidden), so the light setup during prepare equals the one after the commit
+  (otherwise every lit material would compile a variant for the frozen frames).
+- prepare (next frames, inside `update`, only if something is new): programs that are really new get their link wait taken
   one or two per frame (the Quest browser has no `KHR_parallel_shader_compile`, so this is where a
   new shader costs), then textures of drawn objects not yet on the GPU are uploaded
   (`renderer.initTexture`), ~6 ms of work per frame. The new `update` is not called yet; the old
@@ -53,7 +57,7 @@ error keeps the old scene running and reports `сцена не загрузил�
 | Field | What |
 |---|---|
 | `THREE` | the three module |
-| `root` | `THREE.Group` owned by the scene; host empties it on swap and frees what the new scene no longer uses. Hidden (`visible=false`) while a swap is being prepared |
+| `root` | `THREE.Group` owned by the scene; host empties it on swap and frees what the new scene no longer uses. While a swap is being prepared its meshes/points/lines are `visible=false` (lights stay on) |
 | `scene`, `camera`, `renderer` | shell objects. `camera` is inside `rig` (recenter moves the rig) |
 | `getLeftController()` | left **grip** space `Object3D` or `null` (the "hand"). Ray space: `renderer.xr.getController(i)` whose grip is the hand (see `rayOf` in scene/main.js) |
 | `pointerAim` | `{ object }`: the wheel sits on this object; scene sets it to the controller axes group |
@@ -133,6 +137,7 @@ The real controller model (`shared.realModel`) is intentionally left on the hand
 | `scene.targetPhysics` | scene/main.js | `'on'`/`'off'` |
 | `scene.aimOutline` | scene/main.js | `'on'`/`'off'` |
 | `scene.laser` | scene/main.js | `'on'`/`'off'` (default off) |
+| `scene.inertia` | scene/main.js | `'on'`/`'off'` (default off), hand tremor filter `inertia.js` |
 | `scene.pistol.calib`, `scene.ak.calib` | scene/main.js | 16-number hand->weapon matrix |
 | `scene.pistols` | pistols.js | `{ list:[{kind,position,quaternion}], held:-1 }` (old: `scene.pistol`) |
 | `scene.clays` | clays.js | resting clays `[{p,q}]` |

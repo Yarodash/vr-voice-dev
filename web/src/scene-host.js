@@ -10,6 +10,8 @@
 //      geometry/material/texture dispose() called meanwhile is only queued: the GPU programs and
 //      uploaded textures of the old scene stay alive, so the new scene reuses them (three shares a
 //      program between materials with the same shader) instead of compiling and uploading again.
+//      Then the new scene is precompiled. Usually nothing is new (no shader and no texture to
+//      upload): it is committed right away and the frozen copy is never drawn. Otherwise:
 //   2. the next frames: the new scene's shaders that really are new get compiled and linked (with
 //      KHR_parallel_shader_compile in the background; the Quest browser has no such extension, so
 //      there each program's link wait is taken one or two per frame), then its textures are
@@ -136,41 +138,61 @@ export class SceneHost {
       release();
     }
     const setupMs = performance.now() - t0 - disposeMs;
-    root.visible = false; // hidden until its shaders are linked and its textures uploaded
-    const known = new Set(renderer.info.programs);
     const pending = {
-      previous, startedAt: performance.now(), compiled: false, programs: null, uploads: null,
+      previous, startedAt: performance.now(), compiled: false, programs: [], uploads: [], hidden: [],
       linked: 0, uploaded: 0, frames: 0, disposeMs, setupMs, compileMs: 0,
     };
     this.pending = pending;
     const c0 = performance.now();
+    // what is going to be drawn: the visible scene without the frozen copy
+    const drawn = [];
+    const visit = (node) => {
+      if (node === previous || !node.visible) return;
+      drawn.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(scene);
+    // Lights must already be what they will be after the commit: the new root's lights count, the
+    // frozen copy's do not (otherwise every lit material would get a shader variant just for the
+    // frozen frames). So the new root stays "visible" with only its drawable objects hidden.
+    previous.traverse((node) => {
+      if (node.isLight) node.visible = false;
+    });
+    const known = new Set(renderer.info.programs);
     let compiling;
     try {
-      // only what is going to be drawn: the visible scene, with the hidden new root counted as shown
-      // (compileAsync over the whole scene would also build shaders for every hidden object)
-      const drawn = [];
-      const inRoot = [];
-      const visit = (node, under) => {
-        if (node === previous || (node !== root && !node.visible)) return;
-        drawn.push(node);
-        if (under) inRoot.push(node);
-        for (const child of node.children) visit(child, under || node === root);
-      };
-      visit(scene, false);
-      pending.drawn = drawn;
-      const visible = { traverse: (fn) => drawn.forEach(fn), traverseVisible: (fn) => inRoot.forEach(fn) };
-      compiling = renderer.compileAsync(visible, camera, scene); // lights: the scene's + the new root's
+      // not compileAsync(scene): that would also build shaders for every hidden object
+      compiling = renderer.compileAsync({ traverse: (fn) => drawn.forEach(fn), traverseVisible() {} }, camera, scene);
     } catch (err) {
       compiling = Promise.reject(err);
     }
     pending.compileMs = performance.now() - c0;
     pending.programs = renderer.info.programs.filter((program) => !known.has(program));
-    pending.programNames = pending.programs.map((program) => program.name);
+    // textures it is going to draw with that are not on the GPU yet (a hidden effect's big empty
+    // canvas is left for when it is shown, as before)
+    const textures = new Set();
+    for (const node of drawn) for (const material of [].concat(node.material ?? [])) texturesOf(material, textures);
+    pending.uploads = [...textures].filter((texture) => {
+      if (texture.isRenderTargetTexture || !(texture.version > 0)) return false;
+      const image = texture.image;
+      if (!image || image.complete === false) return false;
+      return renderer.properties.get(texture).__version !== texture.version;
+    });
     compiling
       .catch((err) => console.warn('scene precompile failed', err))
       .finally(() => {
         pending.compiled = true;
       });
+    if (!pending.programs.length && !pending.uploads.length) {
+      this.#commit(); // nothing to wait for (the usual case): the next frame draws the new scene
+    } else {
+      root.traverse((node) => {
+        if (node.visible && (node.isMesh || node.isPoints || node.isLine || node.isSprite)) {
+          node.visible = false;
+          pending.hidden.push(node);
+        }
+      });
+    }
     this.report(error ? { ok: false, error: describe(error) } : { ok: true, error: null });
     return !error;
   }
@@ -209,7 +231,7 @@ export class SceneHost {
     pending.frames += 1;
     const late = performance.now() - pending.startedAt > PREPARE_TIMEOUT_MS;
     if (!pending.compiled && !late) return false;
-    const { renderer, scene } = this.ctx;
+    const { renderer } = this.ctx;
     const start = performance.now();
     const spent = () => performance.now() - start > FRAME_BUDGET_MS;
     let worked = false;
@@ -230,21 +252,7 @@ export class SceneHost {
       pending.linked += 1;
       worked = true;
       const took = performance.now() - s0;
-      if (took > 3) (pending.slow ??= []).push(['link', program.name, +took.toFixed(1)]);
-    }
-    if (!pending.uploads) {
-      // textures the new scene is going to draw with that are not on the GPU yet (a hidden effect's
-      // big empty canvas is left for later, as before)
-      const found = new Set();
-      for (const node of pending.drawn ?? []) {
-        for (const material of [].concat(node.material ?? [])) texturesOf(material, found);
-      }
-      pending.uploads = [...found].filter((texture) => {
-        if (texture.isRenderTargetTexture || !(texture.version > 0)) return false;
-        const image = texture.image;
-        if (!image || image.complete === false) return false;
-        return renderer.properties.get(texture).__version !== texture.version;
-      });
+      if (took > 3) (pending.slow ??= []).push(['link', program.name || program.cacheKey.slice(0, 24), +took.toFixed(1)]);
     }
     while (pending.uploads.length && !late) {
       if (worked && spent()) return false;
@@ -270,6 +278,7 @@ export class SceneHost {
     this.pending = null;
     pending.previous.removeFromParent();
     this.#retire(pending.previous.children);
+    for (const node of pending.hidden) node.visible = true;
     this.ctx.root.visible = true;
     this.flushIn = FLUSH_AFTER_FRAMES;
     this.lastSwap = {
@@ -280,9 +289,8 @@ export class SceneHost {
       prepareFrames: pending.frames,
       newPrograms: pending.linked,
       uploads: pending.uploaded,
-      compileTimeout: !pending.compiled,
+      compileTimeout: performance.now() - pending.startedAt > PREPARE_TIMEOUT_MS,
       slow: pending.slow,
-      programNames: pending.programNames,
     };
     const s = this.lastSwap;
     console.log(`[swap] dispose=${s.disposeMs}ms setup=${s.setupMs}ms compile=${s.compileMs}ms prepare=${s.prepareMs}ms/${s.prepareFrames}fr newProgs=${s.newPrograms} uploads=${s.uploads}${s.compileTimeout ? ' TIMEOUT' : ''}`);

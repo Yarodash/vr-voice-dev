@@ -19,6 +19,12 @@ export function createCasings({ THREE, root, shared }) {
   }
   let next = 0;
   const euler = new THREE.Euler();
+  // первые кадры видна крошечная гильза: шейдер собирается при подмене сцены, а не на первом выстреле
+  const warmMesh = new THREE.Mesh(geometry, material);
+  warmMesh.scale.setScalar(1e-4);
+  warmMesh.frustumCulled = false;
+  root.add(warmMesh);
+  let warm = 0;
 
   const tink = (p) => {
     try {
@@ -59,6 +65,7 @@ export function createCasings({ THREE, root, shared }) {
     update(dtRaw) {
       const dt = Math.min(dtRaw || 0, 0.05);
       const now = shared.sceneNowMs ?? performance.now(); // сценовые часы (замедление времени)
+      if (warm < 3 && ++warm === 3) root.remove(warmMesh);
       for (let i = 0; i < MAX; i += 1) {
         const c = pool[i];
         if (!c.active) continue;
@@ -109,6 +116,7 @@ export function createCasings({ THREE, root, shared }) {
 
     dispose() {
       for (const c of pool) root.remove(c.mesh);
+      root.remove(warmMesh);
       geometry.dispose();
       material.dispose();
     },

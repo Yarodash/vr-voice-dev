@@ -26,8 +26,13 @@ until the new scene draws, so programs/textures are reused). Measured 2026-11-17
 
 | | before | after |
 |---|---|---|
-| `setup()` (HMR task, blocks the main thread) | 550–680 ms (grass 36k blades ~420 ms, pistol model ~100 ms, smoke texture ~40 ms) | ~37 ms |
-| first frame of the new scene | 270–380 ms (17–23 shader programs recompiled ≈ 140 ms of link waits, 10–11 cached textures re-uploaded ≈ 100 ms) + a second 160 ms frame | 0 new programs, 0–1 uploads on an unchanged shader set |
+| whole swap task (dispose + `setup()` + precompile; blocks the main thread) | 550–680 ms (grass 36k blades ~420 ms, pistol model ~100 ms, smoke texture ~40 ms) | 25–40 ms |
+| first frame(s) of the new scene | 270–380 ms (17–23 shader programs recompiled ≈ 140 ms of link waits, 10–11 cached textures re-uploaded ≈ 100 ms) + a second 160 ms frame | 0 new programs, 0–1 uploads on an unchanged shader set |
+| longest frame-to-frame gap around a swap (90 Hz, normal 11 ms) | ~950 ms in total over 2–3 frames | 33–50 ms (one frame) |
+
+Not a swap cost: `npm run vr:shot` / `screenshot()` renders into an off-screen target, which needs
+tone-mapping/colour-space variants of every lit program (~20 programs, ~300 ms hitch in the headset
+per screenshot, freed again at the next swap).
 
 What costs on Quest and how it is avoided:
 - **Shader programs**: the Quest browser has no `KHR_parallel_shader_compile`; a new program costs

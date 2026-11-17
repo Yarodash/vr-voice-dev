@@ -261,9 +261,9 @@ recipes baked once into buffers and played through pooled voices:
   },
 // 2. BAKES: [recipe, variants, seconds]
   bell: ['bell', 3, 0.85],
-// 3. method on the returned object (pool 'fx' = HRTF, 'small' = equalpower, 'gun' = near field)
+// 3. method on the returned object (pool 'impact' = HRTF, 'mech'/'small' = equalpower, 'gun' = near field)
     bell(position) {
-      return safe(() => play('fx', pick(shared.soundBank?.fx.bell), { position, gain: 0.6, wet: 0.4 }));
+      return safe(() => play('impact', pick(shared.soundBank?.fx.bell), { position, gain: 0.6, wet: 0.4 }));
     },
 ```
 Then bump **`BAKE_VERSION`** (rebakes the bank) and **`SOUND_VERSION`**. Call it:

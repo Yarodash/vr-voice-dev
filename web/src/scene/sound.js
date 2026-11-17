@@ -14,23 +14,29 @@
 // цепочки (паннер, стерео, посылы) в пулах с жёстким лимитом и мягким «отъёмом» старейшего; на звук
 // создаются только источник и его гейн, и они отключаются в onended; в конце — лимитер и мягкий клип;
 // сторож в update() поднимает приостановленный контекст и пересобирает выход, если в нём NaN.
-export const SOUND_VERSION = 23; // 23: AWP (shot { kind: 'awp' }) и затвор (bolt)
+// 26: AWP — один голос (слои смешаны заранее); пулы больше и раздельные (выстрелы / попадания /
+// затвор / гильзы), отнимается только голос в тихом хвосте и никогда не самый новый. Псы
+// (robodog-sound.js) — свой пул на том же графе. 24: bolt(…, 'cycle'); 23: AWP и затвор
+export const SOUND_VERSION = 28; // 28: мягче лимитер; 27: пулы без лишнего (dog)
 // какие записи звучат в игре (sound-board.js помечает их «в игре»)
 export const GUN_FILES = { pistol: ['pistolB1', 'pistolB2'], ak: ['ak1', 'ak2', 'ak3'] };
 
-const BAKE_VERSION = 2; // 2: awpBoom, boltOpen, boltClose. Меняй, когда меняются рецепты ниже (банк звуков пересоберётся)
-const BUS_VERSION = 1; // меняй при изменении выхода (лимитер, реверб)
-const POOL_VERSION = 1; // меняй при изменении устройства голосов
+const BAKE_VERSION = 3; // 3: AWP одним буфером. Меняй, когда меняются рецепты ниже (синтез перезапечётся)
+const BUS_VERSION = 2; // меняй при изменении выхода (лимитер, реверб)
+const POOL_VERSION = 3; // меняй при изменении устройства голосов
 
 const NEAR_FAR = 1.2; // дальше — обычный HRTF; ближе — ближнее поле
 const NEAR_FULL = 0.55; // ближе — почти чистое стерео
-const STEAL_FADE = 0.02; // с, за сколько гасится отнятый голос
+const STEAL_FADE = 0.06; // с, за сколько гасится отнятый голос (он уже в тихом хвосте)
 const DRIVE = 3; // мягкий клип: вход ±3 → выход до ±1
-// Пулы голосов: size — постоянных цепочек, max — сколько звучит одновременно (остальные — гаснущие)
+// Пулы голосов: size — постоянных цепочек; max — сколько звучит, прежде чем отнимать; minAge — отнимать
+// только звук старше этого (с): он уже в тихом хвосте; самый новый не отнимается никогда. Нечего
+// отнять — звучит сверх max, пока есть свободные цепочки. Голос — один источник буфера, их может быть много.
 const POOLS = {
-  gun: { size: 10, max: 7, near: true, model: 'HRTF' },
-  fx: { size: 10, max: 8, near: false, model: 'HRTF' },
-  small: { size: 4, max: 3, near: false, model: 'equalpower' }, // гильзы: тихо и часто, HRTF не нужен
+  gun: { size: 16, max: 12, minAge: 0.45, near: true, model: 'HRTF' }, // выстрелы (запись 1,3 с)
+  impact: { size: 12, max: 10, minAge: 0.25, near: false, model: 'HRTF' }, // звон мишени, тарелки, разряды
+  mech: { size: 4, max: 3, minAge: 0.2, near: false, model: 'equalpower' }, // затвор АВП
+  small: { size: 6, max: 4, minAge: 0.08, near: false, model: 'equalpower' }, // гильзы: тихо и часто
 };
 
 const finite = (v, fallback = 0) => (Number.isFinite(v) ? v : fallback);
@@ -294,14 +300,16 @@ export function createSound() {
     const c = g.context;
     disconnect(g.master, g.reverbSend, ...(g.busNodes ?? []));
     const compressor = c.createDynamicsCompressor();
-    // замерено офлайн: до 0,5 — без изменений; сумма в 8 раз громче (+18 дБ) → 0,93, не глохнет
-    compressor.threshold.value = -3;
-    compressor.knee.value = 3;
-    compressor.ratio.value = 12;
-    compressor.attack.value = 0.002;
-    compressor.release.value = 0.1;
+    // замерено офлайн (с мягким клипом): до 0,5 — без изменений, 1 → 0,90, 2 → 0,97, 8 → 0,99 — не
+    // глохнет. Порог −2 дБ и отпускание 0,2 с: в шлеме на очереди (−3 дБ, 0,1 с) давил > 3 дБ половину
+    // времени и «качал» хвосты; теперь одиночный выстрел почти не сжимается, пики ловит клип.
+    compressor.threshold.value = -2;
+    compressor.knee.value = 6;
+    compressor.ratio.value = 10;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.2;
     const trim = c.createGain();
-    trim.gain.value = 0.877 / DRIVE; // снимает автоподъём компрессора Chromium (×1,14)
+    trim.gain.value = 0.962 / DRIVE; // снимает автоподъём компрессора Chromium (×1,04)
     const clip = c.createWaveShaper();
     clip.curve = softClipCurve();
     clip.oversample = 'none';
@@ -367,7 +375,7 @@ export function createSound() {
     for (const pool of Object.values(g.pools ?? {})) for (const v of pool.voices) disconnect(...v.nodes);
     g.pools = {};
     for (const [name, cfg] of Object.entries(POOLS)) {
-      g.pools[name] = { name, max: cfg.max, voices: Array.from({ length: cfg.size }, () => makeVoice(g, cfg)) };
+      g.pools[name] = { name, max: cfg.max, minAge: cfg.minAge, voices: Array.from({ length: cfg.size }, () => makeVoice(g, cfg)) };
     }
     g.poolVersion = POOL_VERSION;
   };
@@ -393,13 +401,70 @@ export function createSound() {
   };
 
   // ---------- банк звуков: записи + запечённый синтез, один раз, живёт в __sceneState.soundBank ----------
-  const filesKey = `${JSON.stringify(GUN_FILES)}|${BAKE_VERSION}|`;
+  // AWP одним буфером: запись калаша ниже (×0,66–0,70), под ней другая запись ещё ниже (×0,48) и
+  // низкий «бум» — смешаны заранее, чтобы выстрел занимал один голос, а не три
+  const bakeAwp = (c, bank) => {
+    if (bank.awpFor === BAKE_VERSION || bank.awpBusy || bank.fxReady !== BAKE_VERSION) return;
+    const ak = bank.ak;
+    const booms = bank.fx.awpBoom;
+    if (ak.length < GUN_FILES.ak.length || !booms?.length) return;
+    bank.awpBusy = true;
+    (async () => {
+      const list = [];
+      for (let i = 0; i < 3; i += 1) {
+        const main = ak[i % ak.length];
+        const low = ak[(i + 1) % ak.length];
+        const boom = booms[i % booms.length];
+        const rate = 0.66 + Math.random() * 0.04;
+        const seconds = Math.max(main.duration / rate, low.duration / 0.48, boom.duration) + 0.05;
+        list.push(await bake(c.sampleRate, seconds, (oc, out, t) => {
+          for (const [buffer, r, gain] of [[boom, 1, 0.95], [low, 0.48, 0.7], [main, rate, 1.3]]) {
+            const source = oc.createBufferSource();
+            source.buffer = buffer;
+            source.playbackRate.value = r;
+            const g = oc.createGain();
+            g.gain.value = gain;
+            source.connect(g).connect(out);
+            source.start(t);
+          }
+        }));
+      }
+      bank.awp = list;
+      bank.awpFor = BAKE_VERSION;
+    })()
+      .catch((e) => console.warn('[sound] AWP не запёкся', e?.message ?? e))
+      .finally(() => { bank.awpBusy = false; });
+  };
+  const gunKey = JSON.stringify(GUN_FILES);
   const loadBank = (c) => {
-    const bankNow = shared.soundBank;
-    if (bankNow && bankNow.rate === c.sampleRate && bankNow.files === filesKey) return;
-    const key = filesKey + c.sampleRate;
+    let bank = shared.soundBank;
+    // записи (их ключ) и запечённый синтез (BAKE_VERSION) обновляются отдельно: смена рецептов не
+    // перезагружает записи, и выстрелы не уходят на запасной синтез
+    const sameFiles = bank && bank.rate === c.sampleRate && (bank.gunKey ?? bank.files?.split('|')[0]) === gunKey;
+    if (!sameFiles) bank = loadFiles(c);
+    if (bank.bakeVersion !== BAKE_VERSION) {
+      bank.bakeVersion = BAKE_VERSION;
+      (async () => {
+        for (const [name, [recipe, count, seconds]] of Object.entries(BAKES)) {
+          const list = [];
+          for (let i = 0; i < count; i += 1) {
+            try {
+              list.push(await bake(c.sampleRate, seconds, RECIPES[recipe]));
+            } catch (e) {
+              console.warn('[sound] не запёкся', name, e?.message ?? e);
+              break;
+            }
+          }
+          bank.fx[name] = list; // целиком: пока пекётся, звучит прежний вариант
+        }
+        bank.fxReady = BAKE_VERSION;
+        bakeAwp(c, bank);
+      })();
+    }
+  };
+  const loadFiles = (c) => {
     delete shared.gunSamples; // старый кэш (до SOUND_VERSION 20)
-    const bank = (shared.soundBank = { key, files: filesKey, rate: c.sampleRate, pistol: [], ak: [], fx: {} });
+    const bank = (shared.soundBank = { gunKey, rate: c.sampleRate, pistol: [], ak: [], awp: [], fx: {} });
     for (const [kind, names] of Object.entries(GUN_FILES)) {
       for (const name of names) {
         fetch(`/sounds/guns/${name}.ogg`)
@@ -420,23 +485,14 @@ export function createSound() {
               RECIPES.pistolCrack(oc, out, t);
             }).catch(() => raw);
           })
-          .then((buffer) => bank[kind].push(buffer))
+          .then((buffer) => {
+            bank[kind].push(buffer);
+            bakeAwp(c, bank);
+          })
           .catch((e) => console.warn('[sound] не загрузился', name, e?.message ?? e));
       }
     }
-    (async () => {
-      for (const [name, [recipe, count, seconds]] of Object.entries(BAKES)) {
-        const list = (bank.fx[name] = []);
-        for (let i = 0; i < count; i += 1) {
-          try {
-            list.push(await bake(c.sampleRate, seconds, RECIPES[recipe]));
-          } catch (e) {
-            console.warn('[sound] не запёкся', name, e?.message ?? e);
-            break;
-          }
-        }
-      }
-    })();
+    return bank;
   };
   const pick = (list) => (list?.length ? list[Math.floor(Math.random() * list.length)] : null);
 
@@ -463,11 +519,14 @@ export function createSound() {
       release(v, shot);
     }
   };
-  // Свободный голос пула. Звучащих не больше max: иначе старейший мягко гаснет (20 мс), а новый звук
-  // берёт другой, свободный голос — паннер гаснущего не прыгает.
+  // Свободный голос пула. Звучит max и больше — старейший звук, если он старше minAge (уже в тихом
+  // хвосте), мягко гаснет (60 мс); новый звук всегда берёт другой, свободный голос (паннер гаснущего не
+  // прыгает). Молодые звуки не трогаются: тогда звучит сверх max, пока есть свободные цепочки.
+  // Свободных нет совсем — отнимается старейший (кроме самого нового), а этот звук пропускается.
   const acquire = (pool, t) => {
     let active = 0;
     let oldest = null;
+    let newest = null;
     let free = null;
     for (const v of pool.voices) {
       const shot = v.shot;
@@ -477,9 +536,12 @@ export function createSound() {
       } else if (!v.shot.fading) {
         active += 1;
         if (!oldest || v.shot.startedAt < oldest.shot.startedAt) oldest = v;
+        if (!newest || v.shot.startedAt > newest.shot.startedAt) newest = v;
       }
     }
-    if (active >= pool.max && oldest) steal(oldest, t);
+    if (oldest && oldest !== newest && (active >= pool.max || !free) && (t - oldest.shot.startedAt >= pool.minAge || !free)) {
+      steal(oldest, t);
+    }
     return free;
   };
 
@@ -673,7 +735,7 @@ export function createSound() {
         pools,
         voices: Object.values(pools).reduce((s, p) => s + p.active + p.fading, 0),
         liveNodes,
-        bank: bank && { pistol: bank.pistol.length, ak: bank.ak.length, fx: Object.fromEntries(Object.entries(bank.fx).map(([k, l]) => [k, l.length])) },
+        bank: bank && { pistol: bank.pistol.length, ak: bank.ak.length, awp: bank.awp?.length ?? 0, fx: Object.fromEntries(Object.entries(bank.fx).map(([k, l]) => [k, l.length])) },
         ...counters,
       };
     },
@@ -718,26 +780,29 @@ export function createSound() {
     setWeapon(kind) {
       weapon = kind === 'ak' || kind === 'awp' ? kind : 'pistol';
     },
-    // затвор AWP (awp-model.js cycleBolt): phase 'open' — вверх и назад, 'close' — вперёд и вниз
+    // затвор АВП (awp-model.js cycleBolt): phase 'open' — вверх и назад, 'close' — вперёд и вниз,
+    // 'cycle' — самозарядка: короткий «клац-щёлк» (запись закрытия, ускоренная в 1,6 раза)
     bolt(position, phase = 'open') {
-      return safe(() => play('small', pick(shared.soundBank?.fx[phase === 'close' ? 'boltClose' : 'boltOpen']), { position, gain: 0.6, refDistance: 1.0, wet: 0.12 }));
+      const cycle = phase === 'cycle';
+      return safe(() => play('mech', pick(shared.soundBank?.fx[phase === 'close' || cycle ? 'boltClose' : 'boltOpen']), { position, gain: cycle ? 0.45 : 0.6, rate: cycle ? 1.6 : 1, refDistance: 1.0, wet: 0.12 }));
     },
     // Выстрел: случайная запись (±3 % высоты, ±12 % громкости); пока записи не загрузились —
     // запечённый синтез. { kind: 'ak' } — автомат; без параметров — оружие из setWeapon.
     shot({ kind = weapon, position } = {}) {
       return safe(() => {
         ensure();
-        // AWP: записи калаша ниже (×0,68), под ними та же запись ещё ниже (×0,48) и запечённый низкий
-        // «бум»; хвост длиннее (больше реверба)
+        // AWP: один голос — запечённая смесь (bakeAwp); пока она не готова — только основной слой.
+        // Хвост длиннее (больше реверба)
         const awp = kind === 'awp';
         const ak = kind === 'ak' || awp;
         const bank = shared.soundBank;
         const sample = pick(ak ? bank?.ak : bank?.pistol);
         const level = 0.88 + Math.random() * 0.24;
+        if (awp && bank?.awp?.length) {
+          return play('gun', pick(bank.awp), { position, gain: level, rate: 0.98 + Math.random() * 0.04, wet: 0.45 });
+        }
         if (sample && awp) {
-          play('gun', pick(bank.fx.awpBoom), { position, gain: 0.95 * level, wet: 0.5 });
-          play('gun', pick(bank.ak), { position, gain: 0.7 * level, rate: 0.48, wet: 0.5 });
-          return play('gun', sample, { position, gain: 1.3 * level, rate: 0.66 + Math.random() * 0.04, wet: 0.42 });
+          return play('gun', sample, { position, gain: 1.3 * level, rate: 0.66 + Math.random() * 0.04, wet: 0.45 });
         }
         if (sample) {
           return play('gun', sample, { position, gain: (ak ? 1 : PISTOL_GAIN) * level, rate: 1 + (Math.random() - 0.5) * 0.06, wet: ak ? 0.22 : 0.24 });
@@ -750,17 +815,17 @@ export function createSound() {
     },
     // звон тише выстрела на ~6 дБ и затухает с расстоянием (ref 1.5 м): мишень в 5 м ≈ -7 дБ ещё
     hit(position) {
-      return safe(() => play('fx', pick(shared.soundBank?.fx.hit), { position, gain: 0.5, rate: 0.97 + Math.random() * 0.06, wet: 0.3 }));
+      return safe(() => play('impact', pick(shared.soundBank?.fx.hit), { position, gain: 0.5, rate: 0.97 + Math.random() * 0.06, wet: 0.3 }));
     },
     shatter(position) {
-      return safe(() => play('fx', pick(shared.soundBank?.fx.shatter), { position, gain: 0.75, rate: 0.95 + Math.random() * 0.1, wet: 0.25 }));
+      return safe(() => play('impact', pick(shared.soundBank?.fx.shatter), { position, gain: 0.75, rate: 0.95 + Math.random() * 0.1, wet: 0.25 }));
     },
     // strength 0..1 — громкость
     zap(position, strength = 1) {
-      return safe(() => play('fx', pick(shared.soundBank?.fx.zap), { position, gain: 0.6 * Math.max(0, Math.min(1, finite(strength, 1))), wet: 0.15 }));
+      return safe(() => play('impact', pick(shared.soundBank?.fx.zap), { position, gain: 0.6 * Math.max(0, Math.min(1, finite(strength, 1))), wet: 0.15 }));
     },
     powerDown(position) {
-      return safe(() => play('fx', pick(shared.soundBank?.fx.powerDown), { position, gain: 0.6, wet: 0.25 }));
+      return safe(() => play('impact', pick(shared.soundBank?.fx.powerDown), { position, gain: 0.6, wet: 0.25 }));
     },
   };
 }

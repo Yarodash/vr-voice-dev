@@ -11,7 +11,8 @@
 import { createDogSfx, createDogUnit } from './robodog-unit.js';
 import { createDog, yawTo } from './robodog-ai.js';
 import { createZapFx } from './robodog-fx.js';
-import { makeShadowTexture } from './robodog-model.js';
+import { makeDogTextures, makeShadowTexture } from './robodog-model.js';
+import { ensureWeaponEnv } from './weapon-env.js';
 import { BODY_Y } from './robodog-gait.js';
 import { groundHeight } from './car.js';
 
@@ -25,7 +26,7 @@ const SPAWN_MIN = 1.5; // и через пару минут
 const RAMP = 0.02; // на столько секунд интервал короче за каждую секунду игры
 const SPAWN_NEAR = 25;
 const SPAWN_FAR = 40;
-const SPAWN_ANGLE = (40 * Math.PI) / 180;
+const SPAWN_ANGLE = (12.5 * Math.PI) / 180; // ± от взгляда: сектор 25° всего (по просьбе пользователя; было ±40°)
 const LEAP_RANGE = 2.5;
 const LEAP_T = 0.42; // с полёта до игрока
 const CHEST_BELOW_HEAD = 0.35;
@@ -40,12 +41,13 @@ const wrap = (a) => {
   return a;
 };
 
-export function createHorde({ THREE, root, camera, shooting, onPlayerHit, onKill }) {
+export function createHorde({ THREE, root, camera, renderer = null, shooting, onPlayerHit, onKill }) {
   const shared = (globalThis.__sceneState ??= {});
   const sfx = createDogSfx(shared);
   const shadowTexture = makeShadowTexture(THREE);
   let units = null;
   let fx = null;
+  let textures = null;
   let removeShootable = null;
   let enabled = false;
   // { elapsed, nextSpawn, dogs: [{ dog, health }] } — живые псы переживают подмену файла сцены
@@ -109,7 +111,8 @@ export function createHorde({ THREE, root, camera, shooting, onPlayerHit, onKill
     const unit = rayUnit;
     rayUnit = null;
     if (!unit) return null;
-    const result = unit.hit(origin, dir, distance);
+    // первое попадание сбивает с ног (кукла ~1 с, потом вскакивает), второе — насмерть
+    const result = unit.hit(origin, dir, distance, { knockdown: true });
     if (result === 'corpse') return null;
     if (result === 'kill') {
       try {
@@ -117,10 +120,6 @@ export function createHorde({ THREE, root, camera, shooting, onPlayerHit, onKill
       } catch {
         // счёт не важнее выстрела
       }
-    } else if (!unit.dog.jump) {
-      unit.dog.state = 'stun';
-      unit.dog.t = 0;
-      unit.dog.v *= 0.3;
     }
     return true;
   }
@@ -129,17 +128,55 @@ export function createHorde({ THREE, root, camera, shooting, onPlayerHit, onKill
     if (units) return;
     const anchors = [];
     fx = createZapFx({ THREE, root, anchors });
+    textures = makeDogTextures(THREE);
+    const env = renderer ? ensureWeaponEnv(THREE, renderer) : null; // крашеный металл бликует, как оружие
     units = [];
-    for (let i = 0; i < POOL; i += 1) units.push(createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera }));
+    for (let i = 0; i < POOL; i += 1) units.push(createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera, textures, env, shared }));
     removeShootable = shooting?.addShootable?.({ cast, hit }) ?? null;
+    prewarm();
+  };
+  // Шейдеры и текстуры псов — заранее: модели в пуле скрыты, и без этого первый пёс в бою собирал
+  // 2–3 программы прямо в кадре (на Quest без KHR_parallel_shader_compile — десятки мс, «фриз»).
+  // compile() только начинает сборку; ожидание связывания и загрузка текстур — по одной за кадр в
+  // update (как у подмены сцены, scene-host.js), до первого пса (SPAWN_FIRST) успевает.
+  let warmQueue = [];
+  const prewarm = () => {
+    if (!renderer?.compile || !units.length) return;
+    let scene = root;
+    while (scene.parent) scene = scene.parent;
+    const known = new Set(renderer.info.programs);
+    try {
+      renderer.compile(units[0].model.group, camera, scene); // скрытые тоже (compile обходит всё)
+      renderer.compile(units[0].shadow, camera, scene);
+    } catch (error) {
+      console.warn('[horde] prewarm:', error?.message ?? error);
+      return;
+    }
+    warmQueue = renderer.info.programs.filter((p) => !known.has(p));
+    for (const t of [textures?.map, textures?.orm, shadowTexture]) if (t) warmQueue.push(t);
+  };
+  const warmStep = () => {
+    const item = warmQueue.shift();
+    try {
+      if (item.isTexture) renderer.initTexture(item);
+      else if (item.program) {
+        item.getUniforms();
+        item.getAttributes();
+      }
+    } catch {
+      // соберётся при первой отрисовке, как раньше
+    }
   };
   const teardown = () => {
     removeShootable?.();
     removeShootable = null;
+    warmQueue = [];
     for (const unit of units ?? []) unit.dispose();
     units = null;
     fx?.dispose();
     fx = null;
+    textures?.dispose();
+    textures = null;
   };
   const newRun = () => {
     run = shared.hordeRun = { elapsed: 0, nextSpawn: SPAWN_FIRST, dogs: [], pending: true };
@@ -147,7 +184,7 @@ export function createHorde({ THREE, root, camera, shooting, onPlayerHit, onKill
 
   const aliveCount = () => {
     let n = 0;
-    for (let i = 0; i < units.length; i += 1) if (units[i].mode === 'alive') n += 1;
+    for (let i = 0; i < units.length; i += 1) if (units[i].mode === 'alive' || units[i].knocked) n += 1;
     return n;
   };
   // свободная модель; нет — самый старый труп уходит в землю прямо сейчас
@@ -314,6 +351,7 @@ export function createHorde({ THREE, root, camera, shooting, onPlayerHit, onKill
         vignette.material.opacity = hurt * hurt;
         vignette.visible = hurt > 0;
       }
+      if (warmQueue.length) warmStep();
       if (!enabled || !units || !run) return;
       const t0 = performance.now();
       dt = Math.min(dt, 0.05);
@@ -325,19 +363,29 @@ export function createHorde({ THREE, root, camera, shooting, onPlayerHit, onKill
       run.elapsed += dt;
       run.nextSpawn -= dt;
       if (run.nextSpawn <= 0 && aliveCount() < MAX_ALIVE) {
-        if (spawnOne()) run.nextSpawn = Math.max(SPAWN_MIN, SPAWN_FIRST - run.elapsed * RAMP);
+        const ts = performance.now();
+        const spawned = spawnOne();
+        if (globalThis.__prof) globalThis.__prof.sub.hSpawn = performance.now() - ts; // ВРЕМЕННО
+        if (spawned) run.nextSpawn = Math.max(SPAWN_MIN, SPAWN_FIRST - run.elapsed * RAMP);
       }
+      const PS = globalThis.__prof?.sub; // ВРЕМЕННО: профилировщик
       for (let i = 0; i < units.length; i += 1) {
         const unit = units[i];
+        const ta = performance.now();
         if (unit.mode === 'alive') steer(unit, dt);
+        const tb = performance.now();
+        const m0 = unit.mode;
         unit.update(dt);
+        if (PS) { PS.hSteer = (PS.hSteer || 0) + tb - ta; PS['h_' + m0] = (PS['h_' + m0] || 0) + performance.now() - tb; }
         if (unit.mode === 'dead' && unit.deadFor > CORPSE_S) {
           const k = (unit.deadFor - CORPSE_S) / SINK_S;
           if (k >= 1) unit.hide();
           else unit.setSink(k * 0.6);
         }
       }
+      const tf = performance.now();
       fx.update(dt);
+      if (PS) PS.hFx = (PS.hFx || 0) + performance.now() - tf;
 
       const spent = performance.now() - t0;
       sum += spent;

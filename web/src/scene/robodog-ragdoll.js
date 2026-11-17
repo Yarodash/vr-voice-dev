@@ -7,7 +7,8 @@
 // «Мышцы» — мягкие связи стопы и колена с корпусом, длины из позы в момент смерти: пока сила мышц
 // не упала до нуля, пёс ещё стоит и дёргается, потом ноги подкашиваются. Земля — по высоте
 // ground(x, z): частица не уходит ниже, на касании трение гасит скорость вдоль земли.
-// Подшаг 1/240 с, 8 итераций связей; успокоился — засыпает, пока его не толкнут.
+// Подшаг 1/120 с (один на кадр шлема), 10 итераций связей, скорость частиц ограничена; успокоился —
+// засыпает, пока его не толкнут.
 import { HIPS, L1, L2 } from './robodog-gait.js';
 
 export const BODY_POINTS = [
@@ -20,10 +21,11 @@ export const BODY_POINTS = [
 export const KNEE = 8; // 8–11 колени, 12–15 стопы (порядок ног как у HIPS)
 export const FOOT = 12;
 export const COUNT = 16;
-const SUBSTEP = 1 / 240;
-const ITERATIONS = 8;
+const SUBSTEP = 1 / 120;
+const ITERATIONS = 10;
+const MAX_SPEED = 14; // м/с: сильные толчки не рвут связи (скорость частицы не больше этой)
 const GRAVITY = 9.81;
-const FRICTION = 0.4; // доля скорости вдоль земли, которую съедает касание за подшаг
+const FRICTION = 0.55; // доля скорости вдоль земли, которую съедает касание за подшаг
 const RESTITUTION = 0.15;
 
 export function createRagdoll() {
@@ -32,6 +34,10 @@ export function createRagdoll() {
   const radius = new Float32Array(COUNT);
   const invMass = new Float32Array(COUNT);
   const floor = new Float32Array(COUNT);
+  const velY = new Float32Array(COUNT);
+  const contact = new Uint8Array(COUNT);
+  // удары о землю за последний step(): самый сильный (м/с вниз) и где, самое быстрое скольжение
+  const hits = { impact: 0, slide: 0, x: 0, y: 0, z: 0 };
   for (let i = 0; i < COUNT; i += 1) {
     radius[i] = i < 4 ? 0.055 : i < 8 ? 0.05 : i < FOOT ? 0.035 : 0.028;
     invMass[i] = i < 8 ? 1 : 1.8; // ноги легче корпуса
@@ -106,12 +112,22 @@ export function createRagdoll() {
 
   const substep = (ground) => {
     const h2 = SUBSTEP * SUBSTEP;
+    const maxStep = MAX_SPEED * SUBSTEP;
     let moved = 0;
     for (let i = 0; i < COUNT; i += 1) {
       const j = i * 3;
-      const vx = (pos[j] - prev[j]) * 0.999;
-      const vy = (pos[j + 1] - prev[j + 1]) * 0.999;
-      const vz = (pos[j + 2] - prev[j + 2]) * 0.999;
+      let vx = (pos[j] - prev[j]) * 0.999;
+      let vy = (pos[j + 1] - prev[j + 1]) * 0.999;
+      let vz = (pos[j + 2] - prev[j + 2]) * 0.999;
+      const len = Math.sqrt(vx * vx + vy * vy + vz * vz);
+      if (len > maxStep) {
+        const k = maxStep / len;
+        vx *= k;
+        vy *= k;
+        vz *= k;
+      }
+      velY[i] = vy / SUBSTEP;
+      contact[i] = 0;
       prev[j] = pos[j];
       prev[j + 1] = pos[j + 1];
       prev[j + 2] = pos[j + 2];
@@ -128,15 +144,29 @@ export function createRagdoll() {
         const g = floor[i];
         if (pos[j + 1] < g) {
           pos[j + 1] = g;
-          if (it === ITERATIONS - 1) {
-            // трение и слабый отскок — один раз за подшаг
-            prev[j] = pos[j] - (pos[j] - prev[j]) * (1 - FRICTION);
-            prev[j + 2] = pos[j + 2] - (pos[j + 2] - prev[j + 2]) * (1 - FRICTION);
-            const vy = pos[j + 1] - prev[j + 1];
-            if (vy < 0) prev[j + 1] = pos[j + 1] + vy * RESTITUTION;
-          }
+          contact[i] = 1;
         }
       }
+    }
+    // касание земли: удар (скорость вниз до касания) и скольжение — для звука; трение и слабый
+    // отскок — один раз за подшаг
+    for (let i = 0; i < COUNT; i += 1) {
+      if (!contact[i]) continue;
+      const j = i * 3;
+      const sx = (pos[j] - prev[j]) / SUBSTEP;
+      const sz = (pos[j + 2] - prev[j + 2]) / SUBSTEP;
+      const slide = Math.sqrt(sx * sx + sz * sz);
+      if (-velY[i] > hits.impact) {
+        hits.impact = -velY[i];
+        hits.x = pos[j];
+        hits.y = pos[j + 1];
+        hits.z = pos[j + 2];
+      }
+      if (slide > hits.slide) hits.slide = slide;
+      prev[j] = pos[j] - (pos[j] - prev[j]) * (1 - FRICTION);
+      prev[j + 2] = pos[j + 2] - (pos[j + 2] - prev[j + 2]) * (1 - FRICTION);
+      const vy = pos[j + 1] - prev[j + 1];
+      if (vy < 0) prev[j + 1] = pos[j + 1] + vy * RESTITUTION;
     }
     for (let i = 0; i < COUNT * 3; i += 1) moved = Math.max(moved, Math.abs(pos[i] - prev[i]));
     return moved;
@@ -149,6 +179,7 @@ export function createRagdoll() {
     get asleep() {
       return asleep;
     },
+    hits,
     get muscle() {
       return muscle;
     },
@@ -197,6 +228,17 @@ export function createRagdoll() {
       asleep = false;
       sleepFrames = 0;
     },
+    // толчок всему телу: прибавка скорости (vx, vy, vz) м/с каждой частице (полёт целиком)
+    push(vx, vy, vz) {
+      for (let i = 0; i < COUNT; i += 1) {
+        const j = i * 3;
+        prev[j] -= vx * SUBSTEP;
+        prev[j + 1] -= vy * SUBSTEP;
+        prev[j + 2] -= vz * SUBSTEP;
+      }
+      asleep = false;
+      sleepFrames = 0;
+    },
     // толкнуть одну частицу (подёргивания)
     nudge(i, dx, dy, dz) {
       const j = i * 3;
@@ -206,12 +248,14 @@ export function createRagdoll() {
       asleep = false;
     },
     step(dt, ground) {
+      hits.impact = 0;
+      hits.slide = 0;
       if (asleep) return;
-      accumulator = Math.min(accumulator + dt, SUBSTEP * 4);
+      accumulator = Math.min(accumulator + dt, SUBSTEP * 3);
       while (accumulator >= SUBSTEP) {
         accumulator -= SUBSTEP;
         const moved = substep(ground);
-        if (moved < 2e-5 && muscle <= 0) sleepFrames += 1;
+        if (moved < 4e-5 && muscle <= 0) sleepFrames += 1;
         else sleepFrames = 0;
         if (sleepFrames > 120) {
           asleep = true;

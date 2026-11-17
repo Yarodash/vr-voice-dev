@@ -5,14 +5,17 @@
 import { buildPistol } from './pistol-model.js';
 import { buildAk } from './ak-model.js';
 import { buildAwp, cycleBolt } from './awp-model.js';
+import { buildAk2 } from './ak2-model.js';
 import { cachedBuild } from './model-cache.js';
 
 const STORE_KEY = 'scene.pistols';
 const OLD_STORE_KEY = 'scene.pistol'; // прежний формат: один пистолет
 const OUTLINE_M = 0.0025; // толщина белой обводки, метры (у калаша обводка готовая, в файле модели)
-const KINDS = ['pistol', 'ak', 'awp']; // 'awp' — снайперка с продольным затвором (awp-model.js), пока без прицела
+const KINDS = ['pistol', 'ak', 'awp', 'ak2']; // 'awp' — снайперка с прицелом (awp-model.js, линза — scope-lens.js); 'ak2' — «Калаш 2.0»: калаш с прицелом (ak2-model.js)
 
-export function createPistols({ THREE, root }) {
+// makeLens(scope) → стёкла прицела АВП (createScopeLens из scope-lens.js): item.lens; каждый кадр
+// updateLenses (изображение — только когда в окуляр смотрят), при удалении и подмене — dispose.
+export function createPistols({ THREE, root, makeLens = null }) {
   const shared = (globalThis.__sceneState ??= {});
   const items = []; // { kind, group, accent, outline, muzzle, ejector }
   // Обводка рисуется ПОСЛЕ мира (renderOrder 1) и не пишет глубину, а само оружие — после неё
@@ -23,7 +26,7 @@ export function createPistols({ THREE, root }) {
   const liftModel = (group, outline) => {
     outline.renderOrder = 1;
     group.traverse((o) => {
-      if (o.isMesh && o !== outline) o.renderOrder = 2;
+      if (o.isMesh && o !== outline && o.material !== outlineMaterial) o.renderOrder = 2; // (обводки прицела — свои, renderOrder 1)
     });
   };
 
@@ -34,8 +37,8 @@ export function createPistols({ THREE, root }) {
     if (!KINDS.includes(kind)) kind = 'pistol';
     let model;
     let outline;
-    if (kind === 'ak') {
-      const { ready, ...ak } = buildAk(THREE);
+    if (kind === 'ak' || kind === 'ak2') {
+      const { ready, ...ak } = kind === 'ak2' ? buildAk2(THREE, { outlineM: OUTLINE_M }) : buildAk(THREE);
       model = ak;
       outline = new THREE.Mesh(new THREE.BufferGeometry(), outlineMaterial);
       outline.visible = false;
@@ -55,6 +58,33 @@ export function createPistols({ THREE, root }) {
       model.group.add(outline);
       liftModel(model.group, outline);
     }
+    if (model.scope) {
+      {
+        // прицел (АВП, «Калаш 2.0»): стёкла и своя обводка — в узле прицела (он двигается и наклоняется)
+        const { scope } = model;
+        const lens = makeLens?.(scope) ?? null;
+        if (lens) {
+          lens.eyepiece.position.set(0, scope.y, scope.eyepieceZ);
+          lens.objective.position.set(0, scope.y, scope.objectiveZ);
+          lens.objective.scale.setScalar(scope.objectiveR);
+          lens.eyepiece.renderOrder = lens.objective.renderOrder = 2;
+          scope.node.add(lens.eyepiece, lens.objective);
+        }
+        model.lens = lens;
+        if (scope.outlineGeometry) {
+          model.scopeOutline = new THREE.Mesh(scope.outlineGeometry, outlineMaterial);
+          model.scopeOutline.visible = false;
+          model.scopeOutline.renderOrder = 1;
+          scope.node.add(model.scopeOutline);
+        }
+        if (model.fixedOutlineGeometry && model.fixedNode) { // неподвижная часть крепления
+          model.fixedOutline = new THREE.Mesh(model.fixedOutlineGeometry, outlineMaterial);
+          model.fixedOutline.visible = false;
+          model.fixedOutline.renderOrder = 1;
+          model.fixedNode.add(model.fixedOutline);
+        }
+      }
+    }
     const item = { kind, ...model, outline };
     if (pose?.position && pose?.quaternion) {
       item.group.position.fromArray(pose.position);
@@ -70,6 +100,7 @@ export function createPistols({ THREE, root }) {
     if (index < 0) return;
     items.splice(index, 1);
     root.remove(item.group);
+    item.lens?.dispose(); // текстура прицела
     const geometries = new Set();
     const materials = new Set();
     item.group.traverse((object) => {
@@ -101,6 +132,25 @@ export function createPistols({ THREE, root }) {
     // Спуск оружия идёт за курком: у того, что в руке, — value (0..1) × maxAngle, у остальных — назад в 0.
     // Без аллокаций; вызывается каждый кадр.
     // Выстрел: затвор откатывается (25 мс), возвращается (75 мс); onEject(item) — когда он в крайней точке.
+    // при подмене сцены: группы освобождает оболочка, а текстуры прицелов — здесь
+    disposeLenses() {
+      for (const item of items) item.lens?.dispose();
+    },
+    // Прицелы АВП, каждый кадр в конце update сцены: сдвиг по планке scopeZ (общий), обводка как у
+    // винтовки, изображение — у любого АВП (в руке или висящего), но только когда в окуляр смотрят.
+    // scopeTilt — число (у всех) или { [kind]: число } (у каждого вида свой наклон)
+    updateLenses(scopeZ, scopeTilt = 0) {
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (!item.scope) continue;
+        const { scope } = item;
+        scope.node.position.z = Math.min(scope.maxZ, Math.max(scope.minZ, scopeZ ?? scope.defaultZ));
+        scope.node.rotation.x = typeof scopeTilt === 'number' ? scopeTilt : (scopeTilt?.[item.kind] ?? 0); // наклон стиком (рад, + — передний конец выше)
+        if (item.scopeOutline) item.scopeOutline.visible = item.outline.visible;
+        if (item.fixedOutline) item.fixedOutline.visible = item.outline.visible;
+        item.lens?.update(true, item.group);
+      }
+    },
     kick(item) {
       item.shotAt = shared.sceneNowMs ?? performance.now(); // сценовые часы (замедление времени)
       item.ejected = false;
@@ -141,13 +191,15 @@ export function createPistols({ THREE, root }) {
     },
     // heldItem — тот, что в руке (или null); heldMatrix — его положение относительно руки
     save(heldItem, heldMatrix, force = false) {
+      // не чаще раза в 500 мс (подмена сцены — force): снимок не собирается каждый кадр (мусор для GC)
+      if (!force && shared.lastPistolStore && performance.now() - shared.lastPistolStore < 500) return;
+      if (typeof heldMatrix === 'function') heldMatrix = heldMatrix();
       const state = {
         list: items.map((item) => ({ kind: item.kind, position: item.group.position.toArray(), quaternion: item.group.quaternion.toArray() })),
         held: heldItem ? items.indexOf(heldItem) : -1,
         heldMatrix,
       };
       shared.pistols = state;
-      if (!force && shared.lastPistolStore && performance.now() - shared.lastPistolStore < 500) return;
       shared.lastPistolStore = performance.now();
       try {
         localStorage.setItem(STORE_KEY, JSON.stringify({ list: state.list, held: -1 }));

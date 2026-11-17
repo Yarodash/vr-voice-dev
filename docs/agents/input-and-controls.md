@@ -72,3 +72,12 @@ Haptics: `source?.gamepad?.hapticActuators?.[0]?.pulse?.(strength0to1, ms)` (`bu
   from it (`ctx.pointerAim.object = axes`).
 - User convention for shifting held items: along the item's own axes; "вниз" = against blue.
   `PISTOL_SHIFT` (x red, y blue, z against green), currently `(0, -0.05, 0)`.
+- **Inertia** (`Настройки ▸ Инерция: вкл/выкл`, keepOpen; `shared.inertia`, localStorage
+  `scene.inertia` `'on'/'off'`, default off): `scene/inertia.js`, One Euro filter (position vector +
+  quaternion slerp, adaptive cutoff from speed; constants `INERTIA` at the top). In `update`,
+  right after `handPosition` is read, `inertia.apply(hand, gripWorld, realDt)` replaces `gripWorld`
+  with the filtered pose (filtered in rig space = `hand.matrix`, so a moving car doesn't lag). So
+  held weapons, muzzle/aim/laser/shot, held clay and relatively grabbed panels are filtered;
+  `handPosition` stays raw (near search, clay throw). Bench handle: `__sceneState.inertiaDebug.make()`
+  → `{ step(pos, quat, dt), pos, quat }`. Measured (synthetic 90 Hz): tremor RMS −85 %, lag ≈ 56 ms
+  at 0.1 rad/s, 18 ms at 1 rad/s, 9 ms at 3 rad/s.

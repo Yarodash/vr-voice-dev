@@ -30,6 +30,9 @@ export function buildMenu({
   scenes = [],
   car = null, // null — машины нет; 'out' — стоит рядом; 'in' — за рулём
   timeScale = 1, // замедление времени: 1 → 0,5 → 0,25 → 1 (пункт в «Настройках»)
+  scopeDebug = false, // панель отладки прицела (scope-debug.js), пункт у АВП в руке
+  inertia = false, // «Инерция: вкл/выкл» в «Настройках»: гасит дрожание руки (inertia.js)
+  prone = false, // «Режим лёжа: вкл/выкл» в «Настройках»: центрирование ставит глаза в ~35 см над землёй
 }) {
   const carItems = car ? [{ label: car === 'in' ? CAR_EXIT : CAR_ENTER }] : [];
   const outlineItem = { label: aimOutline ? 'Обводка прицела: вкл' : 'Обводка прицела: выкл', keepOpen: true };
@@ -55,7 +58,7 @@ export function buildMenu({
   // настройки: «Отцентрировать» (ctx.recenter: где стоишь и куда смотришь — начало мира),
   // «Расстояние между глазами» открывает панель IPD (ipd-panel.js)
   const timeLabel = `Время: ×${String(timeScale).replace('.', ',')}`;
-  const settingsItem = { label: 'Настройки', children: [{ label: 'Отцентрировать' }, { label: 'Расстояние между глазами' }, { label: timeLabel, keepOpen: true }] };
+  const settingsItem = { label: 'Настройки', children: [{ label: 'Отцентрировать' }, { label: 'Расстояние между глазами' }, { label: timeLabel, keepOpen: true }, { label: inertia ? 'Инерция: вкл' : 'Инерция: выкл', keepOpen: true }, { label: prone ? 'Режим лёжа: вкл' : 'Режим лёжа: выкл' }] };
   const common = [...(features.targets ? [physicsItem] : []), scenesItem, settingsItem];
   if (heldKind === 'plate') {
     // глиняная тарелка в руке: курок не стреляет, а взводит бросок (clays.js)
@@ -64,12 +67,13 @@ export function buildMenu({
   if (heldKind) {
     // оружие в руке: перенастроить его посадку (оно замирает, джойстик переставляют, второй хват
     // приклеивает; у пистолета и калаша посадка своя) или убрать его совсем
-    return { title: heldKind === 'ak' ? 'Калаш' : heldKind === 'awp' ? 'АВП' : 'Пистолет', items: [
+    return { title: heldKind === 'ak' ? 'Калаш' : heldKind === 'ak2' ? 'Калаш 2.0' : heldKind === 'awp' ? 'АВП' : 'Пистолет', items: [
         ...carItems,
         { label: 'Перенастроить оси' },
         { label: 'Удалить оружие' },
         { label: laser ? 'Лазерный прицел: вкл' : 'Лазерный прицел: выкл', keepOpen: true },
         { label: 'Цвет прицела' }, // закрывает колесо и открывает панель laser-panel.js
+        ...(heldKind === 'awp' || heldKind === 'ak2' ? [{ label: scopeDebug ? 'Отладка прицела: вкл' : 'Отладка прицела: выкл', keepOpen: true }] : []),
       ],
     };
   }
@@ -77,7 +81,7 @@ export function buildMenu({
   const spawnItems = features.spawn
     ? [
         // всё, что можно заспавнить, — в одном подменю (onMenu смотрит только на подпись пункта)
-        { label: 'Заспавнить', children: [{ label: 'Заспавнить пистолет' }, { label: 'Заспавнить калаш' }, { label: 'Заспавнить АВП' }, { label: 'Заспавнить тарелку' }] },
+        { label: 'Заспавнить', children: [{ label: 'Заспавнить пистолет' }, { label: 'Заспавнить калаш' }, { label: 'Заспавнить калаш 2.0' }, { label: 'Заспавнить АВП' }, { label: 'Заспавнить тарелку' }] },
         { label: gripMode === 'hold' ? 'Хват: держать' : 'Хват: нажать' },
       ]
     : [];

@@ -1,11 +1,17 @@
 // Один робопёс «в мире»: модель (robodog-model.js), походка (robodog-gait.js), прыжок, попадания,
-// смерть и тряпичная кукла (robodog-ragdoll.js), тень. Поведения тут нет: куда бежать, решает
-// хозяин — одиночный пёс (robodog.js, мозг robodog-ai.js) или стая (robodog-horde.js). Хозяин
-// двигает unit.dog (x, z, yaw, v, w, sniff, state) и зовёт unit.update(dt).
+// сбивание с ног и подъём, смерть и тряпичная кукла (robodog-ragdoll.js), тень. Поведения тут нет:
+// куда бежать, решает хозяин — одиночный пёс (robodog.js, мозг robodog-ai.js) или стая
+// (robodog-horde.js). Хозяин двигает unit.dog (x, z, yaw, v, w, sniff, state) и зовёт unit.update(dt).
+//
+// Режимы: 'off' (в запасе), 'alive' (ходит), 'down' (сбит пулей: та же кукла на ~1 с, мышцы слабые),
+// 'getup' (вскакивает: поза плавно переходит из куклы в стойку), 'dying' (судороги), 'dead' (кукла).
+// Пули толкают куклу сильно (в точке попадания по ходу пули и вверх; калибр — shared.shotKind из
+// main.js: пистолет слабее калаша, AWP сильнее всех); удары о землю звучат (глухой металл, скрежет).
 //
 // Искры и дуги — общий на всех псов эффект (robodog-fx.js): его anchors — общий массив, каждый пёс
 // дописывает туда свои 9 шарниров (корпус, 4 бедра, 4 голени); индекс дуги = base + часть.
 // Звуки — через createDogSfx (ограничение частоты, чтобы очередь и стая не забили звук).
+// Всё игровое время — dt (замедление времени замедляет и псов).
 import { buildRobodog } from './robodog-model.js';
 import { L2, createGait, jumpSpeed } from './robodog-gait.js';
 import { createDog } from './robodog-ai.js';
@@ -15,6 +21,8 @@ import { createDogSound } from './robodog-sound.js';
 
 const GRAVITY = 9.81;
 const DYING_S = 1.6; // судороги до того, как обмякнет совсем
+const DOWN_S = 1.0; // сбитый лежит, потом вскакивает
+const GETUP_S = 0.55;
 // корпус для попаданий: коробка в системе корпуса (центр, полуразмеры)
 const BOX_C = [0, 0.01, -0.015];
 const BOX_H = [0.112, 0.08, 0.43];
@@ -22,6 +30,8 @@ const UPPER_R = 0.045;
 const LOWER_R = 0.034;
 const EYE_ON = 0x45e8ff;
 const EYE_OFF = 0x061418;
+// сила выстрела по калибру (0..1): во сколько толкает куклу и как глубоко звенит корпус
+const POWER = { pistol: 0.45, ak: 0.7, awp: 1 };
 
 // Звуки псов (robodog-sound.js): не чаще, чем нужно уху, и без сотни голосов от очереди калаша.
 // Ограничение частоты — по реальному времени (звук не замедляется в замедленном времени).
@@ -37,15 +47,18 @@ export function createDogSfx(shared) {
   return {
     zap: (p, strength = 1) => play('zap', 55, p, strength),
     clank: (p) => play('clank', 40, p),
-    crackle: (p, seconds = 0.4) => play('crackle', 90, p, seconds),
+    clankHeavy: (p, k) => play('clankHeavy', 45, p, k),
+    crackle: (p) => play('crackle', 90, p),
     powerDown: (p) => play('powerDown', 150, p),
     thud: (p) => play('thud', 120, p),
     servo: (p, speed) => play('servo', 110, p, speed),
+    groundThud: (p, k) => play('groundThud', 110, p, k),
+    scrape: (p, k) => play('scrape', 280, p, k),
   };
 }
 
-export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera }) {
-  const model = buildRobodog(THREE);
+export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera, textures = null, env = null, shared = globalThis.__sceneState ?? {} }) {
+  const model = buildRobodog(THREE, { textures, env });
   model.group.visible = false;
   root.add(model.group);
   const base = anchors.length; // наши шарниры в общем массиве эффектов
@@ -65,6 +78,8 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
   const v1 = new THREE.Vector3();
   const v2 = new THREE.Vector3();
   const v3 = new THREE.Vector3();
+  const arcA = new THREE.Vector3(); // начало дуги (своя копия: точку могли передать общим вектором)
+  const arcB = new THREE.Vector3();
   const hitPoint = new THREE.Vector3();
   const hitNormal = new THREE.Vector3();
   const bodyCenter = new THREE.Vector3();
@@ -83,6 +98,15 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
   const eyeOn = new THREE.Color(EYE_ON);
   const eyeOff = new THREE.Color(EYE_OFF);
   const cmd = { v: 0, w: 0, sniff: 0, crouch: 0, air: null };
+  // подъём: поза куклы в момент начала (корпус в мире, суставы относительно родителей)
+  const capPos = new THREE.Vector3();
+  const capQ = new THREE.Quaternion();
+  const capLegs = [];
+  for (let i = 0; i < 12; i += 1) capLegs.push(new THREE.Quaternion());
+  const goalPos = new THREE.Vector3();
+  const goalQ = new THREE.Quaternion();
+  const tq = new THREE.Quaternion();
+  const unusedScale = new THREE.Vector3();
   let flash = 0;
   let hitPart = 0;
   let groundBase = 0;
@@ -92,21 +116,29 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
   let eyeLeft = 0;
   let sink = 0; // труп уходит в землю (стая), м
   let lastHalf = 0; // половина цикла походки — для шагов сервоприводов
+  let modeT = 0; // секунд в режиме down / getup
 
   const unit = {
     model,
     dog: createDog(),
-    mode: 'off', // 'off' | 'alive' | 'dying' | 'dead'
+    mode: 'off',
     health: 1,
     deadFor: 0,
     jumpH: 0,
     jumpVy: 0,
     bodyCenter,
     ragdoll,
+    shadow, // для заблаговременной сборки шейдеров (robodog-horde.js: prewarm)
     get hitPart() {
       return hitPart;
     },
+    // сбит или поднимается: хозяин его не водит
+    get knocked() {
+      return unit.mode === 'down' || unit.mode === 'getup';
+    },
   };
+
+  const shotPower = () => POWER[shared.shotKind] ?? 0.6;
 
   const groundLocal = (lx, lz) => {
     const dog = unit.dog;
@@ -185,7 +217,7 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     }
   };
 
-  // случайная точка на шарнире part (0 — корпус, 1–4 бёдра, 5–8 голени): мировая
+  // случайная точка на шарнире part (0 — корпус, 1–4 бёдра, 5–8 голени): мировая, в out
   const anchorPoint = (part, out) => {
     if (part === 0) {
       out.set((Math.random() - 0.5) * 0.2, Math.random() * 0.1 - 0.03, (Math.random() - 0.5) * 0.7);
@@ -194,20 +226,22 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     out.set(0, -Math.random() * (part < 5 ? 0.22 : L2), 0);
     return out.applyMatrix4(anchors[base + part].matrixWorld);
   };
-  // дуги от точки к другим частям и «ползающие» вокруг неё; трещат, пока горят
+  // дуги от точки к другим частям и «ползающие» вокруг неё; трещат, пока горят. point копируется
+  // сразу: его могли передать общим вектором (v2), а он ниже служит черновиком.
   const arcsFrom = (part, point, count, crawl) => {
+    arcA.copy(point);
     for (let k = 0; k < count; k += 1) {
       let other = Math.floor(Math.random() * 9);
       if (other === part) other = part === 0 ? 1 + Math.floor(Math.random() * 8) : 0;
-      anchorPoint(other, v2);
-      if (v2.distanceTo(point) > 0.7) v2.lerp(point, 0.4);
-      fx.arc(base + part, point, base + other, v2, 0.3 + Math.random() * 0.3, 0.035 + Math.random() * 0.04);
+      anchorPoint(other, arcB);
+      if (arcB.distanceTo(arcA) > 0.7) arcB.lerp(arcA, 0.4);
+      fx.arc(base + part, arcA, base + other, arcB, 0.3 + Math.random() * 0.3, 0.035 + Math.random() * 0.04);
     }
     for (let k = 0; k < crawl; k += 1) {
-      v2.set((Math.random() - 0.5) * 0.24, (Math.random() - 0.5) * 0.24, (Math.random() - 0.5) * 0.24).add(point);
-      fx.arc(base + part, point, base + part, v2, 0.25 + Math.random() * 0.25, 0.025);
+      arcB.set((Math.random() - 0.5) * 0.24, (Math.random() - 0.5) * 0.24, (Math.random() - 0.5) * 0.24).add(arcA);
+      fx.arc(base + part, arcA, base + part, arcB, 0.25 + Math.random() * 0.25, 0.025);
     }
-    if (count + crawl > 0) sfx.crackle(point, 0.45);
+    if (count + crawl > 0) sfx.crackle(arcA);
   };
 
   const rayCapsule = (o, d, a0, a1, a2, b0, b1, b2, r) => {
@@ -285,22 +319,35 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     ragdoll.start(points, vx, vy, vz);
     ragdoll.setMuscle(muscle);
   };
+  // Пуля толкает куклу: всё тело летит по ходу пули и вверх, а в точке попадания — сильнее
+  // (закручивает). k — сила (калибр × насколько это «смертельный» выстрел).
+  const throwRagdoll = (dir, k) => {
+    ragdoll.push(dir.x * (2 + 3 * k), 1.2 + 1.6 * k + dir.y * 2, dir.z * (2 + 3 * k));
+    ragdoll.impulse(hitPoint.x, hitPoint.y, hitPoint.z, dir.x, dir.y, dir.z, 4 + 6 * k, 0.45);
+  };
+  const ragdollVelocity = () => {
+    const dog = unit.dog;
+    return [-Math.sin(dog.yaw) * dog.v, dog.jump ? unit.jumpVy : 0, -Math.cos(dog.yaw) * dog.v];
+  };
 
-  // Пуля попала (после cast): 'hit' — живой, ранен; 'kill' — убит этим выстрелом; 'corpse' — лежачий
-  unit.hit = (origin, dir, distance) => {
+  // Пуля попала (после cast). opts.knockdown — несмертельное попадание сбивает с ног (стая).
+  // Возвращает 'hit' (ранен, вздрогнул), 'knock' (сбит), 'kill' (убит этим выстрелом), 'corpse'.
+  unit.hit = (origin, dir, distance, { knockdown = false } = {}) => {
     hitPoint.copy(origin).addScaledVector(dir, distance);
     hitNormal.copy(dir).negate();
-    sfx.clank(hitPoint);
-    if (unit.mode !== 'alive') {
-      ragdoll.impulse(hitPoint.x, hitPoint.y, hitPoint.z, dir.x, dir.y, dir.z, 2.2, 0.4);
-      ragdoll.impulse(hitPoint.x, hitPoint.y, hitPoint.z, 0, 1, 0, 0.6, 0.4);
-      fx.sparks(hitPoint, hitNormal, 6, { speed: [1, 3], hot: Math.random() < 0.5 });
+    const power = shotPower();
+    if (unit.mode === 'dying' || unit.mode === 'dead') {
+      // лежачий: далеко отлетает, тяжёлый полый звон, немного искр
+      throwRagdoll(dir, power);
+      sfx.clankHeavy(hitPoint, power);
+      fx.sparks(hitPoint, hitNormal, 8, { speed: [1.5, 4], hot: Math.random() < 0.5 });
       if (Math.random() < 0.4) {
         arcsFrom(hitPart, hitPoint, 0, 1);
         sfx.zap(hitPoint, 0.4);
       }
       return 'corpse';
     }
+    sfx.clank(hitPoint);
     unit.health -= 1;
     flash = 1;
     fx.flash(hitPoint, 0.12);
@@ -309,8 +356,12 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     arcsFrom(hitPart, hitPoint, 3, 2);
     sfx.zap(hitPoint, 1);
     if (unit.health <= 0) {
-      unit.kill(dir);
+      unit.kill(dir, power);
       return 'kill';
+    }
+    if (knockdown || unit.knocked) {
+      unit.knock(dir, power);
+      return 'knock';
     }
     // вздрогнул: толчок по курсу пули (в системе пса)
     const lx = dir.x * cosYaw - dir.z * sinYaw;
@@ -319,18 +370,32 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     return 'hit';
   };
 
-  unit.kill = (dir) => {
+  // сбит с ног: на DOWN_S секунд — кукла со слабыми мышцами, отброшенная пулей
+  unit.knock = (dir, power = 0.6) => {
+    if (unit.mode !== 'down') {
+      const [vx, vy, vz] = ragdollVelocity();
+      startRagdoll(vx, vy, vz, 0.3);
+    }
+    unit.mode = 'down';
+    modeT = 0;
     const dog = unit.dog;
+    dog.jump = null;
+    dog.leap = null;
+    dog.v = 0;
+    unit.jumpH = 0;
+    throwRagdoll(dir, power * 0.7);
+  };
+
+  unit.kill = (dir, power = 0.6) => {
+    const dog = unit.dog;
+    if (unit.mode !== 'down') {
+      const [vx, vy, vz] = ragdollVelocity();
+      startRagdoll(vx, vy, vz, 0.35);
+    } else ragdoll.setMuscle(0.35);
     unit.mode = 'dying';
     unit.deadFor = 0;
     dog.state = 'dead';
-    const vx = -Math.sin(dog.yaw) * dog.v;
-    const vz = -Math.cos(dog.yaw) * dog.v;
-    startRagdoll(vx, dog.jump ? unit.jumpVy : 0, vz, 0.6);
-    if (dir) {
-      ragdoll.impulse(hitPoint.x, hitPoint.y, hitPoint.z, dir.x, dir.y, dir.z, 3.4, 0.6);
-      ragdoll.impulse(hitPoint.x, hitPoint.y, hitPoint.z, 0, 1, 0, 1.2, 0.5);
-    }
+    if (dir) throwRagdoll(dir, power);
     dog.jump = null;
     unit.jumpH = 0;
     fx.flash(hitPoint, 0.25);
@@ -399,6 +464,45 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     return true;
   };
 
+  // походка + поза в стойке (без смешивания)
+  const animate = (dt) => {
+    const dog = unit.dog;
+    placeAlive();
+    cmd.v = dog.v;
+    cmd.w = dog.w;
+    cmd.sniff = dog.sniff;
+    gait.update(dt, cmd, groundLocal);
+    model.setPose(gait.pose);
+  };
+
+  // удары о землю и волочение куклы — звук (сила по скорости)
+  const groundSounds = () => {
+    const h = ragdoll.hits;
+    if (h.impact > 1.3) sfx.groundThud(v3.set(h.x, h.y, h.z), Math.min(1, (h.impact - 1) / 5));
+    if (h.slide > 0.9) sfx.scrape(bodyCenter, Math.min(1, h.slide / 4));
+  };
+
+  // начать подъём: запомнить позу куклы, пёс встаёт там, где лежит, мордой куда смотрел корпус
+  const startGetup = () => {
+    unit.mode = 'getup';
+    modeT = 0;
+    capPos.copy(model.body.position);
+    capQ.copy(model.body.quaternion);
+    for (let i = 0; i < 4; i += 1) {
+      capLegs[i * 3].copy(model.legs[i].hip.quaternion);
+      capLegs[i * 3 + 1].copy(model.legs[i].upper.quaternion);
+      capLegs[i * 3 + 2].copy(model.legs[i].knee.quaternion);
+    }
+    const dog = unit.dog;
+    dog.x = frame.c[0];
+    dog.z = frame.c[2];
+    if (Math.hypot(frame.z[0], frame.z[2]) > 0.2) dog.yaw = Math.atan2(frame.z[0], frame.z[2]);
+    dog.v = 0;
+    dog.w = 0;
+    dog.jump = null;
+    ragdoll.setMuscle(0);
+  };
+
   unit.update = (dt) => {
     if (unit.mode === 'off') return;
     if (unit.mode === 'alive') {
@@ -430,12 +534,7 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
           if (j.t >= 0.22) dog.jump = null;
         }
       }
-      placeAlive();
-      cmd.v = dog.v;
-      cmd.w = dog.w;
-      cmd.sniff = dog.sniff;
-      gait.update(dt, cmd, groundLocal);
-      model.setPose(gait.pose);
+      animate(dt);
       collectJoints();
       shadowAt(dog.x, dog.z, dog.yaw, 1 - Math.min(0.5, unit.jumpH), 1 - Math.min(0.6, unit.jumpH * 1.2));
       if (dog.state === 'stun' && Math.random() < dt * 14) {
@@ -451,11 +550,49 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
           if (v1.distanceToSquared(bodyCenter) < 15 * 15) sfx.servo(bodyCenter, dog.v);
         }
       }
+    } else if (unit.mode === 'down') {
+      // сбит: летит и кувыркается куклой, мышцы слабые; потом вскакивает
+      modeT += dt;
+      ragdoll.setMuscle(modeT < 0.25 ? 0.3 : 0.12);
+      ragdoll.step(dt, groundHeight);
+      placeRagdoll();
+      collectJoints();
+      groundSounds();
+      if (modeT > DOWN_S && (ragdoll.asleep || modeT > DOWN_S + 0.6 || frame.c[1] - groundHeight(frame.c[0], frame.c[2]) < 0.35)) startGetup();
+    } else if (unit.mode === 'getup') {
+      // вскакивает: поза из куклы плавно переходит в стойку (присед → выпрямился)
+      modeT += dt;
+      const k = Math.min(1, modeT / GETUP_S);
+      const e = k * k * (3 - 2 * k);
+      cmd.crouch = 1 - e;
+      cmd.air = null;
+      animate(dt);
+      model.group.updateMatrixWorld(true);
+      model.body.matrixWorld.decompose(goalPos, goalQ, unusedScale);
+      model.group.position.set(0, 0, 0);
+      model.group.rotation.set(0, 0, 0);
+      model.body.position.lerpVectors(capPos, goalPos, e);
+      model.body.quaternion.slerpQuaternions(capQ, goalQ, e);
+      for (let i = 0; i < 4; i += 1) {
+        const leg = model.legs[i];
+        // цель — поза стойки, только что выставленная animate(); slerpQuaternions сначала копирует
+        // первый аргумент в себя, поэтому цель — через копию
+        leg.hip.quaternion.slerpQuaternions(capLegs[i * 3], tq.copy(leg.hip.quaternion), e);
+        leg.upper.quaternion.slerpQuaternions(capLegs[i * 3 + 1], tq.copy(leg.upper.quaternion), e);
+        leg.knee.quaternion.slerpQuaternions(capLegs[i * 3 + 2], tq.copy(leg.knee.quaternion), e);
+      }
+      collectJoints();
+      shadowAt(unit.dog.x, unit.dog.z, unit.dog.yaw, 0.85 + 0.15 * e, 0.6 + 0.4 * e);
+      if (k >= 1) {
+        unit.mode = 'alive';
+        unit.dog.state = 'recover';
+        unit.dog.t = 0.3;
+      }
     } else {
       unit.deadFor += dt;
       if (unit.mode === 'dying') {
         const t = unit.deadFor;
-        ragdoll.setMuscle(t < 0.35 ? 0.6 : Math.max(0, 0.6 * (1 - (t - 0.35) / 0.55)));
+        ragdoll.setMuscle(t < 0.25 ? 0.35 : Math.max(0, 0.35 * (1 - (t - 0.25) / 0.5)));
         twitchLeft -= dt;
         if (twitchLeft <= 0 && t < 1.4) {
           twitchLeft = 0.05 + Math.random() * 0.1;
@@ -483,6 +620,7 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
       ragdoll.step(dt, groundHeight);
       placeRagdoll();
       collectJoints();
+      groundSounds();
     }
     if (flash > 0.01) {
       flash *= Math.exp(-dt * 10);

@@ -16,7 +16,7 @@ const SLAB = 0.08; // толщина боковины
 const BELT = 0.84; // линия окон
 const ROOF = 1.37;
 const MAX_STEER = THREE_DEG(35);
-const WHEEL_TURNS = 1.5; // оборотов руля от центра до упора
+const WHEEL_TURNS = 0.25; // оборотов руля от центра до упора: 90° влево/вправо (было 1,5 — пользователю слишком)
 
 function THREE_DEG(d) {
   return (d * Math.PI) / 180;
@@ -354,7 +354,9 @@ export function buildCar(THREE) {
   const setSteer = (s) => {
     const v = Math.max(-1, Math.min(1, s));
     for (const pivot of frontWheelPivots) pivot.rotation.y = -v * MAX_STEER; // + — вправо
-    steeringWheel.rotation.z = v * WHEEL_TURNS * 2 * Math.PI;
+    // +Z руля смотрит на водителя, а +rotation.z — против часовой со стороны водителя: вправо (v > 0)
+    // руль крутится по часовой — минус (раньше крутился зеркально)
+    steeringWheel.rotation.z = -v * WHEEL_TURNS * 2 * Math.PI;
   };
   const setWheelSpin = (radPerSec) => {
     spin = radPerSec;

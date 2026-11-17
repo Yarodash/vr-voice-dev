@@ -1,81 +1,93 @@
-// Оптика прицела — настоящая линза: в окуляре видно увеличенное (MAGNIFICATION×) живое изображение
-// мира. Сейчас нигде не стоит (подзорную трубу убрали); готова для прицела на оружии (АВП):
+// Оптика прицела — «портал» с увеличением: в окуляре видно увеличенное (×magnification) живое
+// изображение мира, объёмное — оно зависит от того, где глаз. Стоит на АВП (awp-model.js, pistols.js):
 // createScopeLens(...) на каждый экземпляр; reticleStyle 'pso' — уголки ПСО; dispose при удалении.
-// Настройки подзорной трубы были: lensR 0.021, eyeRelief 0.07, tanApparent 0.26, size 448, 4×.
 //
 // Как устроено:
-// - Вторая камера (PerspectiveCamera) стоит у объектива и смотрит вдоль трубы с узким углом обзора:
-//   tan(половины угла) = TAN_APPARENT / MAGNIFICATION. Каждый кадр, пока в окуляр смотрят, она рисует
-//   сцену в маленькую текстуру (SIZE×SIZE) — renderer.xr.enabled на это время false (как снимки
-//   screenshot.js и тени world.js), потом всё возвращается.
-// - Окуляр — диск (eyepiece) со своим шейдером. Для каждого глаза (cameraPosition у каждого свой)
-//   считается луч глаз → точка диска: его направление (tan от оси трубы) и есть точка изображения.
-//   Поэтому картинка «на бесконечности» и увеличена ровно в MAGNIFICATION раз против взгляда без трубы.
-//   Видимое поле — круг (полевая диафрагма, TAN_APPARENT), по краю темнеет (виньетка); сетка
-//   (дуплекс-крест или уголки ПСО — reticleStyle 'pso') — в той же плоскости, движется с изображением.
-// - Выходной зрачок: лучи, дошедшие до глаза, должны пройти через кружок радиуса PUPIL_R на
-//   расстоянии EYE_RELIEF от окуляра. Глаз сбоку — тёмный серп и чернота, глаз далеко — поле сужается
-//   в кружок (как у настоящего прицела). Не смотрят — тёмное стекло с лёгким отблеском просветления,
-//   и прохода сцены нет.
+// - Изображение «на бесконечности»: каждую точку стекла глаз видит по своему направлению d (от глаза
+//   через эту точку, в системе окуляра). Сквозь прицел это направление в мире d / M (M — кратность,
+//   прицел не переворачивает). Шейдер окуляра берёт цвет именно по этому мировому направлению, а не
+//   по координатам на стекле: сдвинул глаз — видна другая часть увеличенного мира, глубина как у окна.
+// - Виртуальная камера на каждый глаз: у объектива, смотрит туда, куда глаз смотрит сквозь середину
+//   стекла (ось прицела + смещение глаза / M), с углом обзора ровно под видимое из глаза стекло.
+//   Два глаза — две текстуры (EYES), шейдер выбирает ту, чей глаз ближе к рисуемому (стерео).
+//   Текстура хранит поворот своей камеры: если её рисовали кадр-два назад (издалека — реже,
+//   FAR_EVERY), картинка всё равно стоит на месте, только края могут подрезаться.
+// - Сетка (дуплекс или уголки ПСО) — на оси прицела (направление d = 0): при смещении глаза она
+//   смещается относительно мира — параллакс. Поле зрения — круг |tan d| < tanApparent (полевая
+//   диафрагма), к краю виньетка, хроматическая аберрация.
+// - Выходной зрачок — яркий круг на стекле: глаз на выносе — во всё стекло, издалека — меньше
+//   (PUPIL_FAR_FRAC); глаз сбоку — круг уезжает в противоположную сторону (тёмный серп со стороны
+//   смещения), к TILT_END_DEG — темно и прохода нет. Дальше MAX_VIEW_M — не рисуется.
+// - Тёмное стекло отражает небо (френель) и чуть отливает просветлением — выглядит стеклом.
 // - Цвет. Текстура помечена как цель XR (isXRRenderTarget) с sRGB-текстурой и внутренним форматом
-//   RGBA8: three рисует в неё теми же шейдерами, что и в шлем (тот же тон-маппинг ACES, тот же вывод в
-//   sRGB — новых программ не компилируется), а в текстуре лежат уже готовые байты экрана. Шейдер
-//   окуляра отдаёт их как есть (toneMapped: false, без colorspace_fragment) — картинка в трубе того же
-//   цвета, что мир вокруг.
-// - Что не попадает в объектив: сам прибор (hide — его группа) и всё, что висит на камере (HUD:
-//   окна сообщений, кружок, счёт) — на время прохода camera.visible = false.
-// - Обёртки scene.onBeforeRender / onAfterRender (fps.js, ipd-panel.js) на время прохода снимаются,
-//   чтобы [perf] cpu считал кадр как раньше. Своя телеметрия: раз в 5 с строка [scope] в консоли.
+//   RGBA8: three рисует в неё теми же шейдерами, что и в шлем (тот же тон-маппинг, вывод в sRGB), а
+//   шейдер окуляра отдаёт байты как есть (toneMapped: false) — цвет как у мира вокруг.
+// - В объектив не попадает сам прибор (hideObject) и всё, что висит на камере (HUD). Обёртки
+//   scene.onBeforeRender / onAfterRender (fps.js, ipd-panel.js) на время прохода снимаются.
+//   Телеметрия: раз в 5 с строка [scope] в консоли; lens.debug() — данные для scope-debug.js.
 //
 // Использование:
 //   const lens = createScopeLens({ THREE, renderer, scene, camera });
-//   model.add(lens.eyepiece);   // диск окуляра: плоскость XY, смотрит в +Z (к глазу); ставь в торец
-//   model.add(lens.objective);  // стекло объектива: смотрит в −Z (от глаза); там же стоит камера
-//   lens.update(active, hideObject) // каждый кадр в конце update сцены; active — прибор в руке
+//   model.add(lens.eyepiece);   // диск окуляра: плоскость XY, смотрит в +Z (к глазу)
+//   model.add(lens.objective);  // стекло объектива: смотрит в −Z; там же стоят камеры
+//   lens.update(active, hideObject) // каждый кадр в конце update сцены
 //   lens.dispose();
-export const MAGNIFICATION = 4; // кратность
-export const TAN_APPARENT = 0.22; // видимое поле: tan половины угла (≈25° целиком; истинное поле при 4× ≈ 6,3°, как у ПСО-1)
+export const MAGNIFICATION = 4; // кратность по умолчанию
+export const TAN_APPARENT = 0.22; // видимое поле: tan половины угла
 export const LENS_R = 0.017; // радиус стекла окуляра, м
-export const EYE_RELIEF = 0.07; // вынос выходного зрачка, м (у ПСО-1 ≈ 68 мм; ближе 5 см к глазу шлем всё равно обрезает)
-// ---- Насколько точно надо ставить глаз (крутить здесь). Середина между «строго» (зрачок 7 мм, до
-// 17 см) и «плоской картинкой»: оптика честная (картинка смещается и срезается краем, если глаз ушёл
-// с оси), но видно в 2 раза шире.
-export const PUPIL_R = 0.014; // радиус выходного зрачка («окно для глаза»), м; строгий был 0.007
-export const PUPIL_EDGE_IN = 0.5; // внутри PUPIL_R × это — видно полностью
-export const PUPIL_EDGE_OUT = 1.6; // к PUPIL_R × это — плавно гаснет (серп)
-export const MAX_EYE_Z = 0.24; // дальше этого от окуляра (м) — не видно; строгий был 0.17
-export const EYE_Z_FADE = 0.05; // последние столько метров до MAX_EYE_Z изображение плавно гаснет
+export const EYE_RELIEF = 0.07; // вынос выходного зрачка, м
+export const PUPIL_R = 0.014; // (не используется; оставлено для совместимости вызовов)
+export const PUPIL_FAR_FRAC = 0.8; // выходной зрачок издалека — такая доля радиуса стекла
+export const PUPIL_FAR_M = 0.45; // к этому расстоянию глаза (м) зрачок сжимается до PUPIL_FAR_FRAC
+// Смотреть надо вдоль оси прицела: угол глаза от оси, видимый из окуляра, к TILT_END_DEG — темно
+export const TILT_END_DEG = 14;
+export const MAX_VIEW_M = 3; // дальше — не рисуется
+export const VIEW_FADE_M = 0.3; // последние столько метров — плавно гаснет
+// Дешевле издалека: рисовать каждый N-й кадр — [до расстояния (м), N]
+export const FAR_EVERY = [[0.6, 1], [1.5, 2], [Infinity, 3]];
 export const FIELD_FILL = 1.12; // видимый круг поля шире, чем tanApparent (1 — строгий)
-export const VIGNETTE_START = 0.62; // с какой доли радиуса поля начинается затемнение (строгий 0.5)
-export const VIGNETTE_DARK = 0.5; // яркость на самом краю поля (строгий 0.45)
-// Хроматическая аберрация: на краю поля красный и синий расходятся на ± столько долей радиуса поля
-// (0.012 ≈ 3 пикселя текстуры при 512), в центре — ноль (растёт как r²). 0 — выключить.
-export const CHROMA = 0.012;
-export const SIZE = 512; // текстура изображения, пикселей по стороне
+export const VIGNETTE_START = 0.62; // с какой доли радиуса поля начинается затемнение
+export const VIGNETTE_DARK = 0.5; // яркость на самом краю поля
+export const CHROMA = 0.012; // хроматическая аберрация на краю поля (доля радиуса), 0 — выключить
+export const SIZE = 512; // текстура изображения (на глаз), пикселей по стороне
 export const SAMPLES = 4; // MSAA текстуры
-export const RENDER_EVERY = 1; // рисовать каждый N-й кадр (2 — вдвое дешевле, но картинка дёргается)
+export const EYES = 2; // текстур (глаз) на прицел
+const COVER = 1.15; // запас угла камеры сверх видимого стекла
 const LOG_EVERY_MS = 5000;
 
 const vertexShader = /* glsl */ `
   varying vec2 vPos;
   varying vec3 vEye;
+  varying vec3 vWP;
+  varying vec3 vWN;
   void main() {
     vPos = position.xy;
     vEye = (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz; // глаз в системе диска
+    vWP = (modelMatrix * vec4(position, 1.0)).xyz;
+    vWN = normalize(mat3(modelMatrix) * vec3(0.0, 0.0, 1.0));
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */ `
-  uniform sampler2D map;
-  uniform float live;      // 1 — изображение нарисовано в этом кадре
-  uniform float tanA;      // TAN_APPARENT
+  uniform sampler2D map0;
+  uniform sampler2D map1;
+  uniform mat3 rot0;       // система окуляра → система камеры глаза 0
+  uniform mat3 rot1;
+  uniform float h0;        // tan половины угла камеры
+  uniform float h1;
+  uniform vec3 eye0;       // где был глаз, когда рисовали текстуру (система окуляра)
+  uniform vec3 eye1;
+  uniform float live;      // 0..1 — изображение есть
+  uniform float tanA;      // поле: tan половины угла
+  uniform float mag;       // кратность
   uniform float eyeRelief;
-  uniform float pupilR;
   uniform float reticle;   // 1 — сетка видна
   uniform float lensR;
   varying vec2 vPos;
   varying vec3 vEye;
+  varying vec3 vWP;
+  varying vec3 vWN;
 
   float bar(float d, float w) {
     float aa = fwidth(d) * 1.2;
@@ -85,35 +97,41 @@ const fragmentShader = /* glsl */ `
     vec2 pa = p - a, ba = b - a;
     return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
   }
-  // уголок вершиной вверх: вершина (0, y0), концы (±halfW, y0 − h); расстояние до него
   float chevron(vec2 p, float y0, float halfW, float h) {
     vec2 apex = vec2(0.0, y0);
     return min(segment(p, apex, vec2(-halfW, y0 - h)), segment(p, apex, vec2(halfW, y0 - h)));
+  }
+  // мировое направление (система окуляра) → uv текстуры выбранного глаза
+  vec2 toUv(vec3 w, bool b) {
+    vec3 c = b ? rot1 * w : rot0 * w;
+    float h = b ? h1 : h0;
+    return (c.xy / max(-c.z, 1e-5)) / h * 0.5 + 0.5;
+  }
+  vec3 tex(bool b, vec2 uv) {
+    return b ? texture2D(map1, uv).rgb : texture2D(map0, uv).rgb;
   }
 
   void main() {
     vec3 E = vEye;
     float ez = max(E.z, 1e-3);
-    vec3 d = vec3(vPos, 0.0) - E;                 // луч от глаза в трубу
-    vec2 q = (d.xy / max(-d.z, 1e-4)) / tanA;     // направление в долях поля: круг |q| < 1
+    vec2 tanD = (vPos - E.xy) / ez;               // направление глаз → точка стекла
+    vec2 q = tanD / tanA;                         // в долях поля; сетка — в q = 0 (ось прицела)
     float r = length(q);
-    // выходной зрачок: где луч пересекает плоскость на выносе EYE_RELIEF
-    vec2 X = E.xy + (vPos - E.xy) * (ez - eyeRelief) / ez;
-    float pupil = 1.0 - smoothstep(pupilR * PUPIL_EDGE_IN, pupilR * PUPIL_EDGE_OUT, length(X));
-    float field = 1.0 - smoothstep(0.94, 1.0, r);
-    float see = live * pupil * field * step(0.0, E.z);
+    vec2 tv = E.xy / ez;                          // угол глаза от оси
+    float tilt = length(tv);
+    bool b = distance(E, eye1) < distance(E, eye0); // текстура ближайшего глаза
 
-    // хроматическая аберрация: R чуть крупнее, B чуть мельче — цветная кайма растёт к краю поля
+    // изображение «на бесконечности»: мировое направление tanD / M
     float ca = CHROMA * r * r;
-    vec3 img = vec3(
-      texture2D(map, clamp(q * (1.0 + ca) * 0.5 + 0.5, 0.0, 1.0)).r,
-      texture2D(map, clamp(q * 0.5 + 0.5, 0.0, 1.0)).g,
-      texture2D(map, clamp(q * (1.0 - ca) * 0.5 + 0.5, 0.0, 1.0)).b);
-    img *= mix(1.0, VIGNETTE_DARK, smoothstep(VIGNETTE_START, 1.0, r)); // виньетка: край поля темнее
+    vec2 uvG = toUv(normalize(vec3(tanD / mag, -1.0)), b);
+    vec2 uvR = toUv(normalize(vec3(tanD * (1.0 + ca) / mag, -1.0)), b);
+    vec2 uvB = toUv(normalize(vec3(tanD * (1.0 - ca) / mag, -1.0)), b);
+    vec3 img = vec3(tex(b, clamp(uvR, 0.0, 1.0)).r, tex(b, clamp(uvG, 0.0, 1.0)).g, tex(b, clamp(uvB, 0.0, 1.0)).b);
+    vec2 inside = step(vec2(0.0), uvG) * step(uvG, vec2(1.0));
+    img *= inside.x * inside.y;
+    img *= mix(1.0, VIGNETTE_DARK, smoothstep(VIGNETTE_START, 1.0, r));
     if (reticle > 0.5) {
 #ifdef RETICLE_PSO
-      // ПСО-1: главный уголок (вершина — точка прицеливания), под ним два уголка поменьше,
-      // горизонтальная шкала поправок с рисками по обе стороны (без середины)
       float px = fwidth(q.x) * 1.2;
       float w = 0.0055;
       float m = 0.0;
@@ -127,7 +145,6 @@ const fragmentShader = /* glsl */ `
       m = max(m, max(scale, ticks));
       img *= 1.0 - 0.92 * m;
 #else
-      // «дуплекс»: тонкий крест в середине, толстые штрихи к краям
       float thinW = 0.0045, thickW = 0.02;
       float hx = abs(q.x) > 0.42 ? thickW : thinW;
       float vy = abs(q.y) > 0.42 ? thickW : thinW;
@@ -136,58 +153,75 @@ const fragmentShader = /* glsl */ `
 #endif
     }
 
-    // тёмное стекло: слабое фиолетово-зелёное просветление, отблеск сильнее под углом
-    vec3 toEye = normalize(-d);
-    float fres = pow(1.0 - clamp(toEye.z, 0.0, 1.0), 2.0);
+    // выходной зрачок: яркий круг, уезжает от стороны смещения глаза, к TILT_END — со стекла
+    float rp = mix(1.05, PUPIL_FAR_FRAC, smoothstep(eyeRelief + 0.03, PUPIL_FAR_M, ez));
+    vec2 side = tilt > 1e-5 ? tv / tilt : vec2(0.0);
+    float tt = clamp(tilt / TILT_END, 0.0, 1.0);
+    vec2 pc = -side * (1.0 + rp) * tt * sqrt(tt);
+    float pupil = 1.0 - smoothstep(rp - 0.08, rp + 0.03, length(vPos / lensR - pc));
+    float field = 1.0 - smoothstep(0.94, 1.0, r);
+    float see = live * pupil * field * step(0.0, E.z);
+
+    // стекло: почти чёрное с просветлением и отражением неба (френель)
+    vec3 V = normalize(cameraPosition - vWP);
+    vec3 N = normalize(vWN);
+    vec3 R = reflect(-V, N);
+    vec3 sky = mix(vec3(0.05, 0.045, 0.04), mix(vec3(0.42, 0.28, 0.36), vec3(0.18, 0.18, 0.38), smoothstep(0.1, 0.7, R.y)), smoothstep(-0.05, 0.08, R.y));
+    float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 5.0);
     float sheen = smoothstep(0.35, 0.0, length(vPos / lensR - vec2(-0.35, 0.4)));
-    vec3 glass = vec3(0.020, 0.024, 0.034) + vec3(0.10, 0.07, 0.17) * fres + vec3(0.05, 0.08, 0.06) * sheen;
-    glass *= 1.0 - 0.75 * live * pupil;           // глаз у окуляра — вокруг поля почти черно
-    gl_FragColor = vec4(img * see + glass * (1.0 - see), 1.0);
+    vec3 glass = vec3(0.012, 0.014, 0.02) + sky * (0.1 + 0.6 * fres) + vec3(0.03, 0.05, 0.04) * sheen;
+    gl_FragColor = vec4(img * see + glass * (1.0 - see) + sky * fres * 0.15 * see, 1.0);
   }
 `;
 
-// Всё в метрах; прибор поменьше — меньше lensR, и тогда поле ограничит край стекла (tanApparent ≈
-// lensR / eyeRelief — поле как раз во всё стекло на выносе).
 export function createScopeLens({
   THREE, renderer, scene, camera,
   magnification = MAGNIFICATION, lensR = LENS_R, tanApparent = TAN_APPARENT, eyeRelief = EYE_RELIEF,
-  pupilR = PUPIL_R, size = SIZE, reticleStyle = 'duplex',
+  size = SIZE, reticleStyle = 'duplex',
 }) {
   const shared = (globalThis.__sceneState ??= {});
-  tanApparent *= FIELD_FILL; // круг поля чуть шире (увеличение то же: камера считается от него же)
-  const target = new THREE.WebGLRenderTarget(size, size, {
-    samples: SAMPLES,
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-    generateMipmaps: false,
-    depthBuffer: true,
-  });
-  target.isXRRenderTarget = true; // тон-маппинг и вывод как в шлеме (см. шапку)
-  target.texture.colorSpace = THREE.SRGBColorSpace;
-  target.texture.internalFormat = 'RGBA8'; // байты экрана; без SRGB8_ALPHA8 (иначе sRGB дважды)
-
+  tanApparent *= FIELD_FILL;
+  let mag = magnification;
+  const targets = [];
+  for (let i = 0; i < EYES; i += 1) {
+    const target = new THREE.WebGLRenderTarget(size, size, {
+      samples: SAMPLES, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, generateMipmaps: false, depthBuffer: true,
+    });
+    target.isXRRenderTarget = true; // тон-маппинг и вывод как в шлеме (см. шапку)
+    target.texture.colorSpace = THREE.SRGBColorSpace;
+    target.texture.internalFormat = 'RGBA8';
+    targets.push(target);
+  }
   const scopeCamera = new THREE.PerspectiveCamera(1, 1, 0.05, camera.far);
-  const setMagnification = (m) => {
-    scopeCamera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(tanApparent / m));
-    scopeCamera.updateProjectionMatrix();
-  };
-  setMagnification(magnification);
+  // что нарисовано в каждой текстуре (для шейдера и отладки)
+  const views = targets.map((target, i) => ({
+    name: `глаз ${i}`, target, rot: new THREE.Matrix3(), h: tanApparent / mag, eye: new THREE.Vector3(0, 0, eyeRelief),
+    fovDeg: 0, offsetDeg: [0, 0], frame: -1, ms: 0,
+  }));
 
   const lensMaterial = new THREE.ShaderMaterial({
     uniforms: {
-      map: { value: target.texture },
+      map0: { value: targets[0].texture },
+      map1: { value: targets[1].texture },
+      rot0: { value: views[0].rot },
+      rot1: { value: views[1].rot },
+      h0: { value: views[0].h },
+      h1: { value: views[1].h },
+      eye0: { value: views[0].eye },
+      eye1: { value: views[1].eye },
       live: { value: 0 },
       tanA: { value: tanApparent },
+      mag: { value: mag },
       eyeRelief: { value: eyeRelief },
-      pupilR: { value: pupilR },
       reticle: { value: 1 },
       lensR: { value: lensR },
     },
     vertexShader,
     fragmentShader,
     defines: {
-      PUPIL_EDGE_IN: PUPIL_EDGE_IN.toFixed(3),
-      PUPIL_EDGE_OUT: PUPIL_EDGE_OUT.toFixed(3),
+      PUPIL_FAR_FRAC: PUPIL_FAR_FRAC.toFixed(4),
+      PUPIL_FAR_M: PUPIL_FAR_M.toFixed(4),
+      TILT_END: Math.tan((TILT_END_DEG * Math.PI) / 180).toFixed(4),
       VIGNETTE_START: VIGNETTE_START.toFixed(3),
       VIGNETTE_DARK: VIGNETTE_DARK.toFixed(3),
       CHROMA: CHROMA.toFixed(4),
@@ -198,58 +232,80 @@ export function createScopeLens({
   const eyepiece = new THREE.Mesh(new THREE.CircleGeometry(lensR, 48), lensMaterial);
   eyepiece.name = 'scope-eyepiece';
 
-  // объектив снаружи: тёмное стекло с цветным отблеском просветления (карта окружения оружия)
   const objectiveGeometry = new THREE.CircleGeometry(1, 40);
   objectiveGeometry.rotateY(Math.PI); // смотрит в −Z
   const objectiveMaterial = new THREE.MeshStandardMaterial({
     color: 0x6f58b0, roughness: 0.08, metalness: 1, envMap: shared.weaponEnv ?? null, envMapIntensity: 0.32,
   });
   const objective = new THREE.Mesh(objectiveGeometry, objectiveMaterial);
-  objective.name = 'scope-objective'; // масштаб = радиус стекла: objective.scale.setScalar(r)
+  objective.name = 'scope-objective'; // масштаб = радиус стекла
 
   const eyeWorld = new THREE.Vector3();
   const eyeLocal = new THREE.Vector3();
+  const lensQuat = new THREE.Quaternion();
+  const turn = new THREE.Quaternion();
+  const dir = new THREE.Vector3();
+  const back = new THREE.Vector3(0, 0, -1);
+  const m4 = new THREE.Matrix4();
   const noop = () => {};
   let frame = 0;
   let wasLive = false;
-  // телеметрия
+  let lastDist = Infinity;
   let statN = 0, statSum = 0, statMax = 0, statCalls = 0, statTris = 0, statAt = performance.now();
-
+  const tiltEnd = Math.tan((TILT_END_DEG * Math.PI) / 180);
   const smooth = (a, b, x) => {
     const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
     return t * t * (3 - 2 * t);
   };
-  // Насколько глаз (мировая точка) видит поле через выходной зрачок, 0..1: ближайший к оси луч
-  // через стекло проходит у зрачка на minX; к краю окна и к MAX_EYE_Z плавно гаснет
-  const eyeSees = (point) => {
-    eyeLocal.copy(point);
-    eyepiece.worldToLocal(eyeLocal);
-    const ez = eyeLocal.z;
-    if (ez < 0.01 || ez > MAX_EYE_Z) return 0;
-    const lateral = Math.hypot(eyeLocal.x, eyeLocal.y);
-    const k = (ez - eyeRelief) / ez;
-    const minX = Math.max(0, (lateral * eyeRelief) / ez - lensR * Math.abs(k));
-    return (1 - smooth(pupilR * PUPIL_EDGE_IN, pupilR * PUPIL_EDGE_OUT, minX)) * (1 - smooth(MAX_EYE_Z - EYE_Z_FADE, MAX_EYE_Z, ez));
+
+  // Видит ли глаз (мировая точка) изображение: 0..1 (вдоль оси, не дальше MAX_VIEW_M); out — глаз
+  // в системе окуляра
+  const eyeSees = (point, out) => {
+    out.copy(point);
+    eyepiece.worldToLocal(out);
+    const ez = out.z;
+    if (ez < 0.005) return 0;
+    const dist = out.length();
+    if (dist > MAX_VIEW_M) return 0;
+    if (Math.hypot(out.x, out.y) / ez >= tiltEnd) return 0;
+    lastDist = Math.min(lastDist, dist);
+    return 1 - smooth(MAX_VIEW_M - VIEW_FADE_M, MAX_VIEW_M, dist);
+  };
+  const frustum = new THREE.Frustum();
+  const projView = new THREE.Matrix4();
+  const lensSphere = new THREE.Sphere();
+  const inView = (cam) => {
+    cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+    frustum.setFromProjectionMatrix(projView.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+    return frustum.intersectsSphere(lensSphere);
   };
 
-  const lookingIn = () => {
-    eyepiece.updateWorldMatrix(true, false);
-    if (renderer.xr.isPresenting) {
-      const eyes = renderer.xr.getCamera().cameras;
-      let best = 0;
-      for (let i = 0; i < eyes.length; i += 1) best = Math.max(best, eyeSees(eyeWorld.setFromMatrixPosition(eyes[i].matrixWorld)));
-      return best;
-    }
-    camera.updateWorldMatrix(true, false);
-    return eyeSees(eyeWorld.setFromMatrixPosition(camera.matrixWorld));
-  };
-
-  const renderView = (hideObject) => {
+  // Нарисовать текстуру глаза i: глаз (система окуляра) eyeL
+  const renderEye = (i, eyeL, hideObject) => {
     const t0 = performance.now();
+    const v = views[i];
+    const ez = Math.max(eyeL.z, 0.01);
+    // куда глаз смотрит сквозь середину стекла — в мире это угол / M
+    const cx = -eyeL.x / ez / mag, cy = -eyeL.y / ez / mag;
+    dir.set(cx, cy, -1).normalize();
+    turn.setFromUnitVectors(back, dir);
+    // угол камеры — под стекло, видимое из глаза (с запасом), не шире двойного поля
+    const h = Math.max(1e-4, Math.min((COVER * lensR) / ez / mag, (2 * tanApparent) / mag));
     objective.updateWorldMatrix(true, false);
     objective.getWorldPosition(scopeCamera.position);
-    eyepiece.getWorldQuaternion(scopeCamera.quaternion); // смотрит вдоль трубы (−Z окуляра)
+    eyepiece.getWorldQuaternion(lensQuat);
+    scopeCamera.quaternion.copy(lensQuat).multiply(turn);
+    scopeCamera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(h));
+    scopeCamera.aspect = 1;
+    scopeCamera.updateProjectionMatrix();
     scopeCamera.updateMatrixWorld();
+    // окуляр → камера: обратный поворот turn
+    v.rot.setFromMatrix4(m4.makeRotationFromQuaternion(turn).transpose());
+    v.h = h;
+    v.eye.copy(eyeL);
+    v.fovDeg = scopeCamera.fov;
+    v.offsetDeg = [THREE.MathUtils.radToDeg(Math.atan(cx)), THREE.MathUtils.radToDeg(Math.atan(cy))];
+    v.frame = frame;
 
     const prevTarget = renderer.getRenderTarget();
     const xrWas = renderer.xr.enabled;
@@ -257,68 +313,123 @@ export function createScopeLens({
     const after = scene.onAfterRender;
     const hideWas = hideObject ? hideObject.visible : true;
     const cameraWas = camera.visible;
+    // ещё скрыть: shared.scopeHide (Set объектов) — например, панель отладки с этими же текстурами
+    // (иначе текстура рисовалась бы в саму себя)
+    const extra = shared.scopeHide;
+    const extraWas = [];
     try {
-      renderer.xr.enabled = false; // в текстуру, а не в шлем
-      scene.onBeforeRender = noop; // fps.js / ipd-panel.js — только для главного прохода
+      renderer.xr.enabled = false;
+      scene.onBeforeRender = noop;
       scene.onAfterRender = noop;
       if (hideObject) hideObject.visible = false;
-      camera.visible = false; // HUD на камере не попадает в прицел
-      renderer.setRenderTarget(target);
+      if (extra) for (const o of extra) { extraWas.push(o.visible); o.visible = false; }
+      camera.visible = false;
+      renderer.setRenderTarget(v.target);
       renderer.render(scene, scopeCamera);
       statCalls = renderer.info.render.calls;
       statTris = renderer.info.render.triangles;
     } finally {
       camera.visible = cameraWas;
       if (hideObject) hideObject.visible = hideWas;
+      if (extra) { let k = 0; for (const o of extra) o.visible = extraWas[k++] ?? o.visible; }
       scene.onBeforeRender = before;
       scene.onAfterRender = after;
       renderer.xr.enabled = xrWas;
       renderer.setRenderTarget(prevTarget);
     }
-    const ms = performance.now() - t0;
+    v.ms = performance.now() - t0;
     statN += 1;
-    statSum += ms;
-    statMax = Math.max(statMax, ms);
+    statSum += v.ms;
+    statMax = Math.max(statMax, v.ms);
+  };
+
+  // глаза этого кадра: [{ local, fade }] (только те, что видят стекло)
+  const seen = [{ local: new THREE.Vector3(), fade: 0 }, { local: new THREE.Vector3(), fade: 0 }];
+  const collectEyes = () => {
+    eyepiece.updateWorldMatrix(true, false);
+    eyepiece.getWorldPosition(lensSphere.center);
+    lensSphere.radius = lensR * 1.5;
+    lastDist = Infinity;
+    seen[0].fade = seen[1].fade = 0;
+    if (renderer.xr.isPresenting) {
+      const eyes = renderer.xr.getCamera().cameras;
+      for (let i = 0; i < Math.min(eyes.length, EYES); i += 1) {
+        if (inView(eyes[i])) seen[i].fade = eyeSees(eyeWorld.setFromMatrixPosition(eyes[i].matrixWorld), seen[i].local);
+      }
+    } else {
+      camera.updateWorldMatrix(true, false);
+      if (inView(camera)) seen[0].fade = eyeSees(eyeWorld.setFromMatrixPosition(camera.matrixWorld), seen[0].local);
+    }
+    return Math.max(seen[0].fade, seen[1].fade);
+  };
+  // текстура i шейдеру: своя или (глаз не видит) — соседняя
+  const bindEye = (slot, from) => {
+    const u = lensMaterial.uniforms;
+    const v = views[from];
+    u[`map${slot}`].value = v.target.texture;
+    u[`rot${slot}`].value = v.rot;
+    u[`h${slot}`].value = v.h;
+    u[`eye${slot}`].value = v.eye;
   };
 
   const api = {
     eyepiece,
     objective,
     scopeCamera,
-    target,
-    get magnification() {
-      return tanApparent / Math.tan(THREE.MathUtils.degToRad(scopeCamera.fov / 2));
+    targets,
+    get target() {
+      return targets[0];
     },
-    setMagnification,
-    // для npm run vr:eval: нарисовать изображение сейчас (без проверки взгляда), вернуть мс
-    debugRender(hideObject = null) {
-      const t0 = performance.now();
-      renderView(hideObject);
-      return performance.now() - t0;
+    get magnification() {
+      return mag;
+    },
+    setMagnification(m) {
+      mag = m;
+      lensMaterial.uniforms.mag.value = m;
     },
     setReticle(on) {
       lensMaterial.uniforms.reticle.value = on ? 1 : 0;
     },
-    // Каждый кадр, в конце update сцены (когда прибор уже на месте). active — можно ли смотреть
-    // (например, оружие в руке; true — всегда); hideObject — группа прибора (не должна попасть в
-    // собственный объектив). Возвращает true, если изображение нарисовано.
+    // для отладки (scope-debug.js, vr:eval): что в каждой текстуре
+    debug() {
+      return { frame, size, samples: SAMPLES, mag, tanA: tanApparent, live: lensMaterial.uniforms.live.value, dist: lastDist, views };
+    },
+    // для npm run vr:eval: нарисовать текстуру глаза 0 для глаза на выносе на оси, вернуть мс
+    debugRender(hideObject = null) {
+      eyepiece.updateWorldMatrix(true, false);
+      renderEye(0, eyeLocal.set(0, 0, eyeRelief), hideObject);
+      bindEye(0, 0);
+      bindEye(1, 0);
+      return views[0].ms;
+    },
+    // Каждый кадр, в конце update сцены. active — можно ли смотреть; hideObject — группа прибора
+    // (не должна попасть в свой объектив). Возвращает true, если изображение есть.
     update(active, hideObject = null) {
-      const fade = active ? lookingIn() : 0; // 0..1: плавно на краях окна для глаза
+      const fade = active ? collectEyes() : 0;
       const live = fade > 0.002;
       if (live) {
         frame += 1;
-        // первый кадр взгляда рисуется всегда; дальше — каждый RENDER_EVERY-й
-        if (!wasLive || frame % RENDER_EVERY === 0) renderView(hideObject);
+        let every = 1;
+        for (const [upTo, n] of FAR_EVERY) if (lastDist <= upTo) { every = n; break; }
+        const now = !wasLive || frame % every === 0;
+        for (let i = 0; i < EYES; i += 1) {
+          if (seen[i].fade > 0 && now) renderEye(i, seen[i].local, hideObject);
+        }
+        // глаз не видит стекло — его слот берёт текстуру другого
+        const a = seen[0].fade > 0 ? 0 : 1;
+        const b = seen[1].fade > 0 ? 1 : 0;
+        bindEye(0, a);
+        bindEye(1, b);
       }
       wasLive = live;
       lensMaterial.uniforms.live.value = live ? fade : 0;
-      const now = performance.now();
-      if (now - statAt >= LOG_EVERY_MS) {
+      const t = performance.now();
+      if (t - statAt >= LOG_EVERY_MS) {
         if (statN) {
-          console.log(`[scope] n=${statN}/${((now - statAt) / 1000).toFixed(0)}s cpu=${(statSum / statN).toFixed(2)}/${statMax.toFixed(2)}ms calls=${statCalls} tris=${(statTris / 1000).toFixed(0)}k size=${size} msaa=${SAMPLES} x${api.magnification.toFixed(1)}`);
+          console.log(`[scope] n=${statN}/${((t - statAt) / 1000).toFixed(0)}s cpu=${(statSum / statN).toFixed(2)}/${statMax.toFixed(2)}ms calls=${statCalls} tris=${(statTris / 1000).toFixed(0)}k size=${size} msaa=${SAMPLES} x${mag.toFixed(1)}`);
         }
         statN = statSum = statMax = 0;
-        statAt = now;
+        statAt = t;
       }
       return live;
     },
@@ -329,7 +440,7 @@ export function createScopeLens({
       lensMaterial.dispose();
       objectiveGeometry.dispose();
       objectiveMaterial.dispose();
-      target.dispose();
+      targets.forEach((t) => t.dispose());
     },
   };
   return api;

@@ -1,13 +1,30 @@
 // Мишени и выстрелы. Живёт в сцене: правки подхватываются на лету.
 //
 // Мишени — стальные тарелки на деревянных стойках, рядами вдаль перед игроком (targets.js). Выстрел —
-// мгновенный луч от дула пистолета вдоль ствола: вспышка, искры, дым, гильза, трассер и звук
-// (effects.js, sound.js); попавшая мишень звенит и слетает со стойки, лежащая — подпрыгивает.
+// пуля из дула вдоль ствола: летит с начальной скоростью оружия и падает под гравитацией (парабола),
+// каждый кадр её путь за кадр проверяется отрезками (быстрая пуля ничего не проскакивает); во что
+// отрезок упёрся первым — туда и попала. Вспышка, искры, дым, гильза, трассер по той же параболе и звук
+// (effects.js, tracer.js, sound.js); попавшая мишень звенит и слетает со стойки, лежащая — подпрыгивает.
+// Время пули — сценовое (dt): в замедлении пули летят медленнее.
 import { createEffects } from './effects.js';
-import { TARGET_LAYOUT, createTargets, targetSpots } from './targets.js';
+import { TARGET_LAYOUT, createTargets, groundAt, targetSpots } from './targets.js';
 import { createSound } from './sound.js';
 
 const SPEED_OF_SOUND = 343; // м/с: звук попадания приходит с задержкой
+const GRAVITY = 9.81; // м/с²
+const BULLET_SPEED = 360; // м/с по умолчанию (пистолет); у оружия своя — GUNS.speed в main.js
+const BULLET_LIFE = 3; // с: дольше пуля не живёт
+const BULLET_PATH = 1500; // м вдоль ствола: и не дальше
+const BULLET_STEP = 1 / 60; // с: путь пули за кадр режется на отрезки не длиннее этого
+const MAX_BULLETS = 32; // одновременно в полёте (пул); лишняя вытесняет самую старую
+const AIM_SEGS = 5; // отрезков параболы у прицела (контур мишени)
+const GROUND_FX_M = 150; // пыль от пули в земле — только ближе этого к игроку
+// где пуля через t с: дуло + ствол·v·t − ½·g·t² по вертикали (без сопротивления воздуха)
+const posAt = (out, muzzle, dir, speed, t) => {
+  out.copy(muzzle).addScaledVector(dir, speed * t);
+  out.y -= 0.5 * GRAVITY * t * t;
+  return out;
+};
 
 export function createShooting({ THREE, root, camera }) {
   const shared = (globalThis.__sceneState ??= {});
@@ -126,6 +143,151 @@ export function createShooting({ THREE, root, camera }) {
   const segDir = new THREE.Vector3();
   const segHit = { point: new THREE.Vector3(), normal: new THREE.Vector3(), target: null, isStand: false };
 
+  // ---- Пули в полёте (пул, без выделений памяти за кадр)
+  const bullets = [];
+  for (let i = 0; i < MAX_BULLETS; i += 1) {
+    bullets.push({ active: false, muzzle: new THREE.Vector3(), dir: new THREE.Vector3(), speed: BULLET_SPEED, age: 0, kind: null, tracer: 0, onResult: null, born: 0 });
+  }
+  let bornCounter = 0;
+  let lastAim = null; // мишень под контуром (для vr:eval)
+  const bA = new THREE.Vector3();
+  const bB = new THREE.Vector3();
+  const bDir = new THREE.Vector3();
+  const bPoint = new THREE.Vector3();
+  const bVel = new THREE.Vector3();
+  const bNormal = new THREE.Vector3();
+  const bulletHits = [];
+  const camPos = new THREE.Vector3();
+  const finish = (b, t, result) => {
+    b.active = false;
+    effects.tracerLand(b.tracer, b.speed * t);
+    const cb = b.onResult;
+    b.onResult = null;
+    if (cb) {
+      try {
+        cb(result);
+      } catch (e) {
+        console.warn('[shooting] onResult', e?.message ?? e);
+      }
+    }
+  };
+  // отрезок пути пули b от bA (время t0) до bB (t1): упёрлась — попадание разобрано, true
+  const castBullet = (b, t0, t1) => {
+    bDir.subVectors(bB, bA);
+    const len = bDir.length();
+    if (len < 1e-6) return false;
+    bDir.divideScalar(len);
+    let far = len;
+    let what = 0; // 0 — ничего, 1 — земля, 2 — мишень, 3 — стойка, 4 — тарелка/робопёс
+    let plateIndex = -1;
+    // земля (тот же рельеф, что рисует world.js): конец отрезка под землёй — ищем, где пересёк
+    if (bB.y < groundAt(bB.x, bB.z) && bA.y >= groundAt(bA.x, bA.z)) {
+      let lo = 0;
+      let hi = 1;
+      for (let k = 0; k < 8; k += 1) {
+        const f = (lo + hi) * 0.5;
+        bPoint.copy(bA).addScaledVector(bDir, f * len);
+        if (bPoint.y < groundAt(bPoint.x, bPoint.z)) hi = f;
+        else lo = f;
+      }
+      far = hi * len;
+      what = 1;
+    }
+    if (rayObjects.length) {
+      raycaster.set(bA, bDir);
+      raycaster.far = far;
+      bulletHits.length = 0;
+      raycaster.intersectObjects(rayObjects, false, bulletHits);
+      raycaster.far = RANGE;
+      const hit = bulletHits[0];
+      if (hit) {
+        far = hit.distance;
+        if (hit.object === targetSet.plateMesh) {
+          what = 2;
+          plateIndex = hit.instanceId;
+          if (hit.face) bNormal.copy(hit.face.normal);
+          else bNormal.copy(bDir).negate();
+        } else what = 3;
+      }
+      bulletHits.length = 0;
+    }
+    // глиняная тарелка (clays.js) или другая цель (робопёс) ближе — пуля попадает в неё
+    const extraDistance = castExtra(bA, bDir, far, true);
+    const extra = extraHit;
+    if (extraDistance >= 0) {
+      far = extraDistance;
+      what = 4;
+    }
+    for (let i = 0; i < shootables.length; i += 1) shootables[i].shot?.(bA, bDir, far);
+    if (!what) return false;
+
+    const t = t0 + ((t1 - t0) * far) / len;
+    bPoint.copy(bA).addScaledVector(bDir, far);
+    // направление полёта в момент попадания (с учётом падения)
+    bVel.copy(b.dir).multiplyScalar(b.speed);
+    bVel.y -= GRAVITY * t;
+    bVel.normalize();
+    const keepKind = shared.shotKind;
+    shared.shotKind = b.kind; // калибр той пули, что попала (пока она летела, оружие могли сменить)
+    let result = false;
+    if (what === 4) {
+      const r = extra.hit(bA, bDir, far);
+      result = r === undefined ? true : r;
+    } else if (what === 2) {
+      const target = targets[plateIndex];
+      if (target) {
+        bNormal.transformDirection(target.matrixWorld);
+        addDecal(target, bPoint);
+        targetSet.knock(target, bPoint, bVel);
+        effects.impact(bPoint, bNormal.clone());
+        const delay = Math.min(250, (b.muzzle.distanceTo(bPoint) / SPEED_OF_SOUND) * 1000);
+        const at = bPoint.clone();
+        setTimeout(() => sound.hit(at), delay);
+        result = true;
+      }
+    } else if (what === 1) {
+      camera.getWorldPosition(camPos);
+      if (camPos.distanceToSquared(bPoint) < GROUND_FX_M * GROUND_FX_M) effects.groundHit(bPoint.clone());
+    }
+    shared.shotKind = keepKind;
+    finish(b, t, result);
+    return true;
+  };
+  const stepBullet = (b, dt) => {
+    const end = Math.min(b.age + dt, BULLET_LIFE, BULLET_PATH / b.speed);
+    let t0 = b.age;
+    while (t0 < end) {
+      const t1 = Math.min(end, t0 + BULLET_STEP);
+      posAt(bA, b.muzzle, b.dir, b.speed, t0);
+      posAt(bB, b.muzzle, b.dir, b.speed, t1);
+      if (castBullet(b, t0, t1)) return;
+      t0 = t1;
+    }
+    b.age = end;
+    if (end >= BULLET_LIFE || end >= BULLET_PATH / b.speed) finish(b, end, false); // ни во что не попала
+  };
+  // контур прицела: в какую мишень попадёт пуля по параболе (AIM_SEGS отрезков до range)
+  const aimBallistic = (muzzle, direction, range, speed) => {
+    const T = range / speed;
+    for (let i = 0; i < AIM_SEGS; i += 1) {
+      posAt(bA, muzzle, direction, speed, (T * i) / AIM_SEGS);
+      posAt(bB, muzzle, direction, speed, (T * (i + 1)) / AIM_SEGS);
+      bDir.subVectors(bB, bA);
+      const len = bDir.length();
+      bDir.divideScalar(len);
+      raycaster.set(bA, bDir);
+      raycaster.far = len;
+      aimHits.length = 0;
+      raycaster.intersectObjects(rayObjects, false, aimHits);
+      raycaster.far = RANGE;
+      const hit = aimHits[0];
+      // робопёс ближе — пуля в него, контура нет
+      if (shootables.length && castExtra(bA, bDir, hit ? hit.distance : len, false) >= 0) return null;
+      if (hit) return hit.object === targetSet.plateMesh ? targets[hit.instanceId] : null;
+    }
+    return null;
+  };
+
   // shared.shooting — ручка для npm run vr:eval (проверить выстрел без пистолета в руке)
   const api = (shared.shooting = {
     placeInFront,
@@ -166,10 +328,10 @@ export function createShooting({ THREE, root, camera }) {
       } else placeInFront(false);
       placed = true;
     },
-    // Прицел (каждый кадр): тот же луч, что у shoot(); мишень, в которую попадёт выстрел, получает
-    // белый контур. aim(null) — оружия в руке нет.
-    // range — дальность оружия (дальнобойное — больше; по умолчанию RANGE)
-    aim(muzzle, direction, range = RANGE) {
+    // Прицел (каждый кадр). Возвращает точку для лазера — луч прямой (свет не падает), а белый контур
+    // получает мишень, в которую попадёт пуля по параболе (speed — её скорость). aim(null) — оружия нет.
+    // range — дальность прицела (дальнобойное — больше; по умолчанию RANGE)
+    aim(muzzle, direction, range = RANGE, speed = BULLET_SPEED) {
       effects.setMuzzle(muzzle); // струйка дыма идёт от дула, где бы оно ни было
       let target = null;
       let point = null;
@@ -180,72 +342,59 @@ export function createShooting({ THREE, root, camera }) {
         raycaster.intersectObjects(rayObjects, false, aimHits);
         raycaster.far = RANGE;
         const hit = aimHits[0];
-        if (hit?.object === targetSet.plateMesh) target = targets[hit.instanceId];
-        if (hit) point = hit.point; // для лазерного прицела (laser.js); объект из raycaster, не копия
+        if (hit) point = aimPoint.copy(hit.point); // для лазерного прицела (laser.js)
         // другая цель (робопёс) ближе — лазер упирается в неё (тарелки — как раньше, насквозь)
         if (shootables.length) {
           const d = castExtra(muzzle, direction, hit ? hit.distance : range, false);
-          if (d >= 0) {
-            target = null;
-            point = aimPoint.copy(muzzle).addScaledVector(direction, d);
-          }
+          if (d >= 0) point = aimPoint.copy(muzzle).addScaledVector(direction, d);
         }
+        if (rayObjects.length && shared.aimOutline !== false) target = aimBallistic(muzzle, direction, range, speed);
       }
+      lastAim = target;
       targetSet.setAim(target);
       return point;
     },
     // muzzle, direction: мировые координаты дула и направления ствола; ejector, right, up — где
-    // вылетает гильза (мировые координаты). Возвращает true при попадании.
-    // range — дальность пули (по умолчанию RANGE; дальнобойному оружию — больше)
+    // вылетает гильза (мировые координаты). Пуля улетает и попадает позже (update); результат —
+    // onResult(true — попал (мишень, тарелка, робопёс) | false — промах | null — попал во что-то не в
+    // счёт (лежащий робопёс)). speed — начальная скорость пули, м/с. Дальность пули — BULLET_LIFE и
+    // BULLET_PATH (range, если передан, не учитывается).
     // big — крупный калибр: вторая вспышка с дымом чуть впереди дула
-    shoot(muzzle, direction, { ejector, right, up, range = RANGE, big = false } = {}) {
-      raycaster.set(muzzle, direction);
-      raycaster.far = range;
-      // все мишени (и стоящие, и лежащие) и стойки; в стойку — пуля просто останавливается
-      const hits = raycaster.intersectObjects(rayObjects, false);
-      raycaster.far = RANGE;
-      let target = null;
-      let end = muzzle.clone().addScaledVector(direction, range);
-      if (hits.length) {
-        const hit = hits[0];
-        end = hit.point.clone();
-        if (hit.object === targetSet.plateMesh) {
-          target = targets[hit.instanceId];
-          normal.copy(hit.face?.normal ?? direction.clone().negate()).transformDirection(target.matrixWorld);
+    shoot(muzzle, direction, { ejector, right, up, big = false, speed = BULLET_SPEED, onResult = null } = {}) {
+      // пул: свободная пуля, иначе самая старая считается промахом и уступает место
+      let b = null;
+      for (let i = 0; i < MAX_BULLETS; i += 1) {
+        const c = bullets[i];
+        if (!c.active) {
+          b = c;
+          break;
         }
+        if (!b || c.born < b.born) b = c;
       }
-      // глиняная тарелка (clays.js) или другая цель (робопёс) ближе мишени — пуля попадает в неё и
-      // дальше не летит
-      const far = hits.length ? hits[0].distance : range;
-      const extraDistance = castExtra(muzzle, direction, far, true);
-      const extra = extraHit;
-      for (let i = 0; i < shootables.length; i += 1) shootables[i].shot?.(muzzle, direction, extraDistance >= 0 ? extraDistance : far);
-      let extraCounts = false; // попадание в цель: true — в счёт, null — не в счёт (ни попадание, ни промах)
-      if (extraDistance >= 0) {
-        end = muzzle.clone().addScaledVector(direction, extraDistance);
-        target = null;
-        const result = extra.hit(muzzle, direction, extraDistance);
-        extraCounts = result === undefined ? true : result;
-      }
-      if (target) {
-        addDecal(target, end);
-        targetSet.knock(target, end, direction);
-      }
+      if (b.active) finish(b, b.age, false);
+      b.active = true;
+      b.muzzle.copy(muzzle);
+      b.dir.copy(direction).normalize();
+      b.speed = speed;
+      b.age = 0;
+      b.kind = shared.shotKind ?? null;
+      b.onResult = onResult;
+      b.born = (bornCounter += 1);
+      b.tracer = effects.tracer(b.muzzle, b.dir, speed, GRAVITY, Math.min(BULLET_PATH, speed * BULLET_LIFE));
 
       effects.muzzleFlash(muzzle, direction);
       if (big) effects.muzzleFlash(muzzle.clone().addScaledVector(direction, 0.07), direction);
-      effects.tracer(muzzle, end);
       if (ejector && right && up) effects.eject(ejector, right, up);
       sound.shot({ position: muzzle });
-      if (target) {
-        effects.impact(end, normal.clone());
-        const delay = Math.min(250, (muzzle.distanceTo(end) / SPEED_OF_SOUND) * 1000);
-        setTimeout(() => sound.hit(end), delay);
-      }
-      // true — попал (мишень, тарелка, робопёс), false — промах, null — попал во что-то не в счёт
-      // (лежащий робопёс)
-      if (target) return true;
-      return extraDistance >= 0 ? extraCounts : false;
+    },
+    // номер мишени под контуром после последнего aim() (−1 — нет), для vr:eval
+    aimedIndex: () => targets.indexOf(lastAim),
+    // пули в полёте (для vr:eval): [{ age, speed, kind, x, y, z }]
+    bullets() {
+      return bullets.filter((b) => b.active).map((b) => {
+        posAt(bPoint, b.muzzle, b.dir, b.speed, b.age);
+        return { age: b.age, speed: b.speed, kind: b.kind, x: bPoint.x, y: bPoint.y, z: bPoint.z };
+      });
     },
     // Глиняные тарелки (clays.js): { cast(origin, dir, far) → расстояние или −1, hit(origin, dir, distance) }
     setClayTarget(handler) {
@@ -294,9 +443,13 @@ export function createShooting({ THREE, root, camera }) {
         placed = true;
       }
       if (enabled) targetSet.update(dt); // полёт сбитых мишеней и тени
+      // пули: тот же шаг, что у трассера (tracer.js) — голова трассера там, где пуля
+      const bulletDt = Math.min(0.05, dt || 0);
+      if (bulletDt > 0) for (let i = 0; i < MAX_BULLETS; i += 1) if (bullets[i].active) stepBullet(bullets[i], bulletDt);
       effects.update(dt);
     },
     dispose() {
+      for (let i = 0; i < MAX_BULLETS; i += 1) bullets[i].active = false; // летящие пули пропадают вместе со сценой
       saveTargets();
       effects.dispose();
       targetSet.dispose();

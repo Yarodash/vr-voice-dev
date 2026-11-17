@@ -16,9 +16,11 @@ const GUNS = {
 ```
 Per shot: rate limit by `gapMs` (auto fire keeps exact cadence), barrel climb, then
 `shared.sound.setWeapon(kind)`, muzzle/ejector/barrel/right/up from `heldItem.group.matrixWorld`,
-`messageHoles.hit(muzzle, barrel)`, laser panel cast/shoot if open,
-`hit = shooting.shoot(muzzle, barrel, { ejector, right, up })`,
-`score.shot(hit)` if `features.score` and the colour panel is closed, haptic, AK flash.
+`messageHoles.hit(muzzle, barrel)` + `crackedGlasses.test` (instant — they are < 2 m away), laser
+panel cast/shoot if open, `shooting.shoot(muzzle, barrel, { ejector, right, up | big, speed: gun.speed, onResult })`;
+`onResult(hit)` fires when the bullet lands: `score.shot(hit)` if `features.score` and the colour
+panel was closed, hit haptic. Fire haptic and AK flash are immediate. `GUNS[kind].speed` — muzzle
+velocity m/s: pistol 360, ak 715, awp 900.
 Called when `triggerDown && heldItem && !panelBusy && !laserPanel.blocksFire() && (!triggerWasDown || GUNS[kind].auto)`.
 Recoil: rotation about `HANDLE` by `kickRad` fading over `kickMs` (+ `kickBackM` push) + climb,
 applied when placing the held weapon. Debug: `__sceneState.weaponDebug.fire(index)` fires item
@@ -28,8 +30,9 @@ applied when placing the held weapon. Debug: `__sceneState.weaponDebug.fire(inde
 
 ```js
 const shooting = createShooting({ THREE, root, camera });
-shooting.shoot(muzzle, dir, { ejector, right, up }) -> boolean   // hit target or clay
-shooting.aim(muzzle|null, dir) -> Vector3|null   // per frame: aim outline + smoke muzzle; point for laser (raycaster object, don't keep)
+shooting.shoot(muzzle, dir, { ejector, right, up, big, speed = 360, onResult(true|false|null) })  // launches a bullet
+shooting.aim(muzzle|null, dir, range = 60, speed = 360) -> Vector3|null   // per frame: outline on the plate the BALLISTIC path hits (5 segments to range); returns the STRAIGHT-ray point for the laser
+shooting.bullets() -> [{ age, speed, kind, x, y, z }]; shooting.aimedIndex()   // debug for vr:eval
 shooting.castSegment(from, to) -> { point, normal, target, isStand } | null   // shared result object
 shooting.hitTarget(target, point, dir, quiet)    // non-bullet hit (clays)
 shooting.puff(point)                             // dust (effects.dust)
@@ -41,10 +44,16 @@ shooting.setTargets(state | {} | null)           // {} = place fresh in front; n
 shooting.placeInFront(gaze = true)
 shooting.update(dt); shooting.dispose()
 ```
-Shot pipeline: raycast plates+stands (InstancedMesh, `instanceId` -> plate), clay closer than
-that wins, decal on plate (max 40 per plate, `shared.targetDecals`), `targetSet.knock`,
-`effects.muzzleFlash/tracer/eject/impact`, `sound.shot({position})`, delayed `sound.hit` by
-distance / 343 m/s (max 250 ms). Range 60 m.
+Bullets are projectiles with gravity (no drag): `p(t) = muzzle + dir·v·t − ½·9.81·t²` (analytic,
+not Euler). Pool of 32 (oldest becomes a miss), stepped in `shooting.update(dt)` with the scene dt
+(slow-mo slows them), clamp 0.05 s, cut into chords ≤ 1/60 s; each chord is cast against: ground
+(`groundAt`, bisection) → plates+stands raycast (InstancedMesh, `instanceId` -> plate) → clay and
+shootables (`castExtra`, nearest wins); `shot?()` of shootables gets every chord. First hit
+resolves at that point and time: decal (`shared.targetDecals`), `targetSet.knock` with the
+velocity direction at impact, `effects.impact`, delayed `sound.hit`; clay/dog `hit(chordStart,
+chordDir, distance)` with `shared.shotKind` = the bullet's own kind; ground → dust (≤ 150 m from
+the player). Life 3 s / 1500 m. Drop: 10 m — pistol 3.8 mm, AK 1 mm, AWP 0.6 mm; 100 m —
+pistol 38 cm, AK 9.6 cm, AWP 6.1 cm. Muzzle flash, smoke, sound are at fire time.
 
 ## targets.js
 
@@ -85,11 +94,17 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   shootables (laser stops on them; clays are still not aimed at).
 - Robot dogs: one dog = `robodog-unit.js` (model `robodog-model.js`, gait/IK `robodog-gait.js`,
   ragdoll `robodog-ragdoll.js`, cast/hit, death); shared sparks/arcs `robodog-fx.js` (1 draw call);
-  sounds `robodog-sound.js` (own module on `__sceneState.audioGraph`, voice cap 10: zap, crackle,
-  powerDown, clank, thud, servo). Controllers: `robodog.js` (feature `robodog`, wanderer, brain
-  `robodog-ai.js`, 5 HP) and `robodog-horde.js` (feature `robodogHorde`, «Сцена 3»: pool of 5
-  models = 55 draw calls max, ≤3 alive, 2 HP, leap at the chest → red vignette on the camera +
-  `onPlayerHit` haptic in main.js; corpses sink after 8 s). Corpse hits return `null`. All
-  gameplay timers run on `dt` (slow-mo safe). Debug: `__sceneState.robodog.debug.info()`,
-  `__sceneState.horde.debug.info()`.
+  sounds `robodog-sound.js` (own module on `__sceneState.audioGraph`: recipes baked once with
+  OfflineAudioContext into `__sceneState.dogSoundBank`, 8 permanent HRTF voices in
+  `__sceneState.dogVoices`, oldest stolen; zap, crackle, powerDown, clank, clankHeavy, thud, servo,
+  groundThud, scrape). Metal look: one material per dog with an atlas (`makeDogTextures`: paint
+  panels/bolts/wear, bare steel, rubber; roughness+metalness maps) + `weapon-env.js` env map.
+  Controllers: `robodog.js` (feature `robodog`, wanderer, brain `robodog-ai.js`, 5 HP) and
+  `robodog-horde.js` (feature `robodogHorde`, «Сцена 3»: pool of 5 models = 55 draw calls max, ≤3
+  alive, 2 HP: first hit knocks it down — ragdoll ~1 s, then a 0.55 s get-up blend — second
+  kills; leap at the chest → red vignette on the camera + `onPlayerHit` haptic in main.js; corpses
+  sink after 8 s). Bullets throw ragdolls by calibre: main.js sets `shared.shotKind` before each
+  shot (pistol 0.45, ak 0.7, awp 1). Ragdoll: Verlet 16 particles, 1/120 s substep, 10 iterations,
+  speed clamp 14 m/s. Corpse hits return `null`. All gameplay timers run on `dt` (slow-mo safe).
+  Debug: `__sceneState.robodog.debug.info()`, `__sceneState.horde.debug.info()`.
 - Score is off in every scene (compositions.js); `score.js` (+ `bonus(points)`) kept for later.

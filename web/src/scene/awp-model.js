@@ -31,23 +31,15 @@ export const SCOPE_MAX_Z = RAIL_TO - 0.011 - SCOPE_RINGS[1];
 export const SCOPE_DEFAULT_Z = 0;
 const UV_M = 0.03; // тайл шумовых текстур, м
 
-// Цикл затвора после выстрела (мс): ждёт отдачу, вверх, назад (гильза вылетает в конце хода),
-// вперёд, вниз. Вся перезарядка ≈ 1 с; темп стрельбы (gapMs) в main.js — 1100 мс.
-const BOLT_T = { wait: 200, up: 150, back: 230, hold: 40, fwd: 220, down: 150 };
-const T_UP = BOLT_T.wait;
-const T_BACK = T_UP + BOLT_T.up;
-const T_BACKED = T_BACK + BOLT_T.back; // затвор сзади — гильза летит
-const T_FWD = T_BACKED + BOLT_T.hold;
-const T_DOWN = T_FWD + BOLT_T.fwd; // затвор впереди — лязг
-export const BOLT_CYCLE_MS = T_DOWN + BOLT_T.down;
-
-const ease = (x) => {
-  const t = Math.min(1, Math.max(0, x));
-  return t * t * (3 - 2 * t);
-};
+// Самозарядная (по просьбе пользователя): после выстрела затвор с рукояткой резко отходит назад
+// (BOLT_BACK_MS), гильза вылетает в крайней точке, и возвращается (BOLT_FWD_MS) с коротким
+// металлическим щелчком. Темп стрельбы (gapMs) — в main.js.
+const BOLT_BACK_MS = 30;
+const BOLT_FWD_MS = 70;
+export const BOLT_CYCLE_MS = BOLT_BACK_MS + BOLT_FWD_MS;
 
 // Затвор по времени после выстрела (age, мс). Вызывает pistols.updateTriggers. Звук — через
-// __sceneState.sound.bolt (открыть / закрыть), гильза — onEject(item) в конце хода назад.
+// __sceneState.sound.bolt(position, 'cycle'), гильза — onEject(item) в крайней задней точке.
 // Возвращает true, когда цикл закончен.
 export function cycleBolt(item, age, onEject) {
   const bolt = item.bolt;
@@ -55,40 +47,22 @@ export function cycleBolt(item, age, onEject) {
     bolt.shotAt = item.shotAt;
     bolt.events = 0;
   }
-  let lift = 0;
   let back = 0;
-  if (age < T_BACK) lift = ease((age - T_UP) / BOLT_T.up);
-  else if (age < T_FWD) {
-    lift = 1;
-    back = ease((age - T_BACK) / BOLT_T.back);
-  } else if (age < T_DOWN) {
-    lift = 1;
-    back = 1 - ease((age - T_FWD) / BOLT_T.fwd);
-  } else lift = 1 - ease((age - T_DOWN) / BOLT_T.down);
-  bolt.pivot.rotation.z = lift * bolt.lift;
+  if (age < BOLT_BACK_MS) back = 1 - (1 - age / BOLT_BACK_MS) ** 2;
+  else if (age < BOLT_CYCLE_MS) back = (1 - (age - BOLT_BACK_MS) / BOLT_FWD_MS) ** 2;
+  bolt.pivot.rotation.z = 0;
   bolt.pivot.position.z = back * bolt.travel;
-  const sound = (phase) => {
+  if (age >= BOLT_BACK_MS && bolt.events < 1) {
+    bolt.events = 1;
+    onEject?.(item);
     try {
       item.group.updateWorldMatrix(true, false);
-      globalThis.__sceneState?.sound?.bolt?.(bolt.tmp.set(0, BORE_Y, 0.06).applyMatrix4(item.group.matrixWorld), phase);
+      globalThis.__sceneState?.sound?.bolt?.(bolt.tmp.set(0, BORE_Y, 0.06).applyMatrix4(item.group.matrixWorld), 'cycle');
     } catch {
       // без звука
     }
-  };
-  if (age >= T_UP && bolt.events < 1) {
-    bolt.events = 1;
-    sound('open'); // щелчок, лязг хода назад запечён в нём же
-  }
-  if (age >= T_BACKED && bolt.events < 2) {
-    bolt.events = 2;
-    onEject?.(item);
-  }
-  if (age >= T_DOWN && bolt.events < 3) {
-    bolt.events = 3;
-    sound('close'); // удар вперёд и щелчок рукоятки вниз
   }
   if (age >= BOLT_CYCLE_MS) {
-    bolt.pivot.rotation.z = 0;
     bolt.pivot.position.z = 0;
     return true;
   }
@@ -96,7 +70,7 @@ export function cycleBolt(item, age, onEject) {
 }
 
 // шумовые текстуры (раз на страницу): точки светлее/темнее на сером; bump/roughness-карты
-const makeTextures = (THREE) => {
+export const makeTextures = (THREE) => { // (и для scope-model.js: shared.awpTex)
   const noise = (dots, rMin, rMax, light, dark, base = '#808080') => {
     const size = 256;
     const c = document.createElement('canvas');
@@ -130,12 +104,12 @@ export function buildAwp(THREE, { outlineM = 0 } = {}) {
   const tex = (shared.awpTex ??= makeTextures(THREE));
   const group = new THREE.Group();
   // разные фактуры чёрного
-  const alu = new THREE.MeshStandardMaterial({ color: 0x1f2124, roughness: 0.42, metalness: 0.6, roughnessMap: tex.anodizeRough, envMap: env, envMapIntensity: 0.55 });
+  const alu = new THREE.MeshStandardMaterial({ color: 0x2a2c30, roughness: 0.45, metalness: 0.35, roughnessMap: tex.anodizeRough, envMap: env, envMapIntensity: 0.18 });
   const polymer = new THREE.MeshStandardMaterial({ color: 0x1b1c1e, roughness: 0.82, metalness: 0, bumpMap: tex.polymerBump, bumpScale: 0.5 });
   const grip = new THREE.MeshStandardMaterial({ color: 0x18191a, roughness: 0.9, metalness: 0, bumpMap: tex.gripBump, bumpScale: 1.4 });
   const rubber = new THREE.MeshStandardMaterial({ color: 0x151617, roughness: 0.95, metalness: 0, bumpMap: tex.rubberBump, bumpScale: 1.1 });
-  const steel = new THREE.MeshStandardMaterial({ color: 0x2b2c2f, roughness: 0.62, metalness: 0.62, roughnessMap: tex.steelRough, envMap: env, envMapIntensity: 0.45 });
-  const scopeMat = new THREE.MeshStandardMaterial({ color: 0x121315, roughness: 0.6, metalness: 0.4, roughnessMap: tex.anodizeRough, envMap: env, envMapIntensity: 0.3 });
+  const steel = new THREE.MeshStandardMaterial({ color: 0x2e2f32, roughness: 0.62, metalness: 0.4, roughnessMap: tex.steelRough, envMap: env, envMapIntensity: 0.18 });
+  const scopeMat = new THREE.MeshStandardMaterial({ color: 0x141517, roughness: 0.62, metalness: 0.25, roughnessMap: tex.anodizeRough, envMap: env, envMapIntensity: 0.15 });
   const dark = new THREE.MeshStandardMaterial({ color: 0x060607, roughness: 0.9, metalness: 0 }); // прорези, окна, глубина
   const accent = new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.55, metalness: 0.6, emissive: 0x000000, envMap: env, envMapIntensity: 0.35 });
 
@@ -230,9 +204,26 @@ export function buildAwp(THREE, { outlineM = 0 } = {}) {
     let g = new THREE.ExtrudeGeometry(shape, { depth: core, bevelEnabled: true, bevelThickness: depth, bevelSize: radius, bevelOffset: -radius, bevelSegments: segments, curveSegments: curve });
     g.translate(0, 0, -core / 2);
     g.rotateY(-Math.PI / 2); // x профиля → z оружия, выдавливание → X
-    g = toCreasedNormals(g, THREE.MathUtils.degToRad(40));
-    place(g, material, { x });
+    place(smoothBevels(g, 0), material, { x });
   };
+  // Нормали выдавленной детали: скругления — гладко (по углу), а плоские торцы — строго плоско.
+  // Иначе вершины торца усредняются с соседней гранью фаски, и по большим треугольникам торца идут
+  // косые полосы света. axis — ось выдавливания (0 — X, 2 — Z).
+  function smoothBevels(geometry, axis) {
+    const g = toCreasedNormals(geometry, THREE.MathUtils.degToRad(40));
+    const p = g.attributes.position;
+    const n = g.attributes.normal;
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), f = new THREE.Vector3();
+    for (let i = 0; i + 2 < p.count; i += 3) {
+      a.fromBufferAttribute(p, i); b.fromBufferAttribute(p, i + 1); c.fromBufferAttribute(p, i + 2);
+      f.subVectors(c, b).cross(a.sub(b));
+      const len = f.length();
+      if (len < 1e-12 || Math.abs(f.getComponent(axis)) / len < 0.9999) continue;
+      f.divideScalar(len);
+      for (let k = 0; k < 3; k += 1) n.setXYZ(i + k, f.x, f.y, f.z);
+    }
+    return g;
+  }
 
   // ---- ствольная коробка: верх (алюминий, плоский), низ с шахтой магазина и спусковой скобой
   rbox(0.034, RECV_TOP - 0.02, 0.283, alu, 0, (RECV_TOP + 0.02) / 2, -0.0635, { r: 0.004, seg: 2 });
@@ -309,14 +300,13 @@ export function buildAwp(THREE, { outlineM = 0 } = {}) {
     // резиновая подушка: скруглённый прямоугольник (x, y), выдавленный назад по Z
     const pad = rounded(new THREE.Shape(), [[-0.022, -0.071], [0.022, -0.071], [0.022, 0.062], [-0.022, 0.062]], 0.014);
     let g = new THREE.ExtrudeGeometry(pad, { depth: 0.016, bevelEnabled: true, bevelThickness: 0.005, bevelSize: 0.005, bevelOffset: -0.005, bevelSegments: 3, curveSegments: 6 });
-    g = toCreasedNormals(g, THREE.MathUtils.degToRad(40));
-    place(g, rubber, { z: 0.302 });
+    place(smoothBevels(g, 2), rubber, { z: 0.302 });
     for (let i = 0; i < 4; i += 1) box(0.046, 0.0015, 0.016, dark, 0, -0.045 + i * 0.03, 0.312); // рифление по бокам
   }
 
   // ---- спуск (свой узел)
   tag = 'trigger';
-  box(0.006, 0.024, 0.007, accent, 0, -0.019, -0.012, { rx: 0.25 });
+  box(0.006, 0.02, 0.007, accent, 0, -0.017, -0.012, { rx: 0.25 });
   // ---- затвор (свой узел, поворот вокруг оси канала): стебель, хвостовик, рукоятка с шаром справа
   tag = 'bolt';
   tubeZ(0.0125, 0.0125, -0.12, 0.078, steel, 0, BORE_Y, 20);
@@ -334,7 +324,8 @@ export function buildAwp(THREE, { outlineM = 0 } = {}) {
     [0.0158, -0.19], [0.0158, -0.004], [0.019, 0.012], [0.0235, 0.02], [0.0235, 0.054], [0.021, 0.0545],
   ], scopeMat, sy, 40);
   lathe([[0.0228, 0.053], [0.025, 0.055], [0.0252, 0.068], [0.0238, 0.071], [0.0218, 0.069], [0.0216, 0.0556]], rubber, sy, 32); // наглазник
-  for (const z of [-0.26, -0.248, 0.03, 0.038]) tubeZ(0.0308, 0.0308, z, z + 0.004, scopeMat, 0, sy, 40); // кольцевые рёбра колоколов
+  for (const z of [-0.26, -0.248]) tubeZ(0.0308, 0.0308, z, z + 0.004, scopeMat, 0, sy, 40); // рёбра колокола объектива
+  for (const z of [0.028, 0.038]) tubeZ(0.0242, 0.0242, z, z + 0.004, scopeMat, 0, sy, 32); // рёбра окуляра
   tubeZ(0.019, 0.019, -0.112, -0.07, scopeMat, 0, sy, 28); // седло барабанов
   cylY(0.0145, 0.03, scopeMat, 0, sy + 0.019 + 0.015, -0.091, 32); // вертикальный барабан (высокий)
   cylY(0.0155, 0.005, scopeMat, 0, sy + 0.019 + 0.032, -0.091, 32); // его крышка
@@ -357,7 +348,7 @@ export function buildAwp(THREE, { outlineM = 0 } = {}) {
   // ---- сборка: детали одного материала и узла — одним мешом
   const trigger = { pivot: new THREE.Object3D(), maxAngle: 0.35 };
   trigger.pivot.position.set(0, -0.007, -0.012);
-  const bolt = { pivot: new THREE.Object3D(), travel: 0.07, lift: 1.2, tmp: new THREE.Vector3(), shotAt: 0, events: 0 };
+  const bolt = { pivot: new THREE.Object3D(), travel: 0.055, lift: 1.2, tmp: new THREE.Vector3(), shotAt: 0, events: 0 };
   bolt.pivot.position.set(0, BORE_Y, 0);
   const scopeNode = new THREE.Group();
   scopeNode.position.z = SCOPE_DEFAULT_Z;
