@@ -17,11 +17,11 @@
 // 26: AWP — один голос (слои смешаны заранее); пулы больше и раздельные (выстрелы / попадания /
 // затвор / гильзы), отнимается только голос в тихом хвосте и никогда не самый новый. Псы
 // (robodog-sound.js) — свой пул на том же графе. 24: bolt(…, 'cycle'); 23: AWP и затвор
-export const SOUND_VERSION = 28; // 28: мягче лимитер; 27: пулы без лишнего (dog)
+export const SOUND_VERSION = 31; // 31: мана громче; 30: мана без запасного выстрела, lastShot в stats; 29: мана (shot kind 'mana', manaHit); 28: мягче лимитер; 27: пулы без лишнего (dog)
 // какие записи звучат в игре (sound-board.js помечает их «в игре»)
 export const GUN_FILES = { pistol: ['pistolB1', 'pistolB2'], ak: ['ak1', 'ak2', 'ak3'] };
 
-const BAKE_VERSION = 3; // 3: AWP одним буфером. Меняй, когда меняются рецепты ниже (синтез перезапечётся)
+const BAKE_VERSION = 5; // 5: мана — «вумм-шинг» вместо выстрела; 4: мана (manaShot, manaHit); 3: AWP одним буфером. Меняй, когда меняются рецепты ниже (синтез перезапечётся)
 const BUS_VERSION = 2; // меняй при изменении выхода (лимитер, реверб)
 const POOL_VERSION = 3; // меняй при изменении устройства голосов
 
@@ -29,6 +29,7 @@ const NEAR_FAR = 1.2; // дальше — обычный HRTF; ближе — б
 const NEAR_FULL = 0.55; // ближе — почти чистое стерео
 const STEAL_FADE = 0.06; // с, за сколько гасится отнятый голос (он уже в тихом хвосте)
 const DRIVE = 3; // мягкий клип: вход ±3 → выход до ±1
+const SHOT_MIN_GAP_MS = 55; // звук своего выстрела — не чаще ~18 в секунду реального времени
 // Пулы голосов: size — постоянных цепочек; max — сколько звучит, прежде чем отнимать; minAge — отнимать
 // только звук старше этого (с): он уже в тихом хвосте; самый новый не отнимается никогда. Нечего
 // отнять — звучит сверх max, пока есть свободные цепочки. Голос — один источник буфера, их может быть много.
@@ -85,6 +86,25 @@ const tone = (c, out, t, { type = 'sine', from, to = from, gain, decay }) => {
   osc.connect(envelope).connect(out);
   osc.start(t);
   osc.stop(t + decay + 0.02);
+};
+
+// (для маны; только в запекании, OfflineAudioContext — не при игре)
+// гейн-огибающая → out: подъём за attack с до peak, спад за decay с
+const envGain = (c, out, t, attack, peak, decay) => {
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + attack);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+  g.connect(out);
+  return g;
+};
+// колокольчик: чистый синус с мягкой атакой и долгим спадом
+const bell = (c, out, t, freq, gain, decay, attack = 0.005) => {
+  const osc = c.createOscillator();
+  osc.frequency.value = freq;
+  osc.connect(envGain(c, out, t, attack, gain, decay));
+  osc.start(t);
+  osc.stop(t + attack + decay + 0.02);
 };
 
 const PISTOL_GAIN = 1.7; // пистолет громче и звонче: запись глуховата и терялась на фоне звона попадания
@@ -225,6 +245,90 @@ const RECIPES = {
     noise(c, out, t, { seconds: 0.9, type: 'lowpass', from: 1100 * jitter, to: 90, gain: 0.9, decay: 0.75 });
     noise(c, out, t, { seconds: 0.08, type: 'bandpass', from: 1500, to: 600, gain: 0.5, decay: 0.05 });
   },
+  // Мана-выстрел — не удар, а «вумм-шинг»: мягкий (атака ~8 мс) расстроенный пилообразный тон
+  // взлетает 300→1200 Гц за ~0,1 с через мягкий фильтр, на вершине звенят хрустальные колокольца
+  // (негармоничные 1 : 2,76 : 5,4 : 8,9, ~0,5 с), под ними — хоровое мерцание (расстроенные синусы с
+  // медленным вибрато) и воздушный «вжух» шума вверх. Ни шумового хлопка, ни низкого удара.
+  manaShot(c, out, t) {
+    const j = 1 + (Math.random() - 0.5) * 0.06;
+    // взлёт: две расстроенные пилы + синус октавой выше, через lowpass
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 2;
+    lp.frequency.setValueAtTime(1400, t);
+    lp.frequency.exponentialRampToValueAtTime(4200, t + 0.11);
+    lp.frequency.exponentialRampToValueAtTime(1800, t + 0.3);
+    lp.connect(envGain(c, out, t, 0.008, 0.2, 0.3));
+    for (const [type, mul, level] of [['sawtooth', 1, 0.5], ['sawtooth', 1.012, 0.5], ['sine', 2, 0.6]]) {
+      const osc = c.createOscillator();
+      osc.type = type;
+      osc.frequency.setValueAtTime(300 * j * mul, t);
+      osc.frequency.exponentialRampToValueAtTime(1200 * j * mul, t + 0.1);
+      const g = c.createGain();
+      g.gain.value = level;
+      osc.connect(g).connect(lp);
+      osc.start(t);
+      osc.stop(t + 0.34);
+    }
+    // хрустальные колокольца на вершине взлёта
+    const bellBase = 1200 * j;
+    [[1, 0.16, 0.6], [2.76, 0.09, 0.45], [5.4, 0.05, 0.3], [8.9, 0.03, 0.2]].forEach(([ratio, gain, decay]) =>
+      bell(c, out, t + 0.085, bellBase * ratio, gain, decay, 0.005),
+    );
+    // хоровое мерцание: 4 расстроенных синуса с вибрато 5–6 Гц
+    const chorus = envGain(c, out, t + 0.05, 0.04, 0.05, 0.6);
+    const vib = c.createOscillator();
+    vib.frequency.value = 5 + Math.random();
+    const vibDepth = c.createGain();
+    vibDepth.gain.value = 9;
+    vib.connect(vibDepth);
+    for (const d of [0.993, 0.997, 1.003, 1.007]) {
+      const osc = c.createOscillator();
+      osc.frequency.value = 2400 * j * d;
+      vibDepth.connect(osc.frequency);
+      osc.connect(chorus);
+      osc.start(t + 0.05);
+      osc.stop(t + 0.75);
+    }
+    vib.start(t + 0.05);
+    vib.stop(t + 0.75);
+    // воздушный «вжух»: полоса шума вверх
+    const src = c.createBufferSource();
+    src.buffer = noiseBuffer(c, 0.4);
+    const bp = c.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(800, t);
+    bp.frequency.exponentialRampToValueAtTime(4000, t + 0.2);
+    src.connect(bp).connect(envGain(c, out, t, 0.01, 0.12, 0.25));
+    src.start(t);
+    src.stop(t + 0.4);
+  },
+  // Мана попала: мягкий «чпок» и каскад искристых колокольчиков вниз (не металл)
+  manaHit(c, out, t) {
+    const j = 1 + (Math.random() - 0.5) * 0.06;
+    const pop = c.createOscillator();
+    pop.frequency.setValueAtTime(900 * j, t);
+    pop.frequency.exponentialRampToValueAtTime(300 * j, t + 0.045);
+    pop.connect(envGain(c, out, t, 0.003, 0.3, 0.06));
+    pop.start(t);
+    pop.stop(t + 0.1);
+    const puff = c.createBufferSource();
+    puff.buffer = noiseBuffer(c, 0.1);
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 1800;
+    puff.connect(lp).connect(envGain(c, out, t, 0.004, 0.1, 0.06));
+    puff.start(t);
+    puff.stop(t + 0.1);
+    const base = 2600 * j;
+    [1.5, 1.26, 1, 0.84, 0.75].forEach((ratio, i) => {
+      const at = t + 0.02 + i * 0.04;
+      bell(c, out, at, base * ratio, 0.1 * (1 - i * 0.12), 0.35, 0.004);
+      bell(c, out, at, base * ratio * 2.76, 0.03, 0.18, 0.004);
+    });
+    for (let i = 0; i < 4; i += 1) bell(c, out, t + 0.03 + Math.random() * 0.2, 6000 + Math.random() * 3000, 0.02, 0.05, 0.002);
+  },
   // Затвор открывают: щелчок рукоятки вверх, шорох хода назад, лязг в заднем положении (через ~0,38 с)
   boltOpen(c, out, t) {
     noise(c, out, t, { seconds: 0.03, type: 'highpass', from: 5200, to: 3500, gain: 0.5, decay: 0.012 });
@@ -257,6 +361,8 @@ const BAKES = {
   awpBoom: ['awpBoom', 2, 1.0],
   boltOpen: ['boltOpen', 2, 0.5],
   boltClose: ['boltClose', 2, 0.25],
+  manaShot: ['manaShot', 5, 0.8],
+  manaHit: ['manaHit', 4, 0.6],
 };
 
 const bake = (sampleRate, seconds, draw) => {
@@ -778,7 +884,7 @@ export function createSound() {
     // Каким оружием звучит следующий shot() без параметров: 'pistol' | 'ak'. shooting.js зовёт
     // shot() без параметров, поэтому main.js ставит оружие перед выстрелом.
     setWeapon(kind) {
-      weapon = kind === 'ak' || kind === 'awp' ? kind : 'pistol';
+      weapon = kind === 'ak' || kind === 'awp' || kind === 'mana' ? kind : 'pistol';
     },
     // затвор АВП (awp-model.js cycleBolt): phase 'open' — вверх и назад, 'close' — вперёд и вниз,
     // 'cycle' — самозарядка: короткий «клац-щёлк» (запись закрытия, ускоренная в 1,6 раза)
@@ -791,6 +897,19 @@ export function createSound() {
     shot({ kind = weapon, position } = {}) {
       return safe(() => {
         ensure();
+        // Ускоренное время (×4…×64) даёт выстрел каждый кадр: пул выстрелов забивался молодыми звуками
+        // и остальные пропадали. Не чаще раза в SHOT_MIN_GAP_MS реального времени — звучит очередью.
+        const nowMs = performance.now();
+        if (nowMs - (shared.lastShotSoundAt ?? 0) < SHOT_MIN_GAP_MS) return false;
+        shared.lastShotSoundAt = nowMs;
+        // мана: запечённый «магический» выстрел, высота гуляет ±6 %; пока не запёкся — тишина, а не выстрел
+        if (kind === 'mana') {
+          const list = shared.soundBank?.fx.manaShot;
+          counters.lastShot = list?.length ? `manaShot@${shared.soundBank.fxReady}` : 'mana:not-baked';
+          if (!list?.length) return false;
+          return play('gun', pick(list), { position, gain: 1.3 + Math.random() * 0.2, rate: 0.94 + Math.random() * 0.12, wet: 0.35 });
+        }
+        counters.lastShot = kind;
         // AWP: один голос — запечённая смесь (bakeAwp); пока она не готова — только основной слой.
         // Хвост длиннее (больше реверба)
         const awp = kind === 'awp';
@@ -826,6 +945,10 @@ export function createSound() {
     },
     powerDown(position) {
       return safe(() => play('impact', pick(shared.soundBank?.fx.powerDown), { position, gain: 0.6, wet: 0.25 }));
+    },
+    // мана попала: «чпок» со звоном (shooting.js, projectile 'mana')
+    manaHit(position) {
+      return safe(() => play('impact', pick(shared.soundBank?.fx.manaHit), { position, gain: 0.55, rate: 0.95 + Math.random() * 0.1, wet: 0.3 }));
     },
   };
 }

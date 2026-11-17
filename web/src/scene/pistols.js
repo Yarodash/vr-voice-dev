@@ -7,6 +7,8 @@ import { buildAk } from './ak-model.js';
 import { buildAwp, cycleBolt } from './awp-model.js';
 import { buildAk2 } from './ak2-model.js';
 import { cachedBuild } from './model-cache.js';
+import { genEntry } from './generated-guns.js';
+import { buildGenerated } from './generated-gun.js';
 
 const STORE_KEY = 'scene.pistols';
 const OLD_STORE_KEY = 'scene.pistol'; // прежний формат: один пистолет
@@ -34,10 +36,15 @@ export function createPistols({ THREE, root, makeLens = null }) {
   // pistol-model.js), нарисованные только изнутри (BackSide); внутри силуэта их закрывает само оружие.
   // Калаш грузится из файла: его детали и обводка появляются, когда файл готов (обычно сразу).
   const add = (pose = null, kind = 'pistol') => {
-    if (!KINDS.includes(kind)) kind = 'pistol';
+    const gen = genEntry(kind); // 'gen:<id>' — сгенерированная пушка (generated-guns.js)
+    if (!KINDS.includes(kind) && !gen) kind = 'pistol';
     let model;
     let outline;
-    if (kind === 'ak' || kind === 'ak2') {
+    if (gen) {
+      // картинка, потом модель — внутри своей группы (generated-gun.js); обводка — её же Mesh
+      model = buildGenerated(THREE, gen, { outlineMaterial, outlineM: OUTLINE_M, makeLens }); // прицел и стёкла ставит сам
+      outline = model.outline;
+    } else if (kind === 'ak' || kind === 'ak2') {
       const { ready, ...ak } = kind === 'ak2' ? buildAk2(THREE, { outlineM: OUTLINE_M }) : buildAk(THREE);
       model = ak;
       outline = new THREE.Mesh(new THREE.BufferGeometry(), outlineMaterial);
@@ -58,7 +65,7 @@ export function createPistols({ THREE, root, makeLens = null }) {
       model.group.add(outline);
       liftModel(model.group, outline);
     }
-    if (model.scope) {
+    if (model.scope && !gen) {
       {
         // прицел (АВП, «Калаш 2.0»): стёкла и своя обводка — в узле прицела (он двигается и наклоняется)
         const { scope } = model;
@@ -85,7 +92,8 @@ export function createPistols({ THREE, root, makeLens = null }) {
         }
       }
     }
-    const item = { kind, ...model, outline };
+    // сгенерированная пушка — сама item (не копия): прицел, стёкла и спуск появляются в ней позже
+    const item = gen ? Object.assign(model, { kind, outline }) : { kind, ...model, outline };
     if (pose?.position && pose?.quaternion) {
       item.group.position.fromArray(pose.position);
       item.group.quaternion.fromArray(pose.quaternion);
@@ -100,12 +108,14 @@ export function createPistols({ THREE, root, makeLens = null }) {
     if (index < 0) return;
     items.splice(index, 1);
     root.remove(item.group);
+    if (item.gen) item.accent.dispose(); // у сгенерированных пушек — пустышка вне группы
     item.lens?.dispose(); // текстура прицела
     const geometries = new Set();
     const materials = new Set();
     item.group.traverse((object) => {
-      if (object.geometry) geometries.add(object.geometry);
-      if (object.material && object.material !== outlineMaterial) materials.add(object.material);
+      // userData.shared — общие у всех экземпляров (кэш сгенерированных пушек): не освобождать
+      if (object.geometry && !object.geometry.userData.shared) geometries.add(object.geometry);
+      if (object.material && object.material !== outlineMaterial && !object.material.userData?.shared) materials.add(object.material);
     });
     geometries.forEach((geometry) => geometry.dispose());
     materials.forEach((material) => material.dispose());
@@ -152,11 +162,11 @@ export function createPistols({ THREE, root, makeLens = null }) {
       }
     },
     kick(item) {
-      item.shotAt = shared.sceneNowMs ?? performance.now(); // сценовые часы (замедление времени)
+      item.shotAt = performance.now(); // оружие в руке — по реальному времени (игрок не замедляется, world-clock.js)
       item.ejected = false;
     },
     updateTriggers(heldItem, value, dt, onEject) {
-      const now = shared.sceneNowMs ?? performance.now();
+      const now = performance.now();
       const k = 1 - Math.exp(-30 * Math.min(dt, 0.1));
       for (let i = 0; i < items.length; i += 1) {
         const item = items[i];

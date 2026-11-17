@@ -158,6 +158,34 @@ export function createImpacts({ THREE, group }) {
     pool.rot[i] = pool.rot[n]; pool.seed[i] = pool.seed[n];
   };
 
+  // звёзды или угольки (kind 1 / 2) — в буферы с позиции m; вернёт новое m (без замыкания на кадр)
+  const points = (pool, kind, m, dt) => {
+    for (let i = pool.count - 1; i >= 0; i -= 1) {
+      pool.age[i] += dt;
+      if (pool.age[i] >= pool.life[i]) removePoint(pool, i);
+    }
+    for (let i = 0; i < pool.count; i += 1) {
+      const f = pool.age[i] / pool.life[i];
+      const q = m * 4;
+      A[q] = pool.x[i]; A[q + 1] = pool.y[i]; A[q + 2] = pool.z[i]; A[q + 3] = kind;
+      if (kind === 1) {
+        B[q] = pool.size[i] * (0.8 + 0.4 * f);
+        C[q] = 1;
+        C[q + 1] = 1 - f * f;
+      } else {
+        B[q] = pool.size[i] * (1 - 0.4 * f);
+        C[q] = (1 - f) ** 1.5;
+        C[q + 1] = 1 - Math.max(0, (f - 0.6) / 0.4);
+      }
+      B[q + 1] = pool.rot[i];
+      B[q + 2] = pool.seed[i];
+      B[q + 3] = 0;
+      m += 1;
+    }
+    return m;
+  };
+  let warm = 0; // кадров после создания (см. конец update)
+
   const addSpark = (x, y, z, vx, vy, vz, life, heat, width) => {
     let i;
     if (sparks < SPARKS) i = sparks++;
@@ -243,32 +271,8 @@ export function createImpacts({ THREE, group }) {
         m += 1;
       }
       // звёзды и угольки
-      const points = (pool, kind) => {
-        for (let i = pool.count - 1; i >= 0; i -= 1) {
-          pool.age[i] += dt;
-          if (pool.age[i] >= pool.life[i]) removePoint(pool, i);
-        }
-        for (let i = 0; i < pool.count; i += 1) {
-          const f = pool.age[i] / pool.life[i];
-          const q = m * 4;
-          A[q] = pool.x[i]; A[q + 1] = pool.y[i]; A[q + 2] = pool.z[i]; A[q + 3] = kind;
-          if (kind === 1) {
-            B[q] = pool.size[i] * (0.8 + 0.4 * f);
-            C[q] = 1;
-            C[q + 1] = 1 - f * f;
-          } else {
-            B[q] = pool.size[i] * (1 - 0.4 * f);
-            C[q] = (1 - f) ** 1.5;
-            C[q + 1] = 1 - Math.max(0, (f - 0.6) / 0.4);
-          }
-          B[q + 1] = pool.rot[i];
-          B[q + 2] = pool.seed[i];
-          B[q + 3] = 0;
-          m += 1;
-        }
-      };
-      points(stars, 1);
-      points(embers, 2);
+      m = points(stars, 1, m, dt);
+      m = points(embers, 2, m, dt);
 
       if (m > 0 || geometry.instanceCount > 0) {
         for (const attr of attrs) {
@@ -278,6 +282,10 @@ export function createImpacts({ THREE, group }) {
         }
       }
       geometry.instanceCount = m;
+      // пустой видимый меш тоже стоит CPU (программа и униформы на каждый глаз): скрыт, пока пусто;
+      // первые кадры виден — шейдер собирается при подмене сцены (материал держит программу)
+      if (warm < 3) warm += 1;
+      mesh.visible = m > 0 || warm < 3;
     },
 
     dispose() {

@@ -22,6 +22,9 @@ export const HIPS = [
   [0.13, -0.03, 0.28],
 ];
 const NEUTRAL_X = 1.1; // стопы чуть шире таза
+const JOLT_V = 9; // рад/с: предел скорости толчка от попаданий
+const JOLT_MAX = 0.3; // рад: и наклона от них
+const MIN_Y = 0.27; // корпус не ниже этого над землёй (стоит, сбит толчком, присел)
 const GRAVITY = 9.81;
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -67,7 +70,7 @@ const GALLOP = [0, 0.08, 0.55, 0.63];
 // центром корпуса, ось Y вверх, без наклона) относительно этого начала.
 // pose: { y, x, pitch, roll, legs: [{ abd, hip, knee }] ×4 } — корпус (над началом) и ноги.
 export function createGait() {
-  const pose = { y: BODY_Y, x: 0, pitch: 0, roll: 0, legs: HIPS.map(() => ({ abd: 0, hip: 0, knee: 0 })) };
+  const pose = { y: BODY_Y, x: 0, pitch: 0, roll: 0, yaw: 0, legs: HIPS.map(() => ({ abd: 0, hip: 0, knee: 0 })) };
   const feet = HIPS.map(() => [0, 0, 0]); // цели стоп (для отладки и тени)
   let phase = 0;
   let time = 0;
@@ -75,7 +78,7 @@ export function createGait() {
   const offsets = [0, 0, 0, 0];
 
   const toBody = (x, y, z, out) => {
-    // в систему корпуса: минус положение, поворот обратно (корпус = Rx(pitch)·Rz(roll))
+    // в систему корпуса: минус положение, поворот обратно (корпус = Rx(pitch)·Ry(yaw)·Rz(roll))
     let px = x - pose.x;
     let py = y - pose.y;
     let pz = z;
@@ -84,6 +87,11 @@ export function createGait() {
     const ny = cp * py - sp * pz;
     pz = sp * py + cp * pz;
     py = ny;
+    const cy = Math.cos(-pose.yaw);
+    const sy = Math.sin(-pose.yaw);
+    const nx0 = cy * px + sy * pz;
+    pz = -sy * px + cy * pz;
+    px = nx0;
     const cr = Math.cos(-pose.roll);
     const sr = Math.sin(-pose.roll);
     const nx = cr * px - sr * py;
@@ -103,30 +111,37 @@ export function createGait() {
       return phase;
     },
     // попадание: тряхнуть корпус (pitch, roll — рад/с)
+    // Ограничено: очередь по большому псу не накапливает толчки (иначе корпус заваливался, а ноги
+    // выворачивались коленом вперёд и уходили под землю)
     kick(pitchSpeed, rollSpeed) {
-      jolt.vp += pitchSpeed;
-      jolt.vr += rollSpeed;
+      jolt.vp = clamp(jolt.vp + pitchSpeed, -JOLT_V, JOLT_V);
+      jolt.vr = clamp(jolt.vr + rollSpeed, -JOLT_V, JOLT_V);
     },
     update(dt, cmd, ground) {
       time += dt;
       const v = Math.max(0, cmd.v);
       const w = cmd.w;
+      const vs = cmd.vs ?? 0; // скорость вбок (+ вправо): уворот
+      const broken = cmd.broken ?? 0; // перебитые ноги (биты 0–3 — ЛП, ПП, ЛЗ, ПЗ): волочатся
+      const style = cmd.style ?? 1; // «гибкость» пса: размах изгибов корпуса
       const sniff = cmd.sniff ?? 0;
       const crouch = cmd.crouch ?? 0;
       const air = cmd.air ?? null;
-      const f = Math.min(4.4, 1.7 + 0.75 * v); // шагов в секунду (полных циклов)
+      const duty = lerp(0.62, 0.4, smoothstep(0.3, 3.0, v));
+      // шагов в секунду (полных циклов); на большой скорости — не реже, чем нужно, чтобы шаг
+      // (v·duty/f) не упёрся в предел 0,55 м: иначе стопы скользят по земле
+      const f = Math.max(Math.min(4.4, 1.7 + 0.75 * v), (v * duty) / 0.53);
       phase = frac(phase + f * dt);
       const run = smoothstep(1.6, 3.0, v);
-      const duty = lerp(0.62, 0.4, smoothstep(0.3, 3.0, v));
-      const activity = clamp(Math.max(v, Math.abs(w) * 0.35) / 0.12, 0, 1);
+      const activity = clamp(Math.max(v, Math.abs(w) * 0.35, Math.abs(vs)) / 0.12, 0, 1);
       for (let i = 0; i < 4; i += 1) offsets[i] = lerp(TROT[i], GALLOP[i], run);
 
       // корпус
       const k = Math.min(1, dt * 60);
       jolt.vp += (-220 * jolt.p - 16 * jolt.vp) * dt;
       jolt.vr += (-220 * jolt.r - 16 * jolt.vr) * dt;
-      jolt.p += jolt.vp * dt;
-      jolt.r += jolt.vr * dt;
+      jolt.p = clamp(jolt.p + jolt.vp * dt, -JOLT_MAX, JOLT_MAX);
+      jolt.r = clamp(jolt.r + jolt.vr * dt, -JOLT_MAX, JOLT_MAX);
       const idle = 1 - activity;
       const breathe = Math.sin(time * Math.PI * 2 * 0.25);
       const trotBob = 0.012 * activity * (1 - run) * Math.cos(phase * Math.PI * 4);
@@ -140,16 +155,34 @@ export function createGait() {
       const groundMid = (gF + gR) / 2;
       let y = BODY_Y + groundMid - 0.025 * run - trotBob - gallopBob + 0.004 * breathe * idle - 0.045 * sniff - 0.13 * crouch;
       let pitch = slopePitch + 0.07 * run * Math.sin(phase * Math.PI * 2 - 0.6) - 0.24 * sniff + jolt.p + 0.02 * Math.sin(time * 5.3) * sniff;
-      let roll = slopeRoll + clamp(-0.12 * w * v, -0.18, 0.18) + 0.018 * Math.sin(time * Math.PI * 2 * 0.13) * idle + jolt.r;
+      // живость: корпус в такт шагу поворачивается и покачивается (рысью — с каждым шагом пары, на
+      // галопе — волной), в поворот закладывается, при увороте наклоняется в сторону рывка
+      // (Корпус — одно твёрдое тело: заметный поворот в такт шагу выглядел как «виляние задом».
+      // Поэтому покачивание — около градуса и только на бегу; живость — от поворотов, крена в
+      // поворот и уворотов.)
+      const sway = style * activity * smoothstep(1.2, 3.0, v);
+      let yaw = sway * 0.012 * Math.sin(phase * Math.PI * 4 + 0.4) + clamp(0.04 * w, -0.08, 0.08);
+      let roll = slopeRoll + clamp(-0.14 * w * v, -0.22, 0.22) + 0.018 * Math.sin(time * Math.PI * 2 * 0.13) * idle + jolt.r
+        + sway * 0.03 * Math.sin(phase * Math.PI * 4 + 1.2) * (1 - run) + clamp(-0.1 * vs, -0.15, 0.15);
       let x = 0.012 * Math.sin(time * Math.PI * 2 * 0.13) * idle;
+      if (broken) {
+        // хромает: корпус заваливается на перебитую сторону (передняя — ещё и нос вниз), ковыляет
+        for (let i = 0; i < 4; i += 1) {
+          if (!(broken & (1 << i))) continue;
+          roll += HIPS[i][0] < 0 ? 0.12 : -0.12;
+          if (i < 2) pitch -= 0.09;
+        }
+        y -= 0.035 * activity * Math.abs(Math.sin(phase * Math.PI * 2));
+      }
       if (air !== null) {
         // в полёте: нос вверх на взлёте, вниз к приземлению
         pitch += 0.22 * Math.cos(air * Math.PI);
         y = BODY_Y; // высоту в полёте задаёт robodog.js (вся группа летит)
       }
-      pose.y += (y - pose.y) * k;
-      pose.pitch += (pitch - pose.pitch) * k;
+      pose.y += (Math.max(y, groundMid + MIN_Y) - pose.y) * k;
+      pose.pitch += (clamp(pitch, -0.6, 0.6) - pose.pitch) * k;
       pose.roll += (roll - pose.roll) * k;
+      pose.yaw += (yaw - pose.yaw) * k;
       pose.x += (x - pose.x) * k;
 
       // ноги
@@ -170,7 +203,7 @@ export function createGait() {
           fy = hipY - lerp(0.24, 0.42, reach);
         } else {
           // скорость стопы относительно земли: вперёд + поворот (ω × r)
-          let sx = w * nz;
+          let sx = w * nz - vs;
           let sz = -v - w * nx;
           const stance = duty / f;
           sx *= stance;
@@ -193,11 +226,28 @@ export function createGait() {
           fz = nz + sz * s * activity;
           fy = ground(fx, fz) + FOOT_R + h;
         }
+        if (broken & (1 << i) && air === null) {
+          // перебитая нога: не шагает — стопа волочится сзади-сбоку по земле
+          fx = nx * 1.2;
+          fz = nz + (i < 2 ? 0.12 : 0.18);
+          fy = ground(fx, fz) + FOOT_R;
+        }
+        // удар лапой (стая, большие псы): cmd.paw = { leg, x, y, z, k } — стопа ноги leg тянется к
+        // точке (x, y, z) (система «стоп», единицы модели) с долей k
+        const paw = cmd.paw;
+        if (paw && paw.leg === i && paw.k > 0) {
+          fx = lerp(fx, paw.x, paw.k);
+          fy = lerp(fy, paw.y, paw.k);
+          fz = lerp(fz, paw.z, paw.k);
+        }
         feet[i][0] = fx;
         feet[i][1] = fy;
         feet[i][2] = fz;
         toBody(fx, fy, fz, local);
-        legIK(local[0] - hip[0], local[1] - hip[1], local[2] - hip[2], pose.legs[i]);
+        // стопа всегда ниже таза (кроме замаха лапой): иначе решение IK переворачивает колено
+        let ly = local[1] - hip[1];
+        if (!(paw && paw.leg === i && paw.k > 0) && ly > -0.12) ly = -0.12;
+        legIK(local[0] - hip[0], ly, local[2] - hip[2], pose.legs[i]);
       }
       return pose;
     },

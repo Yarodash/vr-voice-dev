@@ -79,7 +79,7 @@ export function createLaser({ THREE, root }) {
       beam.lookAt(muzzle.x + dir.x, muzzle.y + dir.y, muzzle.z + dir.z);
       beam.scale.set(1, 1, length);
       beam.visible = true;
-      dot.visible = landed;
+      dot.visible = false; // без точки на конце — только полоска луча (по просьбе пользователя)
       if (landed) {
         const back = Math.max(0, length - 0.01); // чуть к стрелку, чтобы точка не тонула в поверхности
         dot.position.set(muzzle.x + dir.x * back, muzzle.y + dir.y * back, muzzle.z + dir.z * back);

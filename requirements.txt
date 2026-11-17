@@ -3,6 +3,7 @@ pywinpty
 sounddevice
 numpy
 pycaw
+pyte
 cryptography
 pytest
 pytest-asyncio

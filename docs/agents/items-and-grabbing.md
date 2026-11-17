@@ -93,6 +93,8 @@ textTest.update({ hand, gripWorld, handPosition, gripDown, gripWasDown, gripMode
 ## Where to hook a new item
 
 - New weapon kind: [recipes.md](recipes.md#new-weapon-kind).
+- Gun from a generated picture/model (kind `'gen:<id>'`, registry `scene/generated-guns.js`,
+  placeholder → card → GLB, scope/trigger/modes): [recipes.md](recipes.md#сгенерированная-пушка).
 - New generic grabbable: self-contained module with an `update({...})` like text-test, called in
   the grip section of `update`, plus `!myThing.held` in the near-search guard and in `handBusy`
   of other items. See [recipes.md](recipes.md#new-grabbable-item).

@@ -16,6 +16,15 @@ Claude Code's own dictation types into its prompt -> the page reads the prompt b
 terminal stream (`draft.js`) -> on send the bridge queues the text for `/inbox` (phrases ending
 in «отмена» are dropped). The hidden Claude never executes anything.
 
+Timing details (`dictation.py`, `__main__.py`, `screen.py`):
+- `listening…` is detected on the **rendered** screen (pyte, `bridge/screen.py`), not the raw
+  stream: Claude Code repaints only changed cells, so the raw output carries e.g. "listning…".
+  Audio is held back until then (timeout 4 s), with 0.3 s of silence in front of the first words.
+- After every (re)start of the hidden Claude the bridge runs one silent priming dictation
+  (invisible to the page), then clears the prompt; a Y press during it simply takes it over.
+- The page treats the draft as final only when the voice state is idle, the screen no longer
+  shows `Transcribing…` and the text has not changed for 0.5 s (`isTranscribing` in `draft.js`).
+
 Config phrases: if the first word is «конфиг»/«конфик»/«config»/«конфигурация», the phrase skips
 `/inbox` (the main session never sees it; it is logged in `vr-inbox.log` as `[config agent] …`).
 `bridge/config_agent.py` runs a headless `claude -p --model haiku` in the project root, one phrase

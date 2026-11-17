@@ -9,7 +9,8 @@
 //   по координатам на стекле: сдвинул глаз — видна другая часть увеличенного мира, глубина как у окна.
 // - Виртуальная камера на каждый глаз: у объектива, смотрит туда, куда глаз смотрит сквозь середину
 //   стекла (ось прицела + смещение глаза / M), с углом обзора ровно под видимое из глаза стекло.
-//   Два глаза — две текстуры (EYES), шейдер выбирает ту, чей глаз ближе к рисуемому (стерео).
+//   Два глаза — две текстуры (EYES), шейдер выбирает ту, чей глаз ближе к рисуемому (стерео). Если
+//   стекло видят оба глаза (MONO), рисуется одна текстура на оба (см. update) — вдвое дешевле.
 //   Текстура хранит поворот своей камеры: если её рисовали кадр-два назад (издалека — реже,
 //   FAR_EVERY), картинка всё равно стоит на месте, только края могут подрезаться.
 // - Сетка (дуплекс или уголки ПСО) — на оси прицела (направление d = 0): при смещении глаза она
@@ -40,11 +41,15 @@ export const PUPIL_R = 0.014; // (не используется; оставле�
 export const PUPIL_FAR_FRAC = 0.8; // выходной зрачок издалека — такая доля радиуса стекла
 export const PUPIL_FAR_M = 0.45; // к этому расстоянию глаза (м) зрачок сжимается до PUPIL_FAR_FRAC
 // Смотреть надо вдоль оси прицела: угол глаза от оси, видимый из окуляра, к TILT_END_DEG — темно
-export const TILT_END_DEG = 14;
+export const TILT_END_DEG = 40; // (было 14: пользователю «чуть сдвинул голову — и всё чёрное»)
+// «Прощающая» оптика: смещение глаза вбок учитывается с этим множителем (1 — строго по физике).
+// Меньше — можно смотреть под бо́льшими углами, сетка остаётся на стекле, параллакс слабее.
+export const EYE_SHIFT = 0.35;
 export const MAX_VIEW_M = 3; // дальше — не рисуется
 export const VIEW_FADE_M = 0.3; // последние столько метров — плавно гаснет
 // Дешевле издалека: рисовать каждый N-й кадр — [до расстояния (м), N]
-export const FAR_EVERY = [[0.6, 1], [1.5, 2], [Infinity, 3]];
+// (в окуляр смотрят с ~0,07 м; дальше 0,25 м стекло в кадре уже маленькое — через кадр)
+export const FAR_EVERY = [[0.25, 1], [0.6, 2], [1.5, 3], [Infinity, 4]];
 export const FIELD_FILL = 1.12; // видимый круг поля шире, чем tanApparent (1 — строгий)
 export const VIGNETTE_START = 0.62; // с какой доли радиуса поля начинается затемнение
 export const VIGNETTE_DARK = 0.5; // яркость на самом краю поля
@@ -52,6 +57,7 @@ export const CHROMA = 0.012; // хроматическая аберрация н
 export const SIZE = 512; // текстура изображения (на глаз), пикселей по стороне
 export const SAMPLES = 4; // MSAA текстуры
 export const EYES = 2; // текстур (глаз) на прицел
+export const MONO = true; // оба глаза видят стекло — одна текстура на оба (см. update)
 const COVER = 1.15; // запас угла камеры сверх видимого стекла
 const LOG_EVERY_MS = 5000;
 
@@ -112,14 +118,14 @@ const fragmentShader = /* glsl */ `
   }
 
   void main() {
-    vec3 E = vEye;
+    vec3 E = vec3(vEye.xy * EYE_SHIFT, vEye.z); // смещение глаза вбок — с множителем EYE_SHIFT
     float ez = max(E.z, 1e-3);
     vec2 tanD = (vPos - E.xy) / ez;               // направление глаз → точка стекла
     vec2 q = tanD / tanA;                         // в долях поля; сетка — в q = 0 (ось прицела)
     float r = length(q);
     vec2 tv = E.xy / ez;                          // угол глаза от оси
     float tilt = length(tv);
-    bool b = distance(E, eye1) < distance(E, eye0); // текстура ближайшего глаза
+    bool b = distance(vEye, eye1) < distance(vEye, eye0); // текстура ближайшего глаза
 
     // изображение «на бесконечности»: мировое направление tanD / M
     float ca = CHROMA * r * r;
@@ -222,6 +228,7 @@ export function createScopeLens({
       PUPIL_FAR_FRAC: PUPIL_FAR_FRAC.toFixed(4),
       PUPIL_FAR_M: PUPIL_FAR_M.toFixed(4),
       TILT_END: Math.tan((TILT_END_DEG * Math.PI) / 180).toFixed(4),
+      EYE_SHIFT: EYE_SHIFT.toFixed(4),
       VIGNETTE_START: VIGNETTE_START.toFixed(3),
       VIGNETTE_DARK: VIGNETTE_DARK.toFixed(3),
       CHROMA: CHROMA.toFixed(4),
@@ -250,6 +257,7 @@ export function createScopeLens({
   const noop = () => {};
   let frame = 0;
   let wasLive = false;
+  let wasBoth = false;
   let lastDist = Infinity;
   let statN = 0, statSum = 0, statMax = 0, statCalls = 0, statTris = 0, statAt = performance.now();
   const tiltEnd = Math.tan((TILT_END_DEG * Math.PI) / 180);
@@ -267,7 +275,7 @@ export function createScopeLens({
     if (ez < 0.005) return 0;
     const dist = out.length();
     if (dist > MAX_VIEW_M) return 0;
-    if (Math.hypot(out.x, out.y) / ez >= tiltEnd) return 0;
+    if ((Math.hypot(out.x, out.y) * EYE_SHIFT) / ez >= tiltEnd) return 0;
     lastDist = Math.min(lastDist, dist);
     return 1 - smooth(MAX_VIEW_M - VIEW_FADE_M, MAX_VIEW_M, dist);
   };
@@ -280,17 +288,24 @@ export function createScopeLens({
     return frustum.intersectsSphere(lensSphere);
   };
 
-  // Нарисовать текстуру глаза i: глаз (система окуляра) eyeL
-  const renderEye = (i, eyeL, hideObject) => {
+  // куда глаз (система окуляра) смотрит сквозь середину стекла — в мире это угол / M (как в шейдере),
+  // и половина угла камеры под видимое из глаза стекло (с запасом, не шире двойного поля): в out.x/y/z
+  const aimOf = (eyeL, out) => {
+    const ez = Math.max(eyeL.z, 0.01);
+    return out.set((-eyeL.x * EYE_SHIFT) / ez / mag, (-eyeL.y * EYE_SHIFT) / ez / mag,
+      Math.max(1e-4, Math.min((COVER * lensR) / ez / mag, (2 * tanApparent) / mag)));
+  };
+  const aimA = new THREE.Vector3();
+  const aimB = new THREE.Vector3();
+  const eyeMid = new THREE.Vector3();
+
+  // Нарисовать текстуру i: глаз (система окуляра) eyeL; aim — (cx, cy, h) камеры, по умолчанию — под этот глаз
+  const renderEye = (i, eyeL, hideObject, aim = aimOf(eyeL, aimA)) => {
     const t0 = performance.now();
     const v = views[i];
-    const ez = Math.max(eyeL.z, 0.01);
-    // куда глаз смотрит сквозь середину стекла — в мире это угол / M
-    const cx = -eyeL.x / ez / mag, cy = -eyeL.y / ez / mag;
+    const cx = aim.x, cy = aim.y, h = aim.z;
     dir.set(cx, cy, -1).normalize();
     turn.setFromUnitVectors(back, dir);
-    // угол камеры — под стекло, видимое из глаза (с запасом), не шире двойного поля
-    const h = Math.max(1e-4, Math.min((COVER * lensR) / ez / mag, (2 * tanApparent) / mag));
     objective.updateWorldMatrix(true, false);
     objective.getWorldPosition(scopeCamera.position);
     eyepiece.getWorldQuaternion(lensQuat);
@@ -410,14 +425,27 @@ export function createScopeLens({
       if (live) {
         frame += 1;
         let every = 1;
-        for (const [upTo, n] of FAR_EVERY) if (lastDist <= upTo) { every = n; break; }
-        const now = !wasLive || frame % every === 0;
-        for (let i = 0; i < EYES; i += 1) {
-          if (seen[i].fade > 0 && now) renderEye(i, seen[i].local, hideObject);
+        for (let k = 0; k < FAR_EVERY.length; k += 1) if (lastDist <= FAR_EVERY[k][0]) { every = FAR_EVERY[k][1]; break; }
+        // Оба глаза видят стекло — ОДНА текстура на оба (MONO): камера смотрит между направлениями
+        // глаз, угол — с запасом на оба. Изображение «на бесконечности» от положения глаза не зависит
+        // (камера одна и та же, у объектива), различались только направление и угол — так что глазам
+        // видна та же картинка, а проход по сцене — один вместо двух (~1,2 мс CPU на Quest каждый).
+        // Цена: угол камеры шире на разницу направлений глаз (~25 %), пикселей на градус меньше.
+        const both = MONO && seen[0].fade > 0 && seen[1].fade > 0;
+        const now = !wasLive || both !== wasBoth || frame % every === 0;
+        if (now && both) {
+          const a = aimOf(seen[0].local, aimA);
+          const b = aimOf(seen[1].local, aimB);
+          const dx = Math.abs(a.x - b.x) / 2, dy = Math.abs(a.y - b.y) / 2;
+          a.set((a.x + b.x) / 2, (a.y + b.y) / 2, Math.max(a.z, b.z) + Math.max(dx, dy));
+          renderEye(0, eyeMid.addVectors(seen[0].local, seen[1].local).multiplyScalar(0.5), hideObject, a);
+        } else if (now) {
+          for (let i = 0; i < EYES; i += 1) if (seen[i].fade > 0) renderEye(i, seen[i].local, hideObject);
         }
-        // глаз не видит стекло — его слот берёт текстуру другого
-        const a = seen[0].fade > 0 ? 0 : 1;
-        const b = seen[1].fade > 0 ? 1 : 0;
+        wasBoth = both;
+        // MONO — оба слота с текстурой 0; глаз не видит стекло — его слот берёт текстуру другого
+        const a = both || seen[0].fade > 0 ? 0 : 1;
+        const b = both ? 0 : seen[1].fade > 0 ? 1 : 0;
         bindEye(0, a);
         bindEye(1, b);
       }

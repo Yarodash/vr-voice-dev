@@ -48,7 +48,8 @@ Current tree:
 - common: if `features.targets`: `Мишени ▸ {Физика мишеней: вкл/выкл (keepOpen), Обводка
   прицела: вкл/выкл (keepOpen), [Сбросить счёт if features.score]}`; `Сцены ▸ {<name> ▸
   {Продолжить, Рестарт}…, Сохранить как новую, Очистить всё}`; `Настройки ▸ {Отцентрировать,
-  Расстояние между глазами, Время: ×N (keepOpen), Инерция: вкл/выкл (keepOpen, inertia.js)}`.
+  Расстояние между глазами, Время: ×N (keepOpen), Инерция: вкл/выкл (keepOpen, inertia.js), …,
+  Тряска: вкл/сильно/выкл (keepOpen, cycles; shake.js, `scene.shake`)}`.
 
 ## onMenu dispatch (scene/main.js)
 

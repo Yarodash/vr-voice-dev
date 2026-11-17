@@ -14,15 +14,20 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ControlMap } from './controls-map.js';
 import { HUD_CONFIG } from './hud.js';
+import { FIRE_MODE_PREFIX, DOGS_MENU } from './menu.js';
 import { buildMenu, SCENES_MENU, SAVE_NEW, CLEAR_ALL, SCENE_CONTINUE, SCENE_RESTART, RESET_SCORE, CAR_ENTER, CAR_EXIT } from './menu.js';
 import { EMPTY_FEATURES, freshOf, loadCompositions, migrateCarScene, migrateHordeScenes, nextName, readActive, saveCompositions, snapshot, storeCarPose, storeLive, writeActive } from './compositions.js';
 import { createCar } from './car.js';
 import { createRobodog } from './robodog.js';
 import { createHorde } from './robodog-horde.js';
+import { createDrones } from './drones.js';
+import { createArtillery } from './artillery.js';
 import { createCarDrive } from './car-drive.js';
 import { createScore } from './score.js';
 import { createCasings } from './casings.js';
 import { createPistols } from './pistols.js';
+import { GENERATED_GUNS, genKind, genKindByLabel, genGunParams, genEntry } from './generated-guns.js';
+import { genGunDebug } from './generated-gun.js';
 import { ensureWeaponEnv } from './weapon-env.js';
 import { createSound, SOUND_VERSION } from './sound.js';
 import { createShooting } from './shooting.js';
@@ -34,9 +39,12 @@ import { createFps } from './fps.js';
 import { createLaser } from './laser.js';
 import { createLaserPanel } from './laser-panel.js';
 import { createIpd } from './ipd-panel.js';
+import { createShake } from './shake.js';
 import { createScopeLens } from './scope-lens.js';
 import { createScopeDebug, SCOPE_DEBUG_REACH_M } from './scope-debug.js';
 import { createInertia } from './inertia.js';
+import { createTower } from './tower.js';
+import { createWorldClock } from './world-clock.js';
 
 const GRIP_BUTTON = 1; // xr-standard gamepad: хват
 const TRIGGER_BUTTON = 0; // курок
@@ -49,6 +57,9 @@ export function setup(ctx) {
   // сценовые часы (мс): идут с замедлением времени; переживают подмену сцены. Читают и другие файлы
   shared.sceneNowMs ??= performance.now();
   const sceneNow = () => shared.sceneNowMs;
+  // мир — по сценовым часам подшагами, игрок — по реальному времени (world-clock.js)
+  const worldClock = createWorldClock(shared);
+  shared.worldClock = worldClock.state; // ручка для npm run vr:eval
   const SHOW_AXES = false; // нарисовать оси (красная, зелёная, синяя) на джойстике
 
   // Режим хвата (пункт меню, запоминается): 'toggle' — нажал хват, пистолет взят, нажал ещё раз —
@@ -83,6 +94,11 @@ export function setup(ctx) {
     shared.inertia = false;
   }
   try {
+    shared.tracersOff = localStorage.getItem('scene.tracers') === 'off'; // «Трассеры», по умолчанию вкл
+  } catch {
+    shared.tracersOff = false;
+  }
+  try {
     shared.prone = localStorage.getItem('scene.prone') === 'on'; // «Режим лёжа», по умолчанию выкл
   } catch {
     shared.prone = false;
@@ -107,6 +123,7 @@ export function setup(ctx) {
         // без хранилища не переживёт перезагрузку
       }
     }
+    tower.afterRecenter(); // на вышке: вышка под голову, rig снова на её высоту (tower.js; с «Режимом лёжа» — лёжа на площадке)
   };
   // Сцены (compositions.js): активная задаёт, что есть в мире и в меню (features); список — для «Сцены ▸»
   let active = readActive(shared);
@@ -131,9 +148,16 @@ export function setup(ctx) {
     scopeDebug: Boolean(shared.scopeDebug), // «Отладка прицела: вкл/выкл» (у АВП в руке)
     inertia: Boolean(shared.inertia), // «Инерция: вкл/выкл» (Настройки)
     prone: Boolean(shared.prone), // «Режим лёжа: вкл/выкл» (Настройки)
+    fireMode: heldKind && GUNS[heldKind]?.auto ? 'auto' : 'semi', // «Режим: авто / полуавтомат» (generated-guns.js modes)
+    tracersOff: Boolean(shared.tracersOff), // «Трассеры: вкл/выкл» (Настройки; effects.js)
+    shake: shared.shakeLevel ?? 1, // «Тряска: вкл / сильно / выкл» (Настройки; shake.js)
+    allies: active.features.robodogHorde ? shared.allies !== false : null, // «Собаки ▸ Союзники» (robodog-horde.js)
+    drones: active.features.robodogHorde ? shared.drones !== false : null, // «Собаки ▸ Квадрокоптеры» (drones.js)
+    artillery: active.features.robodogHorde ? shared.artillery !== false : null, // «Собаки ▸ Артиллерия» (artillery.js)
+    tower: Boolean(shared.towerOn), // «Вышка: вкл/выкл» (tower.js)
   });
   ctx.setMenu?.(buildMenu(menuState())); // меню (menu.js): меняется на лету
-  ctx.setMapper?.(new ControlMap()); // какая кнопка что делает (controls-map.js): тоже на лету
+  ctx.setMapper?.(new ControlMap(() => ctx.menuOpen?.())); // какая кнопка что делает (controls-map.js): тоже на лету
   ctx.setHud?.(HUD_CONFIG); // окна сообщений и кружок-индикатор (hud.js): тоже на лету
 
   const world = createWorld({ THREE, scene, root, camera, renderer });
@@ -142,6 +166,9 @@ export function setup(ctx) {
   // scene.onBeforeRender), в dispose — до fps
   const ipd = createIpd({ THREE, renderer, scene, camera, root, shared });
   shared.ipd = ipd; // ручка для npm run vr:eval
+  // тряска от выстрелов (shake.js): тоже оборачивает scene.onBeforeRender/onAfterRender — после ipd,
+  // в dispose — до ipd; shared.screenShake(сила, dir) — для других систем
+  const shake = createShake({ THREE, scene, camera, shared });
   // доска теста чёткости текста (text-test.js) спрятана: выбор сделан (вариант 3 → окна сообщений);
   // чтобы вернуть — createTextTest({ THREE, root, camera, renderer, shared }) из ./text-test.js
   const textTest = { held: false, update() {}, dispose() {} };
@@ -198,6 +225,23 @@ export function setup(ctx) {
     }
   }
   const scopeTilts = { awp: 0, ak2: 0 }; // каждый кадр → pistols.updateLenses
+  // сгенерированные пушки с прицелом (generated-guns.js scope): свой наклон scene.gen.<id>.scopeTilt
+  const genTilts = []; // [[kind, prop]]
+  for (const g of GENERATED_GUNS) {
+    if (!g.scope) continue;
+    const kind = genKind(g.id);
+    const prop = `genScopeTilt:${g.id}`;
+    SCOPE_TILT[kind] = [prop, `scene.gen.${g.id}.scopeTilt`];
+    if (typeof shared[prop] !== 'number') {
+      try {
+        const saved = Number.parseFloat(localStorage.getItem(SCOPE_TILT[kind][1]));
+        shared[prop] = Number.isFinite(saved) ? saved : 0;
+      } catch {
+        shared[prop] = 0;
+      }
+    }
+    genTilts.push([kind, prop]);
+  }
   shared.awpScopeY = 0; // прежний подъём по высоте отменён
   try { localStorage.removeItem('scene.awp.scopeY'); } catch { /* нет хранилища */ }
   let scopeSliding = false;
@@ -242,6 +286,9 @@ export function setup(ctx) {
   // каждого вида оружия (все пистолеты — одно, все калаши — другое) и сохраняется; пока его нет,
   // оружие садится осями на оси джойстика.
   const CALIB_KEYS = { pistol: 'scene.pistol.calib', ak: 'scene.ak.calib', awp: 'scene.awp.calib', ak2: 'scene.ak.calib' }; // «Калаш 2.0» сидит в руке как калаш
+  // сгенерированные пушки (generated-guns.js): своя посадка, а пока её нет — как у калаша (длинные)
+  // или пистолета (короткие)
+  for (const g of GENERATED_GUNS) CALIB_KEYS[genKind(g.id)] = g.calib ?? `scene.gen.${g.id}.calib`;
   const calibs = {};
   for (const [kind, key] of Object.entries(CALIB_KEYS)) {
     try {
@@ -251,6 +298,7 @@ export function setup(ctx) {
       // нет сохранённого положения: оси на оси
     }
   }
+  for (const g of GENERATED_GUNS) calibs[genKind(g.id)] ??= calibs[(g.length ?? 0) >= 0.45 ? 'ak' : 'pistol'];
 
   const held = new THREE.Matrix4(); // положение пистолета в руке относительно руки
   const heldToArray = () => held.toArray();
@@ -415,6 +463,23 @@ export function setup(ctx) {
     pistols.save(heldItem, held.toArray(), true);
   };
 
+  // spawnOnAdd (generated-guns.js): новая запись сама кладёт одну пушку перед игроком — боком,
+  // стволом вправо, ~0,55 м перед головой — один раз на id+v (localStorage scene.gen.spawned.<id>.<v>)
+  for (const g of GENERATED_GUNS) {
+    if (!g.spawnOnAdd) continue;
+    const key = `scene.gen.spawned.${g.id}.${g.v ?? 1}`;
+    try {
+      if (localStorage.getItem(key)) continue;
+      localStorage.setItem(key, '1');
+    } catch {
+      continue; // без хранилища — не спавнить на каждой подмене
+    }
+    const item = pistols.add(null, genKind(g.id));
+    putInFrontOfPlayer(item);
+    item.group.rotation.y -= Math.PI / 2; // боком: картинкой к игроку, стволом вправо
+    pistols.save(heldItem, held.toArray(), true);
+  }
+
   const releasePistol = (source) => {
     releasedItem = heldItem;
     heldItem = null;
@@ -451,9 +516,40 @@ export function setup(ctx) {
     awp: { gapMs: 170, auto: false, kickMs: 220, kickRad: 0.13, kickBackM: 0.035, climbRad: 0, buzz: 1, buzzMs: 110, range: 400, big: 1.9, speed: 900 },
   };
   GUNS.ak2 = GUNS.ak; // «Калаш 2.0» стреляет как калаш
+  for (const g of GENERATED_GUNS) GUNS[genKind(g.id)] = genGunParams(g); // шаблон GUN_AUTO/GUN_SEMI + поля записи
   const CLIMB_MAX_RAD = 0.2; // больше ствол от очереди не задирается
   const CLIMB_RECOVER = 4; // 1/с: как быстро задранный ствол возвращается
-  let lastShotAt = -1e9;
+  let lastShotAt = -1e9; // реальное время последнего выстрела (отдача, вспышка)
+  let lastShotGame = -1e9; // игровое (shared.sceneNowMs) — для темпа стрельбы
+  // ---- заряд (gun.charge = { minS, maxS }, Космо-снайперка): курок держат — копится (РЕАЛЬНОЕ время,
+  // рука не ускоряется), отпустили — выстрел силы 0..1 (shot.charge). Пока копится — растущая дыра у
+  // дула и вой (shooting.chargeFx → blackhole.js), дрожь в руке крепнет; полный — толчок.
+  let chargeS = -1; // < 0 — не копится
+  let chargeBuzzIn = 0;
+  let fireCharge = 0;
+  const chargeStep = (source, gun, down, realDt) => {
+    const c = gun.charge;
+    if (down && chargeS < 0 && shared.sceneNowMs - lastShotGame >= gun.gapMs) {
+      chargeS = 0;
+      chargeBuzzIn = 0;
+    }
+    if (chargeS < 0) return;
+    const level = Math.min(1, Math.max(0, (chargeS - (c.minS ?? 0.3)) / Math.max(0.1, (c.maxS ?? 3) - (c.minS ?? 0.3))));
+    if (!down) {
+      chargeS = -1;
+      shooting.chargeFx?.(null);
+      fireCharge = level;
+      fire(source);
+      fireCharge = 0;
+      return;
+    }
+    chargeS += realDt;
+    if (shooting.chargeFx?.(heldItem, level, chargeS)) buzz(source, 1, 140); // полный заряд
+    else if ((chargeBuzzIn -= realDt) <= 0) {
+      chargeBuzzIn = 0.09;
+      buzz(source, 0.1 + 0.55 * level * level, 110);
+    }
+  };
   let lastGun = GUNS.pistol;
   let climb = 0; // накопленный подъём ствола, рад
   let climbYaw = 0; // и чуть вбок
@@ -509,6 +605,7 @@ export function setup(ctx) {
 
   // затвор дошёл назад: гильза вылетает из окна выброса (с учётом отката затвора)
   const ejectCasing = (item) => {
+    if (GUNS[item.kind]?.projectile) return; // мана, чёрная дыра — без гильз
     item.group.updateWorldMatrix(true, false);
     ejectWorld.copy(item.ejector);
     if (item.slide) ejectWorld.z += item.slide.travel;
@@ -517,23 +614,28 @@ export function setup(ctx) {
     up.set(0, 1, 0).transformDirection(item.group.matrixWorld);
     barrel.set(0, 0, -1).transformDirection(item.group.matrixWorld);
     if (item.kind === 'awp') casings.eject(ejectWorld, right, up, barrel, 1.5, 2.4); // .338: толстая и длинная
-    else casings.eject(ejectWorld, right, up, barrel, item.kind === 'ak' || item.kind === 'ak2');
+    else casings.eject(ejectWorld, right, up, barrel, item.kind === 'ak' || item.kind === 'ak2' || Boolean(GUNS[item.kind]?.rifleCasing));
   };
 
   const fire = (source) => {
-    const now = sceneNow();
+    // Темп стрельбы — по ИГРОВОМУ времени (пользователь: «скорострельность должна соответствовать
+    // скорости игры»): на ×4 калаш стреляет вчетверо чаще (но не больше раза за кадр), на ×0,25 — реже.
+    // Отдача, вспышка, затвор — по реальному (lastShotAt), рука игрока не ускоряется.
+    const now = performance.now();
+    const gameNow = shared.sceneNowMs;
     if (!heldItem) return;
     const gun = GUNS[heldItem.kind] ?? GUNS.pistol;
-    if (now - lastShotAt < gun.gapMs) return;
+    if (gameNow - lastShotGame < gun.gapMs) return;
     // очередь идёт ровно в темпе, а не «как получилось по кадрам»
-    lastShotAt = gun.auto && now - lastShotAt < gun.gapMs * 2 ? lastShotAt + gun.gapMs : now;
+    lastShotGame = gun.auto && gameNow - lastShotGame < gun.gapMs * 2 ? lastShotGame + gun.gapMs : gameNow;
+    lastShotAt = now;
     lastGun = gun;
     if (gun.climbRad) {
       climb = Math.min(CLIMB_MAX_RAD, climb + gun.climbRad * (0.8 + Math.random() * 0.4));
       climbYaw = THREE.MathUtils.clamp(climbYaw + (Math.random() - 0.45) * gun.climbRad * 0.5, -0.06, 0.06);
     }
-    shared.sound?.setWeapon?.(heldItem.kind === 'ak2' ? 'ak' : heldItem.kind); // shooting.shoot звучит выбранным оружием
-    shared.shotKind = heldItem.kind; // калибр для целей (робопсы: как сильно отбрасывает и звенит)
+    shared.sound?.setWeapon?.(gun.sound ?? (heldItem.kind === 'ak2' ? 'ak' : heldItem.kind)); // shooting.shoot звучит выбранным оружием
+    shared.shotKind = gun.shotKind ?? heldItem.kind; // калибр для целей (робопсы: как сильно отбрасывает и звенит)
     const { group } = heldItem;
     group.updateWorldMatrix(true, false);
     muzzleWorld.copy(heldItem.muzzle).applyMatrix4(group.matrixWorld);
@@ -558,12 +660,18 @@ export function setup(ctx) {
       if (scored && hit !== null) score.shot(hit); // попал в мишень, тарелку или робопса — очки, иначе −20
       if (hit && source) buzz(source, 0.95, 50); // попадание отдаётся в руку, когда пуля долетела
     };
-    const shot = { speed: gun.speed, onResult };
+    // projectile: 'mana' — мана-снаряд (mana.js): своя вспышка и попадание, без гильзы и дыма
+    const shot = { speed: gun.speed, onResult, projectile: gun.projectile ?? null, color: gun.projectileColor ?? null, gravity: gun.gravity ?? null };
     if (gun.big) shot.big = true;
-    else Object.assign(shot, { ejector: ejectWorld, right, up });
-    shooting.shoot(muzzleWorld, barrel, shot);
+    else if (!gun.projectile) Object.assign(shot, { ejector: ejectWorld, right, up });
+    // автонаводка (gun.autoAim°): пуля — в лучшую цель конуса, с поправкой на падение (shooting.js);
+    // с gun.homing — вылетает вдоль ствола и доворачивает к цели по дуге (самонаведение)
+    if (gun.homing && gun.autoAim > 0) Object.assign(shot, { homing: gun.homing, autoAimDeg: gun.autoAim });
+    if (gun.charge) shot.charge = fireCharge; // сила заряда 0..1 (chargeStep)
+    shooting.shoot(muzzleWorld, (!shot.homing && gun.autoAim > 0 && shooting.autoAim?.(muzzleWorld, barrel, gun.autoAim, gun.speed, shot.gravity, shot.projectile)) || barrel, shot);
     buzz(source, gun.buzz, gun.buzzMs ?? 60);
-    if (heldItem.kind === 'ak' || heldItem.kind === 'ak2' || gun.big) {
+    shake.kick(heldItem.kind, gun); // лёгкий толчок вида (shake.js)
+    if ((heldItem.kind === 'ak' || heldItem.kind === 'ak2' || gun.big || gun.flash) && !gun.projectile) {
       const big = gun.big ?? 1; // AWP: вспышка крупнее и дольше
       flash.until = now + 45 * (big > 1 ? 1.6 : 1);
       flash.mesh.userData.item = heldItem;
@@ -572,8 +680,12 @@ export function setup(ctx) {
     }
   };
 
-  // ручка для npm run vr:eval: выстрелить из оружия номер index (как будто оно в руке) или убрать его
+  // ручка для npm run vr:eval: выстрелить из оружия номер index (как будто оно в руке) или убрать его;
+  // spawn(kind) — как пункт меню; gen() — что разобрано из картинок сгенерированных пушек
   shared.weaponDebug = {
+    spawn: (kind) => spawnWeapon(kind),
+    items: () => pistols.items,
+    gen: () => genGunDebug(),
     fire(index) {
       const keep = heldItem;
       heldItem = pistols.items[index] ?? null;
@@ -618,10 +730,19 @@ export function setup(ctx) {
     onPlayerHit: () => buzz(padSource, 1, 250),
   });
   shared.horde = horde; // ручка для npm run vr:eval (horde.debug.info())
+  // квадрокоптеры с пулемётами (drones.js) — в той же битве («robodogHorde»), «Собаки ▸ Квадрокоптеры»
+  const drones = createDrones({ THREE, root, camera, renderer, shooting, horde });
+  shared.droneSystem = drones; // ручка для npm run vr:eval (droneSystem.debug.info())
+  // артиллерия (artillery.js) — в той же битве («robodogHorde»), «Собаки ▸ Артиллерия»; ручка shared.artillerySystem
+  const artillery = createArtillery({ THREE, root, camera, horde });
+  // вышка (tower.js): «Вышка: вкл/выкл» — игрок на площадке TOWER_H м, shared.playerElevation для стаи
+  const tower = createTower({ THREE, root, camera, shared });
   const applyScene = (data, features) => {
     applyCar(data, features);
     robodog.apply(features.robodog, data?.robodog);
     horde.apply(features.robodogHorde); // «Рестарт» и «Продолжить» — стая заново
+    drones.apply(features.robodogHorde); // и квадрокоптеры
+    artillery.apply(features.robodogHorde); // и артиллерия
     heldItem = recalibratingItem = nearItem = releasedItem = null;
     heldClay = nearClay = null;
     for (const item of [...pistols.items]) pistols.remove(item);
@@ -705,12 +826,14 @@ export function setup(ctx) {
     // робопёс: после подмены файла сцены — где был; после перезагрузки — жив/мёртв из live
     robodog.apply(active.features.robodog, (entry?.live ?? entry?.data)?.robodog, { keep: true });
     horde.apply(active.features.robodogHorde, { keep: true });
+    drones.apply(active.features.robodogHorde, { keep: true });
+    artillery.apply(active.features.robodogHorde);
   }
 
   // вспышка калаша — у дула того, кто стрелял (положение — после отдачи этого кадра)
   const placeFlash = () => {
     const item = flash.mesh.userData.item;
-    const visible = sceneNow() < flash.until && item && pistols.items.includes(item);
+    const visible = performance.now() < flash.until && item && pistols.items.includes(item);
     flash.mesh.visible = Boolean(visible);
     if (!visible) return;
     item.group.updateWorldMatrix(true, false);
@@ -734,6 +857,44 @@ export function setup(ctx) {
   return {
     // Выбран пункт радиального меню: { path, label }
     onMenu(picked) {
+      if (picked.label.startsWith('Вышка:')) {
+        tower.toggle(); // rig вверх/вниз на высоту вышки (tower.js)
+        menuKey = null;
+        return;
+      }
+      if (picked.label.startsWith('Артиллерия:')) {
+        // «Собаки ▸ Артиллерия: вкл/выкл» — artillery.js сам читает shared.artillery
+        shared.artillery = shared.artillery === false;
+        try {
+          localStorage.setItem('scene.artillery', shared.artillery ? 'on' : 'off');
+        } catch {
+          // не сохранится — не беда
+        }
+        menuKey = null;
+        return;
+      }
+      if (picked.label.startsWith('Квадрокоптеры:')) {
+        // «Собаки ▸ Квадрокоптеры: вкл/выкл» — drones.js сам читает shared.drones
+        shared.drones = shared.drones === false;
+        try {
+          localStorage.setItem('scene.drones', shared.drones ? 'on' : 'off');
+        } catch {
+          // не сохранится — не беда
+        }
+        menuKey = null;
+        return;
+      }
+      if (picked.path?.[0] === DOGS_MENU) {
+        // «Собаки ▸ Союзники: вкл/выкл» — стая сама читает shared.allies (robodog-horde.js)
+        shared.allies = shared.allies === false;
+        try {
+          localStorage.setItem('scene.allies', shared.allies ? 'on' : 'off');
+        } catch {
+          // не сохранится — не беда
+        }
+        menuKey = null;
+        return;
+      }
       if (picked.path?.[0] === SCENES_MENU) {
         if (picked.label === SAVE_NEW) console.log(`[scenes] сохранена: ${scenes.saveNew()}`);
         else if (picked.label === CLEAR_ALL) scenes.clear();
@@ -756,12 +917,23 @@ export function setup(ctx) {
         spawnWeapon('ak2');
       } else if (picked.label === 'Заспавнить АВП') {
         spawnWeapon('awp');
+      } else if (genKindByLabel(picked.label)) {
+        spawnWeapon(genKindByLabel(picked.label)); // «Заспавнить <name>» (generated-guns.js)
       } else if (picked.label === 'Заспавнить тарелку') {
         spawnClay();
 
       } else if (picked.label === 'Удалить тарелку' && heldClay) {
         clays.remove(heldClay);
         heldClay = null;
+      } else if (picked.label.startsWith(FIRE_MODE_PREFIX) && heldItem && genEntry(heldItem.kind)) {
+        // режим огня сгенерированной пушки: очередь ↔ по выстрелу на нажатие (темп тот же)
+        const gun = GUNS[heldItem.kind];
+        gun.auto = !gun.auto;
+        try {
+          localStorage.setItem(`scene.gen.${genEntry(heldItem.kind).id}.mode`, gun.auto ? 'auto' : 'semi');
+        } catch {
+          // без хранилища не переживёт перезагрузку
+        }
       } else if (picked.label.startsWith('Хват:')) {
         gripMode = gripMode === 'toggle' ? 'hold' : 'toggle';
         try {
@@ -805,12 +977,24 @@ export function setup(ctx) {
         }
       } else if (picked.label.startsWith('Время:')) {
         // замедление времени: 1 → 0,5 → 0,25 → 1 (живёт до перезагрузки страницы)
-        const next = { 1: 0.5, 0.5: 0.25, 0.25: 1 };
+        // ×1 → ×2 → … → ×64 (ускорение) → ×0,25 → ×0,5 (замедление) → ×1
+        const next = { 1: 2, 2: 4, 4: 8, 8: 16, 16: 32, 32: 64, 64: 0.25, 0.25: 0.5, 0.5: 1 };
         shared.timeScale = next[shared.timeScale ?? 1] ?? 1;
         console.log(`[time] ×${shared.timeScale}`);
       } else if (picked.label === 'Отцентрировать') {
         recenterPlayer(); // в «Режиме лёжа» — глаза в ~35 см над землёй
         if (carDrive.seated) carDrive.enter(); // за рулём: голова снова на месте водителя
+      } else if (picked.label.startsWith('Тряска:')) {
+        shake.cycle(); // вкл → сильно → выкл → вкл (localStorage 'scene.shake')
+        menuKey = null;
+      } else if (picked.label.startsWith('Трассеры:')) {
+        shared.tracersOff = !shared.tracersOff; // effects.tracer() не запускает трассер
+        try {
+          localStorage.setItem('scene.tracers', shared.tracersOff ? 'off' : 'on');
+        } catch {
+          // без хранилища не переживёт перезагрузку
+        }
+        menuKey = null;
       } else if (picked.label.startsWith('Режим лёжа:')) {
         // переключение сразу центрирует: лёг и включил — уже лежишь на земле; выключил — снова стоишь
         shared.prone = !shared.prone;
@@ -830,9 +1014,11 @@ export function setup(ctx) {
         deleteHeld();
       }
     },
-    update(dt) {
-      dt *= shared.timeScale ?? 1; // замедление времени (пункт «Время» в «Настройках»)
-      shared.sceneNowMs += dt * 1000; // сценовые часы
+    update(realDt) {
+      // время мира («Настройки ▸ Время»): dt — сколько мира прожито за кадр (сценовые часы уже сдвинуты),
+      // мир шагает подшагами clock.sub × clock.n; рука, оружие в руке, HUD — по realDt (world-clock.js)
+      const clock = worldClock.begin(realDt);
+      const dt = clock.total;
       fps.beginFrame(); // отсюда до конца renderer.render — цена кадра на CPU (см. fps.js)
       world.update(dt);
       shared.sound?.update?.(camera); // слушатель 3D-звука = голова
@@ -858,7 +1044,7 @@ export function setup(ctx) {
       const panelBusy = ipd.busy();
       const menuOrPanel = menuNow || menuWasOpen || panelBusy || laserPanel.busy();
       // машина: педали и руль, игрок за рулём едет с ней — до руки и оружия, чтобы они не отставали
-      carDrive.update(dt, source, menuOrPanel);
+      for (let i = 0; i < clock.n; i += 1) carDrive.update(clock.sub, source, menuOrPanel);
       // пока открыто меню (и в кадр, когда хват его закрыл) или игрок за рулём (хват и курок — педали),
       // оружие не берётся и не отпускается
       const menuIsOpen = menuOrPanel || carDrive.seated;
@@ -875,7 +1061,7 @@ export function setup(ctx) {
         handPosition.setFromMatrixPosition(gripWorld);
         // «Инерция» (inertia.js): дальше gripWorld — поза без дрожи (оружие, прицел, выстрел, тарелка в
         // руке, панели); handPosition остаётся сырым (поиск рядом, бросок тарелки). dt — реальный
-        if (shared.inertia) inertia.apply(hand, gripWorld, dt / (shared.timeScale ?? 1), Boolean(heldItem?.scope)); // с прицелом — сильнее
+        if (shared.inertia) inertia.apply(hand, gripWorld, realDt, Boolean(heldItem?.scope)); // с прицелом — сильнее
         else inertia.reset();
 
         // ближайший пистолет, который можно взять (по расстоянию до его рукоятки)
@@ -957,7 +1143,7 @@ export function setup(ctx) {
         const [tiltProp, tiltKey] = SCOPE_TILT[heldItem?.kind] ?? SCOPE_TILT.awp; // у каждого вида свой наклон
         if (Math.abs(stickY) > DEAD) {
           const k = (Math.abs(stickY) - DEAD) / (1 - DEAD);
-          const tilt = shared[tiltProp] - Math.sign(stickY) * k * AWP_SCOPE_TILT_SPEED * Math.min(dt, 0.1); // стик вверх (ось < 0) — передний конец выше
+          const tilt = shared[tiltProp] - Math.sign(stickY) * k * AWP_SCOPE_TILT_SPEED * Math.min(realDt, 0.1); // стик вверх (ось < 0) — передний конец выше
           shared[tiltProp] = Math.min(AWP_SCOPE_TILT_MAX, Math.max(-AWP_SCOPE_TILT_MAX, tilt));
           scopeSliding = tiltProp;
         } else if (scopeSliding) {
@@ -987,7 +1173,7 @@ export function setup(ctx) {
           clays.place(heldClay, pistolWorld.copy(gripWorld).multiply(clayHeld));
         }
         camera.getWorldDirection(headForward); // тарелка летит только вперёд от головы
-        if (clays.updateHand(handPosition, dt, triggerDown && !menuIsOpen, headForward)) {
+        if (clays.updateHand(handPosition, realDt, triggerDown && !menuIsOpen, headForward)) {
           heldClay = null;
           buzz(source, 0.6, 50);
         }
@@ -1000,11 +1186,18 @@ export function setup(ctx) {
         buzz(source, 0.3, 40);
       }
       xWasDown = xDown;
-      if (triggerDown && heldItem && !panelBusy && !carDrive.seated && !laserPanel.blocksFire() && (!triggerWasDown || GUNS[heldItem.kind]?.auto)) fire(source);
+      if (heldItem && GUNS[heldItem.kind]?.charge) chargeStep(source, GUNS[heldItem.kind], triggerDown && !panelBusy && !carDrive.seated && !laserPanel.blocksFire(), realDt);
+      else {
+        if (chargeS >= 0) {
+          chargeS = -1; // оружие убрали посреди заряда
+          shooting.chargeFx?.(null);
+        }
+        if (triggerDown && heldItem && !panelBusy && !carDrive.seated && !laserPanel.blocksFire() && (!triggerWasDown || GUNS[heldItem.kind]?.auto)) fire(source);
+      }
       triggerWasDown = triggerDown;
 
       // задранный очередью ствол плавно возвращается
-      const recover = Math.exp(-CLIMB_RECOVER * Math.min(dt, 0.1));
+      const recover = Math.exp(-CLIMB_RECOVER * Math.min(realDt, 0.1));
       climb *= recover;
       climbYaw *= recover;
       if (!heldItem) climb = climbYaw = 0;
@@ -1013,7 +1206,7 @@ export function setup(ctx) {
         pistolWorld.copy(gripWorld).multiply(held);
         // отдача: поворот стволом вверх вокруг рукоятки (у калаша ещё толчок назад), быстро
         // затухает; сверху — подъём ствола от очереди
-        const age = sceneNow() - lastShotAt;
+        const age = performance.now() - lastShotAt;
         let pitch = climb;
         if (age < lastGun.kickMs) {
           const fade = (1 - age / lastGun.kickMs) ** 2;
@@ -1027,8 +1220,8 @@ export function setup(ctx) {
         }
         pistolWorld.decompose(heldItem.group.position, heldItem.group.quaternion, heldItem.group.scale);
       }
-      pistols.updateTriggers(heldItem && hand ? heldItem : null, source?.gamepad.buttons[TRIGGER_BUTTON]?.value ?? 0, dt, ejectCasing);
-      casings.update(dt);
+      pistols.updateTriggers(heldItem && hand ? heldItem : null, source?.gamepad.buttons[TRIGGER_BUTTON]?.value ?? 0, realDt, ejectCasing);
+      for (let i = 0; i < clock.n; i += 1) casings.update(clock.sub);
       placeFlash();
       paintPistols();
       // прицел: контур у мишени, в которую попадёт выстрел сейчас (тот же луч, что в fire)
@@ -1049,18 +1242,27 @@ export function setup(ctx) {
         shooting.aim(null);
         laser.setVisible(false);
       }
-      shooting.update(dt);
-      clays.update(dt);
-      robodog.update(dt);
-      horde.update(dt);
+      // мир: clock.n подшагов по clock.sub с (не больше 8 и в бюджете CPU, world-clock.js)
+      const worldT0 = performance.now();
+      for (let i = 0; i < clock.n; i += 1) {
+        shooting.update(clock.sub);
+        clays.update(clock.sub);
+        robodog.update(clock.sub);
+        horde.update(clock.sub);
+        drones.update(clock.sub);
+        artillery.update(clock.sub);
+      }
+      worldClock.measure(performance.now() - worldT0);
+      artillery.frame(clock.total); // частицы разрывов: раз в кадр, игровое время
       messageHoles.update();
       crackedGlasses.update();
-      score.update(dt);
+      score.update(realDt);
       scopeTilts.awp = shared.awpScopeTilt;
       scopeTilts.ak2 = shared.ak2ScopeTilt;
+      for (let i = 0; i < genTilts.length; i += 1) scopeTilts[genTilts[i][0]] = shared[genTilts[i][1]];
       pistols.updateLenses(shared.awpScopeZ, scopeTilts); // прицелы (АВП, «Калаш 2.0»): сдвиг, наклон и изображение (только когда в окуляр смотрят)
       if (!hand) scopeDebug.update({ hand: null, gripDown: false, gripWasDown: false, gripMode, menuIsOpen: true }); // без руки — только видна
-      liveLeft -= dt;
+      liveLeft -= realDt;
       if (liveLeft <= 0) {
         liveLeft = LIVE_EVERY_S;
         saveLive(); // последнее состояние активной сцены (compositions.js: live)
@@ -1068,7 +1270,7 @@ export function setup(ctx) {
 
       // меню зависит от того, что игрок держит, и от режима хвата
       const heldKind = heldItem?.kind ?? (heldClay ? 'plate' : null);
-      const key = `${heldKind}|${gripMode}|${shared.targetPhysics}|${shared.aimOutline}|${shared.laser}|${carDrive.seated}|${shared.timeScale ?? 1}|${Boolean(shared.scopeDebug)}|${Boolean(shared.inertia)}`; // сцены сбрасывают menuKey сами
+      const key = `${heldKind}|${gripMode}|${shared.targetPhysics}|${shared.aimOutline}|${shared.laser}|${carDrive.seated}|${shared.timeScale ?? 1}|${Boolean(shared.scopeDebug)}|${Boolean(shared.inertia)}|${GUNS[heldKind]?.auto}|${shared.allies !== false}|${shared.drones !== false}|${shared.artillery !== false}`; // сцены сбрасывают menuKey сами
       if (key !== menuKey) {
         menuKey = key;
         ctx.setMenu?.(buildMenu(menuState(heldKind)));
@@ -1098,11 +1300,15 @@ export function setup(ctx) {
       car.dispose();
       disposed = true;
       robodog.dispose(); // до shooting.dispose: снимает свою цель для пуль
+      drones.dispose(); // до shooting.dispose: снимает свою цель для пуль
+      artillery.dispose();
       horde.dispose();
+      tower.dispose();
       shooting.dispose();
       messageHoles.dispose();
       crackedGlasses.dispose();
       world.dispose();
+      shake.dispose(); // до ipd и fps: все оборачивают scene.onBeforeRender
       ipd.dispose(); // до fps: оба оборачивают scene.onBeforeRender
       fps.dispose();
       textTest.dispose();

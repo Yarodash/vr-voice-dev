@@ -58,6 +58,12 @@ export function extractDraft(rows, { cursor = null } = {}) {
   return !cursorInBox && HINT.test(draft) ? '' : draft;
 }
 
+// True while Claude Code's footer says `Transcribing…`: the last words are still being recognised
+// and the draft may still change, even though the bridge already reports the dictation idle.
+export function isTranscribing(rows) {
+  return rows.some((cells) => textOf(cells).includes('Transcribing'));
+}
+
 // { busy, reply }: is Claude working right now, and the last thing it said (not its tool calls).
 export function extractStatus(rows) {
   const box = promptBox(rows);

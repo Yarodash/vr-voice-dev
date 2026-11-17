@@ -30,7 +30,10 @@ class Dictation:
         *,
         on_error: Callable[[str], None] | None = None,
         repeat_s: float = 0.033,
-        listen_timeout_s: float = 1.5,
+        # Playing before Claude Code records loses the first words; it usually starts within
+        # ~1 s, so this only guards against never seeing the footer.
+        listen_timeout_s: float = 4.0,
+        lead_in_s: float = 0.3,
         tail_s: float = 0.35,
         min_audio_s: float = 0.25,
         restore_delay_s: float = 0.5,
@@ -47,6 +50,7 @@ class Dictation:
         self._on_error = on_error
         self._repeat_s = repeat_s
         self._listen_timeout_s = listen_timeout_s
+        self._lead_in = b"\x00\x00" * int(48000 * lead_in_s)
         self._tail_s = tail_s
         self._min_audio_s = min_audio_s
         self._restore_delay_s = restore_delay_s
@@ -66,18 +70,28 @@ class Dictation:
         self._spaces = 0
         self._pressed_at = 0.0
         self._last_audio_at = 0.0
+        self._priming = False
 
     def _busy(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    async def press(self) -> None:
+    async def press(self, *, priming: bool = False) -> None:
+        """`priming` is for prime() only."""
         if self._busy():
             if not self._released.is_set():
+                if self._priming:  # the user pressed during the silent priming: it is theirs now
+                    self._priming = False
+                    log.info("priming taken over by a real press")
+                    if self._on_state is not None:
+                        self._on_state(self.state)
                 return  # already holding
             await self.wait_idle()  # the previous dictation is still finishing
+        self._priming = priming
         self._released = asyncio.Event()
         self._listening = asyncio.Event()
-        self._buffer, self._audio_bytes, self._streaming, self._spaces = [], 0, False, 0
+        # Silence before the first words (not counted as audio: a tap stays a tap).
+        self._buffer = [self._lead_in] if self._lead_in else []
+        self._audio_bytes, self._streaming, self._spaces = 0, False, 0
         self._pressed_at = self._last_audio_at = asyncio.get_running_loop().time()
         self._detector.reset()
         self._set_state("warmup")
@@ -101,13 +115,34 @@ class Dictation:
         if self._task is not None:
             await asyncio.shield(self._task)
 
+    async def prime(self, silence_s: float = 1.0) -> bool:
+        """One silent dictation, done once after Claude Code starts: its first dictation sometimes
+        lost the first words even after `listening…` was shown. Silent towards the page. A real
+        press meanwhile takes the dictation over (its audio simply follows the silence); then
+        this returns False and the caller must not touch the prompt."""
+        if self._busy():
+            return False
+        await self.press(priming=True)
+        loop = asyncio.get_running_loop()
+        end = loop.time() + silence_s
+        frame = b"\x00\x00" * 960  # 20 ms
+        while self._priming and loop.time() < end:
+            self.feed(frame)
+            await asyncio.sleep(0.02)
+        if not self._priming:
+            return False
+        await self.release()  # no await between the check above and this: no press can slip in
+        await self.wait_idle()
+        return True
+
     def on_pty_output(self, text: str) -> None:
         if self._busy() and not self._listening.is_set() and self._detector.feed(text):
             self._listening.set()
 
     def _set_state(self, state: str) -> None:
         self.state = state
-        self._on_state(state)
+        if not self._priming:  # the page does not see the silent priming
+            self._on_state(state)
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -150,6 +185,7 @@ class Dictation:
             await asyncio.sleep(self._restore_delay_s)
             await asyncio.to_thread(self._quietly, self._defaults.restore)
             self._set_state("idle")
+            self._priming = False
 
     async def _warmup(self) -> bool:
         """True: go on and stream the audio. False: the trigger was only tapped."""

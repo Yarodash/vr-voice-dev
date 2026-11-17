@@ -39,48 +39,80 @@ export function createEffects({ THREE, group }) {
   const sparkS0 = new THREE.Vector3(0.0035, 0.03, 0.0035);
   const sparkS1 = new THREE.Vector3(0.002, 0.008, 0.002);
 
-  // Частицы — из пула: меш и материал не создаются и не освобождаются на каждый выстрел. Иначе
-  // (было так) после паузы > 0,3 с между выстрелами все материалы вспышки освобождались, three.js
-  // выбрасывал их шейдерную программу, и следующий выстрел заново собирал её (~10 мс на Quest), плюс
-  // 17 новых материалов и мешей — мусор для GC. Свободные частицы остаются в группе, невидимые.
-  const pool = [];
-  const makeParticle = () => {
-    const material = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false });
-    const mesh = new THREE.Mesh(sphere, material);
-    mesh.visible = false;
-    group.add(mesh);
-    return {
-      mesh, material, born: 0, life: 1, velocity: new THREE.Vector3(), gravity: 0, drag: 0,
-      scale0: new THREE.Vector3(), scale1: new THREE.Vector3(), opacity0: 1, spin: null, fadePower: 1,
+  // Частицы рисуются пачками: InstancedMesh на каждую пару (геометрия, смешивание), цвет и
+  // прозрачность — у каждого экземпляра свои. Раньше каждая частица была своим мешем: один выстрел
+  // (17 частиц) — 34 вызова отрисовки на два глаза (~27 мкс CPU каждый на Quest), очередь — под сотню.
+  // Теперь — не больше 4 пачек, а пустая пачка скрыта (пустой видимый меш тоже стоит CPU: программа и
+  // униформы ставятся, хоть рисовать нечего). Первые WARM_FRAMES кадров пачки видны (пустые): их
+  // шейдер собирается при подмене сцены, а не на первом выстреле. Записи частиц — из пула (без мусора).
+  const MAX_PER_BATCH = 256;
+  const WARM_FRAMES = 3;
+  const batches = [];
+  const batchOf = (geometry, additive) => {
+    for (const b of batches) if (b.source === geometry && b.additive === additive) return b;
+    const g = geometry.clone(); // своя копия: у неё свой атрибут прозрачности
+    const opacity = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PER_BATCH), 1);
+    opacity.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('aOpacity', opacity);
+    const material = new THREE.MeshBasicMaterial({
+      transparent: true, depthWrite: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+    });
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float aOpacity;\nvarying float vOpacity;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvOpacity = aOpacity;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vOpacity;')
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vOpacity;');
     };
+    material.customProgramCacheKey = () => 'fx-particle-opacity'; // неизменный: программа общая между версиями сцены
+    const mesh = new THREE.InstancedMesh(g, material, MAX_PER_BATCH);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.setColorAt(0, new THREE.Color(1, 1, 1)); // цвет экземпляров — сразу (иначе шейдер собрался бы второй раз)
+    mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    mesh.count = 0;
+    mesh.frustumCulled = false;
+    mesh.name = 'fx-particles';
+    group.add(mesh);
+    const b = { source: geometry, additive, mesh, geometry: g, material, opacity, n: 0 };
+    batches.push(b);
+    return b;
   };
-  // первые кадры одна частица видна (прозрачная, крошечная): шейдер собирается сразу при подмене
-  // сцены, а не на первом выстреле
-  const warmParticle = makeParticle();
-  warmParticle.material.opacity = 0;
-  warmParticle.mesh.scale.setScalar(1e-4);
-  warmParticle.mesh.frustumCulled = false;
-  warmParticle.mesh.visible = true;
+  // все пачки, что бывают (вспышка, пыль, лепестки, искры) — заранее, ради сборки шейдера при подмене
+  batchOf(sphere, false);
+  batchOf(sphere, true);
+  batchOf(cone, true);
+  batchOf(unitBox, true);
   let warm = 0;
+  const pool = [];
+  const makeParticle = () => ({
+    batch: null, born: 0, life: 1, position: new THREE.Vector3(), quaternion: new THREE.Quaternion(),
+    rotation: new THREE.Euler(), color: new THREE.Color(), velocity: new THREE.Vector3(), gravity: 0, drag: 0,
+    scale0: new THREE.Vector3(), scale1: new THREE.Vector3(), opacity0: 1, spin: null, fadePower: 1,
+  });
+  const pScale = new THREE.Vector3();
+  const pMatrix = new THREE.Matrix4();
+  // на GPU уходят только первые n экземпляров
+  const markUsed = (attr, n, size) => {
+    attr.clearUpdateRanges();
+    attr.addUpdateRange(0, Math.max(1, n) * size);
+    attr.needsUpdate = true;
+  };
 
   // geometry/color + движение. life — мс; scale0 → scale1 за время жизни; opacity гаснет до нуля.
   function spawn(geometry, { color, additive = false, opacity = 1 }, position, options) {
     const p = pool.pop() ?? makeParticle();
-    const { mesh, material } = p;
-    material.color.set(color);
-    material.opacity = opacity;
-    material.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
-    mesh.geometry = geometry;
-    mesh.position.copy(position);
-    if (options.quaternion) mesh.quaternion.copy(options.quaternion);
-    else mesh.quaternion.identity();
+    p.batch = batchOf(geometry, additive);
+    p.color.set(color);
+    p.position.copy(position);
+    if (options.quaternion) p.quaternion.copy(options.quaternion);
+    else p.quaternion.identity();
+    if (options.spin) p.rotation.setFromQuaternion(p.quaternion);
     const scale0 = options.scale0 ?? 1;
     if (scale0 instanceof THREE.Vector3) p.scale0.copy(scale0);
     else p.scale0.setScalar(scale0);
-    mesh.scale.copy(p.scale0);
     if (options.scale1 instanceof THREE.Vector3) p.scale1.copy(options.scale1);
     else p.scale1.setScalar(options.scale1 ?? scale0);
-    mesh.visible = true;
     p.born = globalThis.__sceneState?.sceneNowMs ?? performance.now(); // сценовые часы (замедление времени)
     p.life = options.life;
     if (options.velocity) p.velocity.copy(options.velocity);
@@ -164,11 +196,14 @@ export function createEffects({ THREE, group }) {
     },
 
     // след пули: раскалённая чёрточка летит от дула по параболе (tracer.js); вернёт номер для tracerLand
+    // «Настройки ▸ Трассеры: выкл» (globalThis.__sceneState.tracersOff) — трассер не запускается (−1)
     tracer(from, dir, speed, gravity, maxLen) {
+      if (globalThis.__sceneState?.tracersOff) return -1;
       return tracers.fire(from, dir, speed, gravity, maxLen);
     },
     // пуля номер id остановилась через along м (вдоль ствола)
     tracerLand(id, along) {
+      if (id < 0) return;
       tracers.land(id, along);
     },
 
@@ -177,47 +212,58 @@ export function createEffects({ THREE, group }) {
       tracers.update(dt);
       impacts.update(dt);
       const now = globalThis.__sceneState?.sceneNowMs ?? performance.now();
-      if (warm < 3 && ++warm === 3) {
-        warmParticle.mesh.visible = false;
-        warmParticle.mesh.frustumCulled = true;
-        pool.push(warmParticle);
-      }
+      if (warm < WARM_FRAMES) warm += 1;
       if (flashUntil) {
         const left = (flashUntil - now) / 70;
         flashLight.intensity = left > 0 ? flashPower * left : 0;
         if (left <= 0) flashUntil = 0;
       }
+      for (let b = 0; b < batches.length; b += 1) batches[b].n = 0;
       for (let i = particles.length - 1; i >= 0; i -= 1) {
         const p = particles[i];
         const age = (now - p.born) / p.life;
         if (age >= 1) {
-          p.mesh.visible = false;
-          particles.splice(i, 1);
+          particles[i] = particles[particles.length - 1]; // порядок не важен: пачки рисуются целиком
+          particles.pop();
           pool.push(p);
           continue;
         }
         if (p.drag) p.velocity.multiplyScalar(Math.max(0, 1 - p.drag * dt));
         p.velocity.y -= p.gravity * dt;
-        p.mesh.position.addScaledVector(p.velocity, dt);
-        p.mesh.scale.lerpVectors(p.scale0, p.scale1, age);
+        p.position.addScaledVector(p.velocity, dt);
+        pScale.lerpVectors(p.scale0, p.scale1, age);
         if (p.spin) {
-          p.mesh.rotation.x += p.spin.x * dt;
-          p.mesh.rotation.y += p.spin.y * dt;
-          p.mesh.rotation.z += p.spin.z * dt;
+          p.rotation.x += p.spin.x * dt;
+          p.rotation.y += p.spin.y * dt;
+          p.rotation.z += p.spin.z * dt;
+          p.quaternion.setFromEuler(p.rotation);
         }
-        p.material.opacity = p.opacity0 * (1 - age ** p.fadePower);
+        const batch = p.batch;
+        if (batch.n >= MAX_PER_BATCH) continue; // пачка полна: лишняя частица в этом кадре не видна
+        const k = batch.n++;
+        batch.mesh.setMatrixAt(k, pMatrix.compose(p.position, p.quaternion, pScale));
+        batch.mesh.setColorAt(k, p.color);
+        batch.opacity.array[k] = p.opacity0 * (1 - age ** p.fadePower);
+      }
+      for (let b = 0; b < batches.length; b += 1) {
+        const { mesh, opacity, n } = batches[b];
+        mesh.visible = n > 0 || warm < WARM_FRAMES;
+        if (n === 0 && mesh.count === 0) continue;
+        mesh.count = n;
+        markUsed(mesh.instanceMatrix, n, 16);
+        markUsed(mesh.instanceColor, n, 3);
+        markUsed(opacity, n, 1);
       }
     },
 
     dispose() {
-      for (const p of [...particles, ...pool]) {
-        group.remove(p.mesh);
-        p.material.dispose();
+      for (const b of batches) {
+        group.remove(b.mesh);
+        b.geometry.dispose();
+        b.material.dispose();
+        b.mesh.dispose();
       }
-      if (warm < 3) {
-        group.remove(warmParticle.mesh);
-        warmParticle.material.dispose();
-      }
+      batches.length = 0;
       particles.length = 0;
       pool.length = 0;
       smoke.dispose();

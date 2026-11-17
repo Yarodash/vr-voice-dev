@@ -220,6 +220,7 @@ export function createSmoke({ THREE, group }) {
   const dist = new Float32Array(CAP);
   let count = 0;
   let time = 0;
+  let warmFrames = 0; // кадров после создания (конец update: пустой меш скрыт)
 
   const random = (a, b) => a + Math.random() * (b - a);
 
@@ -452,6 +453,10 @@ export function createSmoke({ THREE, group }) {
         dataAttr.needsUpdate = true;
       }
       geometry.instanceCount = n;
+      // пустой видимый меш тоже стоит CPU (программа и униформы на каждый глаз): скрыт, пока пусто;
+      // первые кадры виден — шейдер собирается при подмене сцены (материал держит программу)
+      if (warmFrames < 3) warmFrames += 1;
+      mesh.visible = n > 0 || warmFrames < 3;
     },
 
     get count() {

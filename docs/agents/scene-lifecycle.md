@@ -69,6 +69,7 @@ error keeps the old scene running and reports `сцена не загрузил�
 
 ## Update order (scene/main.js `update(dt)`)
 
+0. `worldClock.begin(realDt)` -> `clock` (`dt = clock.total`, see «Game time»).
 1. `fps.beginFrame()` (CPU frame cost starts here), `world.update(dt)`, `shared.sound?.update?.(camera)`, `fps.update()`.
 2. `source` = first `session.inputSources` with `handedness === 'left' && gamepad && !hand`; `hand = ctx.getLeftController()`.
 3. `menuNow = ctx.menuOpen()`; `ipd.update(source, menuNow || menuWasOpen)`; `laserPanel.update(...)`.
@@ -83,7 +84,8 @@ error keeps the old scene running and reports `сцена не загрузил�
 9. `fire(source)` if trigger (rising edge, or held for `auto` guns) and no panel blocks it.
 10. Barrel climb recovery; held weapon pose = `gripWorld × held × recoil`.
 11. `placeFlash()`, `paintPistols()`; aim: `shooting.aim`, `laserPanel.cast`, `laser.update`.
-12. `shooting.update(dt)`, `car.update(dt)`, `clays.update(dt)`, `messageHoles.update()`, `score.update(dt)`.
+12. World substeps (`clock.n` × `clock.sub`): `shooting`, `clays`, `robodog`, `horde`, `drones`
+    (car and casings are substepped earlier); then `messageHoles.update()`, `score.update(realDt)`.
 13. Every 3 s `saveLive()` (active scene snapshot, written only if changed).
 14. Rebuild the menu if `menuKey` (`heldKind|gripMode|targetPhysics|aimOutline|laser`) changed.
 15. `pistols.save(...)` while something is held or the held item changed.
@@ -138,6 +140,8 @@ The real controller model (`shared.realModel`) is intentionally left on the hand
 | `scene.aimOutline` | scene/main.js | `'on'`/`'off'` |
 | `scene.laser` | scene/main.js | `'on'`/`'off'` (default off) |
 | `scene.inertia` | scene/main.js | `'on'`/`'off'` (default off), hand tremor filter `inertia.js` |
+| `scene.artillery` | scene/main.js | `'on'`/`'off'` (default on), «Собаки ▸ Артиллерия» (artillery.js) |
+| `scene.shake` | shake.js | `'1'` on (default) / `'2'` strong / `'0'` off — «Настройки ▸ Тряска» |
 | `scene.pistol.calib`, `scene.ak.calib` | scene/main.js | 16-number hand->weapon matrix |
 | `scene.pistols` | pistols.js | `{ list:[{kind,position,quaternion}], held:-1 }` (old: `scene.pistol`) |
 | `scene.clays` | clays.js | resting clays `[{p,q}]` |
@@ -169,4 +173,30 @@ Reload vs swap: weapons "in hand" survive only a swap (`pistols.restore()` uses
   GridHelper; it restores them in dispose.
 - Top-right of the view is the HUD (messages); don't cover it.
 - No per-frame allocations in hot paths: keep scratch `Vector3/Matrix4` in the closure.
-- Use `performance.now()` for timing, `dt` for physics (clamp: `Math.min(dt, 0.05)`).
+- Time: see «Game time» below. World simulation never reads `performance.now()`.
+
+## Game time (time multiplier, `scene/world-clock.js`)
+
+«Настройки ▸ Время» sets `__sceneState.timeScale` (×0.25 … ×64). **Rule: game time =
+`shared.sceneNowMs` / the scaled `dt` your `update(dt)` receives; never `performance.now()`,
+`Date.now()`, `setTimeout` or a "one fixed step per frame" for world simulation.**
+- `scene/main.js update(realDt)`: `worldClock.begin(realDt)` wants `realDt × timeScale` of world, cuts it
+  into `clock.n` equal substeps `clock.sub ≤ 0.05 s` (`STEP_S`, = every system's own dt clamp),
+  `n ≤ 8` (`MAX_SUB`) and within ~10 ms CPU (`BUDGET_MS`, measured cost per substep), and advances
+  `shared.sceneNowMs` by exactly what will be simulated (`clock.total`). What does not fit is
+  dropped, not caught up: the world runs slower than asked, and fps.js prints the honest speed
+  (`×17/64` = 17 achieved of 64 asked). Ceiling 0.4 s of world per frame (×29 at 72 Hz); in a
+  heavy horde battle on Quest ~×4–8 (one `horde.update` ≈ 3–5 ms). Handle: `__sceneState.worldClock`
+  (`n, sub, total, wanted, costMs`).
+- Called `clock.n` times with `clock.sub`: `carDrive.update` (car), `casings.update`, and the world
+  block `shooting.update` (bullets, targets, smoke, tracers, impacts, mana), `clays.update`,
+  `robodog.update`, `horde.update`, `drones.update`, `artillery.update`. Once with `dt = clock.total`: `world.update`
+  (sky, clouds, star twinkle, grass wind — all analytic), `artillery.frame` (explosion particles). A new world system goes into that loop
+  (or takes `dt` and clamps at 0.05 s); timers inside it count `dt`, not wall clock.
+- Fixed-step physics inside a system: accumulate `dt`, step while `acc ≥ STEP`, cap `acc` at
+  `0.05 + STEP` (robodog-ragdoll.js: 1/120 s, cap 7 steps).
+- **Real time** (`realDt`, `performance.now()`), the player is never slowed or sped up: hand and
+  inertia filter, clay throw hand velocity (`clays.updateHand(realDt)`), the gun in hand (fire rate
+  `fire()`, recoil, climb recovery, muzzle flash `flash.until`, slide/bolt `pistols.kick/updateTriggers`),
+  scope tilt stick, HUD, menu, panels, score popup, message holes, cracked glasses, camera shake,
+  `saveLive` timer, generated-gun holo shimmer, sound rate limits. Sounds keep their pitch.

@@ -8,11 +8,12 @@
 //
 // createZapFx({ THREE, root, anchors }) → { sparks(point, normal, n, opts), flash(point, size),
 //   arc(anchorA, pointA, anchorB, pointB, life, amp), update(dt), clear(), dispose() }
-const SPARK_CAP = 200;
+const SPARK_CAP = 140; // большая битва: общий бюджет искр (новые вытесняют случайные старые)
 const ARC_CAP = 14;
 const SEG = 8; // отрезков в дуге
 const FLASH_CAP = 10;
-const CAP = SPARK_CAP + ARC_CAP * SEG * 2 + FLASH_CAP * 3;
+const BOLT_CAP = 24; // пули пулемётов на спинах псов: красно-оранжевые трассеры, летят прямо
+const CAP = SPARK_CAP + ARC_CAP * SEG * 2 + FLASH_CAP * 3 + BOLT_CAP * 2;
 
 export function createZapFx({ THREE, root, anchors }) {
   const geometry = new THREE.BoxGeometry(1, 1, 1);
@@ -39,20 +40,25 @@ export function createZapFx({ THREE, root, anchors }) {
     vx: new Float32Array(SPARK_CAP), vy: new Float32Array(SPARK_CAP), vz: new Float32Array(SPARK_CAP),
     age: new Float32Array(SPARK_CAP), life: new Float32Array(SPARK_CAP),
     r: new Float32Array(SPARK_CAP), g: new Float32Array(SPARK_CAP), b: new Float32Array(SPARK_CAP),
+    sz: new Float32Array(SPARK_CAP), // размер чёрточки (большие псы — крупнее)
   };
   let sparkCount = 0;
   // ---- дуги
   const arcs = {
-    a: new Int8Array(ARC_CAP), b: new Int8Array(ARC_CAP),
+    a: new Int16Array(ARC_CAP), b: new Int16Array(ARC_CAP), // индексы шарниров (16 псов × 9 > 127)
     la: new Float32Array(ARC_CAP * 3), lb: new Float32Array(ARC_CAP * 3),
     age: new Float32Array(ARC_CAP), life: new Float32Array(ARC_CAP), amp: new Float32Array(ARC_CAP),
-    next: new Float32Array(ARC_CAP), on: new Uint8Array(ARC_CAP),
+    next: new Float32Array(ARC_CAP), on: new Uint8Array(ARC_CAP), w: new Float32Array(ARC_CAP),
     jit: new Float32Array(ARC_CAP * (SEG - 1) * 3),
   };
   let arcCount = 0;
   // ---- вспышки
   const fl = { x: new Float32Array(FLASH_CAP), y: new Float32Array(FLASH_CAP), z: new Float32Array(FLASH_CAP), size: new Float32Array(FLASH_CAP), age: new Float32Array(FLASH_CAP), life: new Float32Array(FLASH_CAP), turn: new Float32Array(FLASH_CAP) };
   let flashCount = 0;
+  fl.hot = new Uint8Array(FLASH_CAP); // 1 — оранжевая (выстрел), 0 — голубая (разряд)
+  // ---- трассеры пулемётов: голова x/y/z, направление, скорость, пройдено, всего
+  const bo = { x: new Float32Array(BOLT_CAP), y: new Float32Array(BOLT_CAP), z: new Float32Array(BOLT_CAP), dx: new Float32Array(BOLT_CAP), dy: new Float32Array(BOLT_CAP), dz: new Float32Array(BOLT_CAP), v: new Float32Array(BOLT_CAP), s: new Float32Array(BOLT_CAP), len: new Float32Array(BOLT_CAP), ally: new Uint8Array(BOLT_CAP) };
+  let boltCount = 0;
 
   const m = new THREE.Matrix4();
   const inv = new THREE.Matrix4();
@@ -111,7 +117,7 @@ export function createZapFx({ THREE, root, anchors }) {
   return {
     // n искр из точки, разлёт вокруг normal (единичный). opts: { speed: [a, b], spread, hot } —
     // hot: жёлто-белые (горячий металл), иначе бело-голубые (электричество)
-    sparks(point, normal, count = 14, { speed = [1.5, 4], spread = 0.9, hot = false } = {}) {
+    sparks(point, normal, count = 14, { speed = [1.5, 4], spread = 0.9, hot = false, size = 1 } = {}) {
       for (let k = 0; k < count; k += 1) {
         const i = sparkCount < SPARK_CAP ? sparkCount++ : Math.floor(Math.random() * SPARK_CAP);
         sp.px[i] = point.x;
@@ -124,6 +130,7 @@ export function createZapFx({ THREE, root, anchors }) {
         sp.vz[i] = p.z * v;
         sp.age[i] = 0;
         sp.life[i] = rand(0.2, 0.55);
+        sp.sz[i] = size;
         const white = Math.random() < 0.35;
         if (hot) {
           sp.r[i] = 1;
@@ -136,8 +143,23 @@ export function createZapFx({ THREE, root, anchors }) {
         }
       }
     },
-    flash(point, size = 0.1) {
+    // трассер пули пулемёта: из from по единичному dir со скоростью speed, гаснет через maxLen м
+    bolt(from, dir, speed = 160, maxLen = 60, ally = false) {
+      const i = boltCount < BOLT_CAP ? boltCount++ : Math.floor(Math.random() * BOLT_CAP);
+      bo.ally[i] = ally ? 1 : 0; // союзные — зелёные, вражеские — красно-оранжевые
+      bo.x[i] = from.x;
+      bo.y[i] = from.y;
+      bo.z[i] = from.z;
+      bo.dx[i] = dir.x;
+      bo.dy[i] = dir.y;
+      bo.dz[i] = dir.z;
+      bo.v[i] = speed;
+      bo.s[i] = 0;
+      bo.len[i] = maxLen;
+    },
+    flash(point, size = 0.1, hot = false) {
       const i = flashCount < FLASH_CAP ? flashCount++ : Math.floor(Math.random() * FLASH_CAP);
+      fl.hot[i] = hot ? 1 : 0;
       fl.x[i] = point.x;
       fl.y[i] = point.y;
       fl.z[i] = point.z;
@@ -147,7 +169,7 @@ export function createZapFx({ THREE, root, anchors }) {
       fl.turn[i] = Math.random() * Math.PI;
     },
     // дуга между точками на шарнирах anchorA и anchorB (индексы в anchors); точки — мировые сейчас
-    arc(anchorA, pointA, anchorB, pointB, life = 0.45, amp = 0.05) {
+    arc(anchorA, pointA, anchorB, pointB, life = 0.45, amp = 0.05, width = 1) {
       const i = arcCount < ARC_CAP ? arcCount++ : Math.floor(Math.random() * ARC_CAP);
       arcs.a[i] = anchorA;
       arcs.b[i] = anchorB;
@@ -156,13 +178,14 @@ export function createZapFx({ THREE, root, anchors }) {
       arcs.age[i] = 0;
       arcs.life[i] = life;
       arcs.amp[i] = amp;
+      arcs.w[i] = width;
       jag(i);
     },
     clear() {
-      sparkCount = arcCount = flashCount = 0;
+      sparkCount = arcCount = flashCount = boltCount = 0;
     },
     get active() {
-      return sparkCount + arcCount + flashCount;
+      return sparkCount + arcCount + flashCount + boltCount;
     },
     update(dt) {
       const h = Math.min(dt, 0.05);
@@ -190,7 +213,8 @@ export function createZapFx({ THREE, root, anchors }) {
         if (speed < 1e-4) continue;
         d.divideScalar(speed);
         p.set(sp.px[i], sp.py[i], sp.pz[i]);
-        streak(p, d, Math.min(0.07, 0.008 + speed * 0.014), 0.0016 + 0.0024 * k, sp.r[i] * k, sp.g[i] * k, sp.b[i] * k);
+        const z = sp.sz[i];
+        streak(p, d, Math.min(0.07, 0.008 + speed * 0.014) * z, (0.0016 + 0.0024 * k) * z, sp.r[i] * k, sp.g[i] * k, sp.b[i] * k);
       }
       // дуги
       for (let i = arcCount - 1; i >= 0; i -= 1) {
@@ -206,6 +230,7 @@ export function createZapFx({ THREE, root, anchors }) {
           arcs.age[i] = arcs.age[arcCount];
           arcs.life[i] = arcs.life[arcCount];
           arcs.amp[i] = arcs.amp[arcCount];
+          arcs.w[i] = arcs.w[arcCount];
           arcs.next[i] = arcs.next[arcCount];
           arcs.on[i] = arcs.on[arcCount];
           arcs.jit.copyWithin(i * (SEG - 1) * 3, arcCount * (SEG - 1) * 3, (arcCount + 1) * (SEG - 1) * 3);
@@ -220,6 +245,7 @@ export function createZapFx({ THREE, root, anchors }) {
         B.set(arcs.lb[i * 3], arcs.lb[i * 3 + 1], arcs.lb[i * 3 + 2]).applyMatrix4(anchors[arcs.b[i]].matrixWorld);
         P.copy(A);
         const bright = fade * rand(0.7, 1);
+        const aw = arcs.w[i];
         for (let k = 1; k <= SEG; k += 1) {
           if (k < SEG) {
             const j = (i * (SEG - 1) + k - 1) * 3;
@@ -228,8 +254,8 @@ export function createZapFx({ THREE, root, anchors }) {
             Q.y += arcs.jit[j + 1];
             Q.z += arcs.jit[j + 2];
           } else Q.copy(B);
-          segment(P, Q, 0.0035, 0.85 * bright, 0.93 * bright, bright); // сердцевина
-          segment(P, Q, 0.016, 0.12 * bright, 0.28 * bright, 0.75 * bright); // свечение
+          segment(P, Q, 0.0035 * aw, 0.85 * bright, 0.93 * bright, bright); // сердцевина
+          segment(P, Q, 0.016 * aw, 0.12 * bright, 0.28 * bright, 0.75 * bright); // свечение
           P.copy(Q);
         }
       }
@@ -244,10 +270,34 @@ export function createZapFx({ THREE, root, anchors }) {
       for (let i = 0; i < flashCount; i += 1) {
         const k = 1 - fl.age[i] / fl.life[i];
         const size = fl.size[i] * (0.6 + 0.4 * k);
+        const hot = fl.hot[i];
         for (let a = 0; a < 3; a += 1) {
           d.copy(axes[a]).applyAxisAngle(axes[(a + 1) % 3], fl.turn[i]);
           p.set(fl.x[i], fl.y[i], fl.z[i]).addScaledVector(d, -size / 2);
-          streak(p, d, size, size * 0.18, 0.6 * k, 0.8 * k, k);
+          if (hot) streak(p, d, size, size * 0.22, k, 0.6 * k, 0.2 * k);
+          else streak(p, d, size, size * 0.18, 0.6 * k, 0.8 * k, k);
+        }
+      }
+      // трассеры: сердцевина и красное свечение, хвост 2,5 м за головой
+      for (let i = boltCount - 1; i >= 0; i -= 1) {
+        bo.s[i] += bo.v[i] * h;
+        if (bo.s[i] >= bo.len[i] + 2.5) {
+          boltCount -= 1;
+          for (const key in bo) bo[key][i] = bo[key][boltCount];
+        }
+      }
+      for (let i = 0; i < boltCount; i += 1) {
+        const head = Math.min(bo.s[i], bo.len[i]);
+        const tail = Math.max(0, bo.s[i] - 2.5);
+        if (head - tail < 1e-3) continue;
+        d.set(bo.dx[i], bo.dy[i], bo.dz[i]);
+        p.set(bo.x[i], bo.y[i], bo.z[i]).addScaledVector(d, tail);
+        if (bo.ally[i]) {
+          streak(p, d, head - tail, 0.006, 0.6, 1, 0.65);
+          streak(p, d, head - tail, 0.03, 0.08, 0.6, 0.2);
+        } else {
+          streak(p, d, head - tail, 0.006, 1, 0.75, 0.45);
+          streak(p, d, head - tail, 0.03, 0.7, 0.12, 0.05);
         }
       }
       mesh.count = n;

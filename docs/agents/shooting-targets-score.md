@@ -32,12 +32,17 @@ applied when placing the held weapon. Debug: `__sceneState.weaponDebug.fire(inde
 const shooting = createShooting({ THREE, root, camera });
 shooting.shoot(muzzle, dir, { ejector, right, up, big, speed = 360, onResult(true|false|null) })  // launches a bullet
 shooting.aim(muzzle|null, dir, range = 60, speed = 360) -> Vector3|null   // per frame: outline on the plate the BALLISTIC path hits (5 segments to range); returns the STRAIGHT-ray point for the laser
+shooting.autoAim(muzzle, dir, deg, speed, gravity?, projectile?) -> Vector3|null   // auto-aim shot direction (shared vector) into the best target of the deg° cone, ballistic + lead; null = nobody (recipes.md «Сгенерированная пушка», autoAim)
+// shoot() also takes { projectile: 'mana', color, gravity } — mana bolt (mana.js) instead of a bullet,
+//   and { homing: { delayS, turnDegS, gravity }, autoAimDeg } — homing projectile (recipes.md «Homing»)
+// aimTargets(visit): visit(centre, vx, vy, vz, key) — key = stable target object (homing re-finds it each step)
+shooting.autoAimLock() -> { x, y, z, plate, deg, dist, ring } | null       // debug: last lock
 shooting.bullets() -> [{ age, speed, kind, x, y, z }]; shooting.aimedIndex()   // debug for vr:eval
 shooting.castSegment(from, to) -> { point, normal, target, isStand } | null   // shared result object
 shooting.hitTarget(target, point, dir, quiet)    // non-bullet hit (clays)
 shooting.puff(point)                             // dust (effects.dust)
 shooting.setClayTarget({ cast(origin, dir, far) -> distance|-1, hit(origin, dir, distance) } | null)
-shooting.addShootable({ cast, hit -> true|false|null, shot?(origin, dir, far) }) -> remove()  // more targets (robodog.js); nearest of clay+shootables wins; shoot() returns null = "hit, not scored"
+shooting.addShootable({ cast, hit -> true|false|null, shot?(origin, dir, far), aimTargets?(visit) }) -> remove()  // aimTargets: visit(centre, vx, vy, vz) per auto-aim candidate  // more targets (robodog.js); nearest of clay+shootables wins; shoot() returns null = "hit, not scored"
 shooting.setTargetsEnabled(on); shooting.targetsEnabled()
 shooting.getTargets() -> { layout, stands, bodies, decals } | null
 shooting.setTargets(state | {} | null)           // {} = place fresh in front; null = no targets
@@ -100,11 +105,63 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   groundThud, scrape). Metal look: one material per dog with an atlas (`makeDogTextures`: paint
   panels/bolts/wear, bare steel, rubber; roughness+metalness maps) + `weapon-env.js` env map.
   Controllers: `robodog.js` (feature `robodog`, wanderer, brain `robodog-ai.js`, 5 HP) and
-  `robodog-horde.js` (feature `robodogHorde`, «Сцена 3»: pool of 5 models = 55 draw calls max, ≤3
-  alive, 2 HP: first hit knocks it down — ragdoll ~1 s, then a 0.55 s get-up blend — second
-  kills; leap at the chest → red vignette on the camera + `onPlayerHit` haptic in main.js; corpses
-  sink after 8 s). Bullets throw ragdolls by calibre: main.js sets `shared.shotKind` before each
+  `robodog-horde.js` (feature `robodogHorde`, «Сцена 3», two-team battle). Horde dogs are joint
+  rigs only (`buildRobodogRig`, `createDogUnit({ rig: true })`, not in the scene graph); ALL of them
+  are drawn by `robodog-instances.js` (9 InstancedMeshes: body, eyes, upper/lower leg L/R, turret
+  base/gun, shadow; per-instance paint `aPaintA/aPaintB` via `paintSlot` vertex attribute, hit
+  flash `aEmissive`, shadow `aAlpha`; program key `robodog-inst-1`). Pool 64 rigs (grows 3/frame).
+  Sizes `SIZES` 1×…12× (+ titan 36× debug-only), packs of 3–8 that emerge from the ground, calm
+  until the player's first shot, then enraged (red eyes). Allies (`dog.team = 'ally'`, green paint
+  6 + green eyes, menu «Собаки ▸ Союзники», `shared.allies`, localStorage `scene.allies`) spawn
+  behind and fight enemies; targets = nearest hostile with stickiness (`pickTarget`, `tp`).
+  Large+ dogs strike with a front paw (`pawStep`, gait `cmd.paw`), small/medium leap. Every 5th
+  dog has a back turret (tracers = `fx.bolt`). Legs break (`legHit`, gait `cmd.broken`), 2nd
+  broken leg kills. Budgets: ≤ `RAGDOLL_MAX` simulating corpses (others `settle()` flat), update
+  LOD by distance (`LOD_NEAR`/`LOD_FAR`: pose every 2/4 frames), corpses sink sooner when busy.
+  Debug: `__sceneState.horde.debug.{info, units, spawn(i), pack, allyPack}`, `__sceneState.hordeDebug.{spawn(name, n, dist), clear}`.
+  Ragdoll gotcha: constraint arrays must fit all constraints (`MAX_C`); overflow silently read
+  `undefined` and made every ragdoll ~15× slower. Bullets throw ragdolls by calibre: main.js sets `shared.shotKind` before each
   shot (pistol 0.45, ak 0.7, awp 1). Ragdoll: Verlet 16 particles, 1/120 s substep, 10 iterations,
   speed clamp 14 m/s. Corpse hits return `null`. All gameplay timers run on `dt` (slow-mo safe).
   Debug: `__sceneState.robodog.debug.info()`, `__sceneState.horde.debug.info()`.
+- Quadcopters: `drones.js` (system), `drone-model.js` (geometry/textures, cached in `__sceneState`),
+  `drone-sound.js`. Same battle (feature `robodogHorde`), menu «Собаки ▸ Квадрокоптеры: вкл/выкл»
+  (`shared.drones`, localStorage `scene.drones`, default on; main.js `onMenu` checks the label before the
+  allies toggle). `SIZES` small 0.4 m / medium 0.9 / large 2 / huge 5 (hp 1–2/3–4/8–9/20, altitude
+  3–9…22–40 m, orbit radius, range, burst 3–5, spread, dmg to dogs/drones). Pool `MAX` 44 plain objects
+  in `shared.droneRun` (survives swaps, grows on MAX change; enemy ≤ 26 with large/huge weighted ×2, ally ≤ 14 with half the large/huge caps — enemies dominate the air too), enemy waves 4–6 every 0.8×gap, ally waves 2–4 every 1.2×gap, gap 10→6 s, first waves at 3/5 s (enemies
+  in front 95–130 m, allies behind). Flight: PD steering to an orbit point around the target (enemy
+  vs player — only in the ±60° front sector), tilt from acceleration, wobble; steering LOD > 70/120 m.
+  Target = nearest hostile (player ×0.8, dogs via `horde.debug.units()` read-only, drones), sticky.
+  Calm until the player's first shot (`run.angry`) or a hit. Fire: pre-mixed burst sound + per-round
+  `fx.bolt` tracers (own `createZapFx`), hits queued by travel time: player → `screenShake(0.18)` at most
+  every 350 ms, front-only (±70°); dog → `unit.strike`; drone → `damage`. Player bullets: `addShootable`
+  (sphere `hitR`, `aimTargets` skips allies, allies/dying take no damage; AWP `5 + hpMax/4`). Death:
+  spin + fall + smoke trail → `explode` on the ground (fire/smoke billboards, sparks, boom, shake < 35 m,
+  splash on dogs) → wreck → sinks. Draw calls: light body, heavy body, gun, rotor discs, lights, fire,
+  smoke (+1 fx); per-instance `aPaintA/aPaintB/aFx` (program `drone-inst-1`). Exposed for the horde:
+  `shared.droneTargets` (drone objects `{ isDrone, state, team, x, y, z, span }`) and
+  `shared.droneStrike(drone, point, dir, dmg)` — dogs don't target drones yet. Telemetry `[drones]`
+  every 10 s. Debug: `__sceneState.droneSystem.debug.{info, list, spawn(team, n), kill(id), sound,
+  showcase(on, team)}` (showcase freezes the sim — desktop page only).
+- Artillery: `artillery.js` (system + all explosion FX) + `artillery-sound.js`. Same battle (feature
+  `robodogHorde`), menu «Собаки ▸ Артиллерия: вкл/выкл» (`shared.artillery`, localStorage
+  `scene.artillery`, default on). Off-map batteries (not drawn): enemy 1400 m ahead (−Z), allies 1400 m
+  behind; each side every 10–25 s fires 3–8 shells (×1.6 during its own horde wave, more with many
+  targets) at the densest cluster of the other team's dogs (`horde.debug.units()`, cluster 12 m,
+  scatter ≤ 8 m; no targets → field 28–140 m ahead). Never within `SAFE_R` 18 m of the head /
+  `shared.towerPos`. Shell timeline (game time, `shared.artilleryRun` survives swaps): horizon flash →
+  battery thump after 1400/343 s → re-aim to the tracked dog 2.1 s before impact → whistle (voice
+  follows the shell) 1.8 s → streak 0.5 s → blast. Splash `SPLASH_R` 7.5 m (+0.5×scale): `unit.strike`
+  dmg 1–8; kill → `unit.blast(v)` (ragdoll push, hook added to robodog-unit.js); small/medium
+  survivors `unit.knock`; corpses `unit.blast`; drones `shared.droneStrike` (1–11). Shake
+  `screenShake(min(0.85, 15/d))` + 3 decaying taps (< 170 m). FX: ONE instanced quad mesh + one
+  ShaderMaterial (premultiplied blending: `iVel.w` = additive share, so fire and dark smoke share a
+  draw call), atlas 512×256 (8 cells, `shared.artilleryAtlas`), modes billboard / ground-flat /
+  velocity-stretched, per-cell noise erosion (fire dissolves into smoke). CAP 1500 particles in
+  `shared.artilleryFx` (survive swaps), scorch decals ≤ 24 × 30 s; LOD by distance and recent-blast
+  heat. No PointLight (would recompile every lit shader) — light = flat additive ground pool. `update(dt)`
+  in the substep loop (logic), `frame(clock.total)` once per frame (particles + buffer). Telemetry
+  `[artillery]` every 10 s (~0.1 ms/frame on Quest). Debug (desktop only): `__sceneState.artillerySystem.debug.{info,
+  barrage({team,n,dist,bearing,flight}), blast(dist, bearingDeg), clear}`.
 - Score is off in every scene (compositions.js); `score.js` (+ `bonus(points)`) kept for later.

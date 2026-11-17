@@ -9,6 +9,8 @@
 import { createEffects } from './effects.js';
 import { TARGET_LAYOUT, createTargets, groundAt, targetSpots } from './targets.js';
 import { createSound } from './sound.js';
+import { createMana } from './mana.js';
+import { createBlackhole } from './blackhole.js';
 
 const SPEED_OF_SOUND = 343; // м/с: звук попадания приходит с задержкой
 const GRAVITY = 9.81; // м/с²
@@ -20,9 +22,11 @@ const MAX_BULLETS = 32; // одновременно в полёте (пул); л
 const AIM_SEGS = 5; // отрезков параболы у прицела (контур мишени)
 const GROUND_FX_M = 150; // пыль от пули в земле — только ближе этого к игроку
 // где пуля через t с: дуло + ствол·v·t − ½·g·t² по вертикали (без сопротивления воздуха)
-const posAt = (out, muzzle, dir, speed, t) => {
+// g — гравитация этой пули (мана-снаряд падает медленнее, MANA_GRAVITY)
+const MANA_GRAVITY = 2.5;
+const posAt = (out, muzzle, dir, speed, t, g = GRAVITY) => {
   out.copy(muzzle).addScaledVector(dir, speed * t);
-  out.y -= 0.5 * GRAVITY * t * t;
+  out.y -= 0.5 * g * t * t;
   return out;
 };
 
@@ -31,6 +35,10 @@ export function createShooting({ THREE, root, camera }) {
   const group = new THREE.Group();
   root.add(group);
   const effects = createEffects({ THREE, group });
+  const mana = createMana({ THREE, group, camera }); // мана-снаряды (projectile: 'mana')
+  // чёрные дыры (projectile: 'blackhole', blackhole.js): не пуля — летит и тянет всё к себе сама;
+  // мишени этой сцены (если включены) тоже притягиваются и сбиваются
+  const blackhole = createBlackhole({ THREE, group, camera, groundAt, plates: () => (enabled ? targets : null), knockPlate: (t, p, d) => targetSet.knock(t, p, d) });
   // Звук живёт между подменами сцены: контекст создаётся один раз (их число в странице ограничено).
   const sound = (shared.sound ??= createSound());
 
@@ -139,6 +147,165 @@ export function createShooting({ THREE, root, camera }) {
     }
     return best;
   };
+  // ---- Автонаводка (оружие с autoAim: <градусы>, main.js GUNS / generated-guns.js): при выстреле
+  // пуля летит не вдоль ствола, а в центр лучшей цели в конусе ±autoAim° вокруг ствола (наименьший
+  // угол; почти равные — ближняя), с поправкой на падение пули и упреждением v·t (бегущий пёс).
+  // Цели: стоящие мишени, летящие тарелки (clayTarget.aimTargets) и всё из shootables, у кого есть
+  // aimTargets(visit) — visit(центр: Vector3, vx, vy, vz) для каждой живой вражеской цели (robodog-horde.js).
+  // Поза пушки не меняется; метки захвата нет (кольцо убрано по просьбе пользователя).
+  const lockPos = new THREE.Vector3();
+  const lockVel = new THREE.Vector3();
+  const autoDir = new THREE.Vector3();
+  const sMuzzle = new THREE.Vector3();
+  const sDir = new THREE.Vector3();
+  const sTo = new THREE.Vector3();
+  let sCos = 1;
+  let sFar = 0;
+  let lockFound = false;
+  let lockAngle = 0;
+  let lockDist = 0;
+  let lockPlate = -1;
+  let visitPlate = -1;
+  // самонаведение: кто дал цель (clayTarget / shootable) и её ключ (key — любой постоянный объект
+  // цели: пёс, тарелка) — по ним цель находится снова каждый шаг (refreshHome)
+  let lockKey = null;
+  let lockProv = null;
+  let visitProv = null;
+  const visitAim = (pos, vx = 0, vy = 0, vz = 0, key = null) => {
+    sTo.subVectors(pos, sMuzzle);
+    const dist = sTo.length();
+    if (dist < 0.3 || dist > sFar) return;
+    const c = sTo.dot(sDir) / dist;
+    if (c < sCos) return;
+    const angle = Math.acos(Math.min(1, c));
+    // «почти тот же угол» (разница < AUTO_TIE_RAD ≈ 0,15°) — побеждает ближняя
+    const better = !lockFound || (Math.abs(angle - lockAngle) < AUTO_TIE_RAD ? dist < lockDist : angle < lockAngle);
+    if (!better) return;
+    lockFound = true;
+    lockAngle = angle;
+    lockDist = dist;
+    lockPos.copy(pos);
+    lockVel.set(vx, vy, vz);
+    lockPlate = visitPlate;
+    lockKey = key;
+    lockProv = visitProv;
+  };
+  const AUTO_TIE_RAD = 0.0026;
+  // лучшая цель в конусе deg° вокруг dir; true — нашлась (lockPos, lockVel, lockPlate)
+  const searchLock = (muzzle, dir, deg, speed) => {
+    lockFound = false;
+    lockPlate = -1;
+    lockKey = null;
+    lockProv = null;
+    visitProv = null;
+    sMuzzle.copy(muzzle);
+    sDir.copy(dir).normalize();
+    sCos = Math.cos((Math.min(45, deg) * Math.PI) / 180);
+    sFar = Math.min(BULLET_PATH, speed * BULLET_LIFE);
+    if (enabled) {
+      const bodies = shared.targetBodies;
+      for (let i = 0; i < targets.length; i += 1) {
+        if (bodies?.[i]?.fallen) continue;
+        visitPlate = i;
+        visitAim(scratch.setFromMatrixPosition(targets[i].matrixWorld));
+      }
+    }
+    visitPlate = -1;
+    visitProv = clayTarget;
+    clayTarget?.aimTargets?.(visitAim);
+    for (let i = 0; i < shootables.length; i += 1) {
+      visitProv = shootables[i];
+      shootables[i].aimTargets?.(visitAim);
+    }
+    visitProv = null;
+    return lockFound;
+  };
+  // ---- Самонаводящийся снаряд (shoot({ homing })): летит вдоль ствола, через delayS начинает
+  // поворачивать к ТЕКУЩЕМУ центру цели (с упреждением v·t) не быстрее turnDegS°/с — видна дуга.
+  // Цель пропала (убита, разбита, упала) или проскочена — дальше прямо. Скорость постоянна.
+  const HOMING_STEP = 1 / 120; // с: шаг интегрирования (отрезки для попаданий — те же)
+  let findKey = null;
+  let findOk = false;
+  const findPos = new THREE.Vector3();
+  const findVel = new THREE.Vector3();
+  const visitFind = (pos, vx = 0, vy = 0, vz = 0, key = null) => {
+    if (findOk || key !== findKey) return;
+    findOk = true;
+    findPos.copy(pos);
+    findVel.set(vx, vy, vz);
+  };
+  // где цель пули b сейчас (b.hPos, b.hVel); нет её — самонаведение выключается
+  const refreshHome = (b) => {
+    if (b.hPlate >= 0) {
+      if (!enabled || shared.targetBodies?.[b.hPlate]?.fallen || !targets[b.hPlate]) b.hPlate = -1;
+      else b.hPos.setFromMatrixPosition(targets[b.hPlate].matrixWorld);
+      return;
+    }
+    if (!b.hKey) return;
+    findKey = b.hKey;
+    findOk = false;
+    if (b.hProv === clayTarget || shootables.includes(b.hProv)) b.hProv?.aimTargets?.(visitFind);
+    findKey = null;
+    if (!findOk) {
+      b.hKey = null;
+      return;
+    }
+    b.hPos.copy(findPos);
+    b.hVel.copy(findVel);
+  };
+  const homeTo = new THREE.Vector3();
+  const homeDir = new THREE.Vector3();
+  const steerHome = (b, h) => {
+    const tti = homeTo.subVectors(b.hPos, b.pos).length() / b.speed;
+    homeTo.copy(b.hPos).addScaledVector(b.hVel, tti).sub(b.pos);
+    const dist = homeTo.length();
+    if (dist < 1e-3) return;
+    homeTo.divideScalar(dist);
+    homeDir.copy(b.vel).normalize();
+    const c = Math.max(-1, Math.min(1, homeDir.dot(homeTo)));
+    if (c < 0) {
+      // проскочил — дальше прямо
+      b.hKey = null;
+      b.hPlate = -1;
+      return;
+    }
+    const angle = Math.acos(c);
+    // не медленнее turnDegS, а у близкой цели — столько, чтобы закрыть угол за половину оставшегося
+    // времени (дуга плавно круче к концу, но снаряд всегда сходится)
+    const maxTurn = Math.max(b.hTurn, (2 * angle) / Math.max(dist / b.speed, h)) * h;
+    if (angle <= maxTurn) homeDir.copy(homeTo);
+    else {
+      const f = maxTurn / angle;
+      const s = Math.sin(angle);
+      homeDir.multiplyScalar(Math.sin((1 - f) * angle) / s).addScaledVector(homeTo, Math.sin(f * angle) / s).normalize();
+    }
+    b.vel.copy(homeDir).multiplyScalar(b.speed);
+  };
+  // направление выстрела в lockPos (с упреждением lockVel·t) по параболе: нижний угол из
+  // tg θ = (v² − √(v⁴ − g(g·h² + 2·y·v²))) / (g·h); недолёт по дальности — прямо на цель
+  const solveLock = (muzzle, speed, out, g = GRAVITY) => {
+    const v2 = speed * speed;
+    let t = 0;
+    for (let k = 0; k < 3; k += 1) {
+      const px = lockPos.x + lockVel.x * t - muzzle.x;
+      const py = lockPos.y + lockVel.y * t - muzzle.y;
+      const pz = lockPos.z + lockVel.z * t - muzzle.z;
+      const h = Math.hypot(px, pz);
+      const disc = v2 * v2 - g * (g * h * h + 2 * py * v2);
+      if (h < 1e-4 || g <= 0 || disc < 0) {
+        out.set(px, py, pz).normalize();
+        t = Math.hypot(h, py) / speed;
+      } else {
+        const tan = (v2 - Math.sqrt(disc)) / (g * h);
+        const cos = 1 / Math.sqrt(1 + tan * tan);
+        out.set((px / h) * cos, tan * cos, (pz / h) * cos);
+        t = h / (speed * cos);
+      }
+      if (lockVel.lengthSq() === 0) break;
+    }
+    return out;
+  };
+
   const aimPoint = new THREE.Vector3();
   const segDir = new THREE.Vector3();
   const segHit = { point: new THREE.Vector3(), normal: new THREE.Vector3(), target: null, isStand: false };
@@ -146,7 +313,9 @@ export function createShooting({ THREE, root, camera }) {
   // ---- Пули в полёте (пул, без выделений памяти за кадр)
   const bullets = [];
   for (let i = 0; i < MAX_BULLETS; i += 1) {
-    bullets.push({ active: false, muzzle: new THREE.Vector3(), dir: new THREE.Vector3(), speed: BULLET_SPEED, age: 0, kind: null, tracer: 0, onResult: null, born: 0 });
+    bullets.push({ active: false, muzzle: new THREE.Vector3(), dir: new THREE.Vector3(), speed: BULLET_SPEED, age: 0, kind: null, tracer: 0, onResult: null, born: 0, g: GRAVITY, mana: 0, color: null,
+      // самонаведение: численный полёт (pos, vel), цель (hPlate | hProv + hKey), её центр и скорость
+      home: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), travel: 0, hDelay: 0, hTurn: 0, hPlate: -1, hProv: null, hKey: null, hPos: new THREE.Vector3(), hVel: new THREE.Vector3() });
   }
   let bornCounter = 0;
   let lastAim = null; // мишень под контуром (для vr:eval)
@@ -161,6 +330,7 @@ export function createShooting({ THREE, root, camera }) {
   const finish = (b, t, result) => {
     b.active = false;
     effects.tracerLand(b.tracer, b.speed * t);
+    if (b.mana) mana.land(b.mana, t);
     const cb = b.onResult;
     b.onResult = null;
     if (cb) {
@@ -224,8 +394,11 @@ export function createShooting({ THREE, root, camera }) {
     const t = t0 + ((t1 - t0) * far) / len;
     bPoint.copy(bA).addScaledVector(bDir, far);
     // направление полёта в момент попадания (с учётом падения)
-    bVel.copy(b.dir).multiplyScalar(b.speed);
-    bVel.y -= GRAVITY * t;
+    if (b.home) bVel.copy(b.vel);
+    else {
+      bVel.copy(b.dir).multiplyScalar(b.speed);
+      bVel.y -= b.g * t;
+    }
     bVel.normalize();
     const keepKind = shared.shotKind;
     shared.shotKind = b.kind; // калибр той пули, что попала (пока она летела, оружие могли сменить)
@@ -239,27 +412,62 @@ export function createShooting({ THREE, root, camera }) {
         bNormal.transformDirection(target.matrixWorld);
         addDecal(target, bPoint);
         targetSet.knock(target, bPoint, bVel);
-        effects.impact(bPoint, bNormal.clone());
-        const delay = Math.min(250, (b.muzzle.distanceTo(bPoint) / SPEED_OF_SOUND) * 1000);
-        const at = bPoint.clone();
-        setTimeout(() => sound.hit(at), delay);
+        if (!b.mana) {
+          effects.impact(bPoint, bNormal.clone());
+          const delay = Math.min(250, (b.muzzle.distanceTo(bPoint) / SPEED_OF_SOUND) * 1000);
+          const at = bPoint.clone();
+          setTimeout(() => sound.hit(at), delay);
+        }
         result = true;
       }
-    } else if (what === 1) {
+    } else if (what === 1 && !b.mana) {
       camera.getWorldPosition(camPos);
       if (camPos.distanceToSquared(bPoint) < GROUND_FX_M * GROUND_FX_M) effects.groundHit(bPoint.clone());
+    }
+    // мана-снаряд: вместо искр и пыли — магический всплеск и «чпок» со звоном (во что бы ни попал)
+    if (b.mana) {
+      mana.impact(bPoint, b.color);
+      sound.manaHit?.(bPoint);
     }
     shared.shotKind = keepKind;
     finish(b, t, result);
     return true;
   };
+  // самонаводящаяся пуля: шаги HOMING_STEP, руление к цели, каждый шаг — отрезок для попаданий
+  const stepHoming = (b, dt) => {
+    const end = Math.min(b.age + dt, BULLET_LIFE);
+    refreshHome(b); // раз за шаг мира: где цель сейчас (и жива ли)
+    let t0 = b.age;
+    while (t0 < end) {
+      const t1 = Math.min(end, t0 + HOMING_STEP);
+      const h = t1 - t0;
+      bA.copy(b.pos);
+      if (t0 >= b.hDelay && (b.hKey || b.hPlate >= 0)) steerHome(b, h);
+      b.vel.y -= b.g * h;
+      b.pos.addScaledVector(b.vel, h);
+      bB.copy(b.pos);
+      b.travel += b.speed * h;
+      if (castBullet(b, t0, t1)) {
+        if (b.mana) mana.track(b.mana, bPoint, b.vel);
+        return;
+      }
+      t0 = t1;
+    }
+    b.age = end;
+    if (b.mana) mana.track(b.mana, b.pos, b.vel);
+    if (end >= BULLET_LIFE || b.travel >= BULLET_PATH) finish(b, end, false);
+  };
   const stepBullet = (b, dt) => {
+    if (b.home) {
+      stepHoming(b, dt);
+      return;
+    }
     const end = Math.min(b.age + dt, BULLET_LIFE, BULLET_PATH / b.speed);
     let t0 = b.age;
     while (t0 < end) {
       const t1 = Math.min(end, t0 + BULLET_STEP);
-      posAt(bA, b.muzzle, b.dir, b.speed, t0);
-      posAt(bB, b.muzzle, b.dir, b.speed, t1);
+      posAt(bA, b.muzzle, b.dir, b.speed, t0, b.g);
+      posAt(bB, b.muzzle, b.dir, b.speed, t1, b.g);
       if (castBullet(b, t0, t1)) return;
       t0 = t1;
     }
@@ -360,7 +568,18 @@ export function createShooting({ THREE, root, camera }) {
     // счёт (лежащий робопёс)). speed — начальная скорость пули, м/с. Дальность пули — BULLET_LIFE и
     // BULLET_PATH (range, если передан, не учитывается).
     // big — крупный калибр: вторая вспышка с дымом чуть впереди дула
-    shoot(muzzle, direction, { ejector, right, up, big = false, speed = BULLET_SPEED, onResult = null } = {}) {
+    // projectile: 'mana' — мана-снаряд (mana.js) вместо пули: свой вид, вспышка, попадание, без гильзы;
+    // color — его цвет (hex); gravity — м/с² этой пули (по умолчанию 9,81, у маны MANA_GRAVITY)
+    // homing: { delayS = 0.05, turnDegS = 360, gravity = 0 } + autoAimDeg — самонаведение: цель
+    // выбирается в конусе autoAimDeg° вокруг ствола (как автонаводка), снаряд стартует ВДОЛЬ ствола и
+    // доворачивает к ней по дуге (stepHoming). Трассера у самонаводящейся пули нет (мана рисует свой след).
+    shoot(muzzle, direction, { ejector, right, up, big = false, speed = BULLET_SPEED, onResult = null, projectile = null, color = null, gravity = null, homing = null, autoAimDeg = 0, charge = 0 } = {}) {
+      // projectile: 'blackhole' — чёрная дыра (blackhole.js) силы charge 0..1 вместо пули; будит врагов
+      if (projectile === 'blackhole') {
+        blackhole.fire(muzzle, direction, { k: charge, onResult, speed });
+        for (let i = 0; i < shootables.length; i += 1) shootables[i].shot?.(muzzle, direction, 0);
+        return;
+      }
       // пул: свободная пуля, иначе самая старая считается промахом и уступает место
       let b = null;
       for (let i = 0; i < MAX_BULLETS; i += 1) {
@@ -380,20 +599,65 @@ export function createShooting({ THREE, root, camera }) {
       b.kind = shared.shotKind ?? null;
       b.onResult = onResult;
       b.born = (bornCounter += 1);
-      b.tracer = effects.tracer(b.muzzle, b.dir, speed, GRAVITY, Math.min(BULLET_PATH, speed * BULLET_LIFE));
+      const isMana = projectile === 'mana';
+      b.g = gravity ?? (isMana ? MANA_GRAVITY : GRAVITY);
+      b.color = color;
+      b.home = Boolean(homing);
+      b.hPlate = -1;
+      b.hKey = null;
+      b.hProv = null;
+      if (b.home) {
+        b.g = homing.gravity ?? 0;
+        b.pos.copy(b.muzzle);
+        b.vel.copy(b.dir).multiplyScalar(speed);
+        b.travel = 0;
+        b.hDelay = homing.delayS ?? 0.05;
+        b.hTurn = ((homing.turnDegS ?? 360) * Math.PI) / 180;
+        if (autoAimDeg > 0 && searchLock(muzzle, b.dir, autoAimDeg, speed)) {
+          b.hPlate = lockPlate;
+          b.hKey = lockPlate >= 0 ? null : lockKey;
+          b.hProv = lockPlate >= 0 ? null : lockProv;
+          b.hPos.copy(lockPos);
+          b.hVel.copy(lockVel);
+        }
+      }
+      if (isMana) {
+        b.tracer = -1;
+        b.mana = mana.fire(b.muzzle, b.dir, speed, b.g, color, b.home);
+        mana.muzzle(muzzle, b.dir, color);
+        sound.shot({ position: muzzle });
+        return;
+      }
+      b.mana = 0;
+      b.tracer = b.home ? -1 : effects.tracer(b.muzzle, b.dir, speed, b.g, Math.min(BULLET_PATH, speed * BULLET_LIFE));
 
       effects.muzzleFlash(muzzle, direction);
       if (big) effects.muzzleFlash(muzzle.clone().addScaledVector(direction, 0.07), direction);
       if (ejector && right && up) effects.eject(ejector, right, up);
       sound.shot({ position: muzzle });
     },
+    // Автонаводка при выстреле: направление в лучшую цель конуса deg° (с поправкой на падение и
+    // упреждением) — общий вектор (перезаписывается) — или null, если в конусе никого. Ствол не трогает.
+    // gravity — как у shoot (null: по projectile)
+    autoAim(muzzle, direction, deg, speed = BULLET_SPEED, gravity = null, projectile = null) {
+      if (!(deg > 0) || !searchLock(muzzle, direction, deg, speed)) return null;
+      return solveLock(muzzle, speed, autoDir, gravity ?? (projectile === 'mana' ? MANA_GRAVITY : GRAVITY));
+    },
+    manaStats: () => mana.stats(), // для vr:eval
+    // заряд чёрной дыры у дула (main.js, gun.charge): item — оружие в руке или null; true — стал полным
+    chargeFx: (item, level, seconds) => blackhole.charge(item, level, seconds),
+    blackhole, // для vr:eval: blackhole.stats(), blackhole.fire(from, dir, { k })
+    // для vr:eval: последняя захваченная цель { x, y, z, plate, deg, dist } или null
+    autoAimLock: () =>
+      lockFound ? { x: lockPos.x, y: lockPos.y, z: lockPos.z, plate: lockPlate, deg: +((lockAngle * 180) / Math.PI).toFixed(2), dist: +lockDist.toFixed(2) } : null,
     // номер мишени под контуром после последнего aim() (−1 — нет), для vr:eval
     aimedIndex: () => targets.indexOf(lastAim),
     // пули в полёте (для vr:eval): [{ age, speed, kind, x, y, z }]
     bullets() {
       return bullets.filter((b) => b.active).map((b) => {
-        posAt(bPoint, b.muzzle, b.dir, b.speed, b.age);
-        return { age: b.age, speed: b.speed, kind: b.kind, x: bPoint.x, y: bPoint.y, z: bPoint.z };
+        if (b.home) bPoint.copy(b.pos);
+        else posAt(bPoint, b.muzzle, b.dir, b.speed, b.age, b.g);
+        return { age: b.age, speed: b.speed, kind: b.kind, x: bPoint.x, y: bPoint.y, z: bPoint.z, home: b.home, tracking: Boolean(b.hKey || b.hPlate >= 0) };
       });
     },
     // Глиняные тарелки (clays.js): { cast(origin, dir, far) → расстояние или −1, hit(origin, dir, distance) }
@@ -447,11 +711,15 @@ export function createShooting({ THREE, root, camera }) {
       const bulletDt = Math.min(0.05, dt || 0);
       if (bulletDt > 0) for (let i = 0; i < MAX_BULLETS; i += 1) if (bullets[i].active) stepBullet(bullets[i], bulletDt);
       effects.update(dt);
+      mana.update(dt);
+      blackhole.update(dt);
     },
     dispose() {
       for (let i = 0; i < MAX_BULLETS; i += 1) bullets[i].active = false; // летящие пули пропадают вместе со сценой
       saveTargets();
       effects.dispose();
+      mana.dispose();
+      blackhole.dispose();
       targetSet.dispose();
     },
   });

@@ -9,6 +9,10 @@
 // Сцены: features активной сцены решают, какие пункты есть (targets — «Мишени», spawn —
 // «Заспавнить» и «Хват»; счёта сейчас нет нигде). «Сцены ▸» и «Настройки ▸» есть всегда, кроме
 // меню с оружием в руке (там только пункты оружия).
+import { GENERATED_GUNS, genEntry, genSpawnLabel } from './generated-guns.js';
+
+export const FIRE_MODE_PREFIX = 'Режим:'; // «Режим: авто / полуавтомат» у сгенерированных пушек с modes
+
 export const SCENES_MENU = 'Сцены';
 export const SAVE_NEW = 'Сохранить как новую';
 export const CLEAR_ALL = 'Очистить всё';
@@ -18,6 +22,14 @@ export const RESET_SCORE = 'Сбросить счёт';
 // машина (car-drive.js): первый пункт любого меню в сцене с функцией «car»
 export const CAR_ENTER = 'Сесть за руль';
 export const CAR_EXIT = 'Выйти из машины';
+// стая робопсов: «Собаки ▸ Союзники: вкл/выкл» (обрабатывает main.js → shared.allies)
+export const DOGS_MENU = 'Собаки';
+// «Собаки ▸ Квадрокоптеры: вкл/выкл» (обрабатывает main.js → shared.drones, drones.js)
+export const DRONES_ON = 'Квадрокоптеры: вкл';
+export const DRONES_OFF = 'Квадрокоптеры: выкл';
+// «Собаки ▸ Артиллерия: вкл/выкл» (обрабатывает main.js → shared.artillery, artillery.js)
+export const ARTILLERY_ON = 'Артиллерия: вкл';
+export const ARTILLERY_OFF = 'Артиллерия: выкл';
 
 export function buildMenu({
   holdingPistol,
@@ -33,7 +45,15 @@ export function buildMenu({
   scopeDebug = false, // панель отладки прицела (scope-debug.js), пункт у АВП в руке
   inertia = false, // «Инерция: вкл/выкл» в «Настройках»: гасит дрожание руки (inertia.js)
   prone = false, // «Режим лёжа: вкл/выкл» в «Настройках»: центрирование ставит глаза в ~35 см над землёй
+  tracersOff = false, // «Трассеры: вкл/выкл» в «Настройках»
+  fireMode = null, // 'semi' | 'auto' — у пушки в руке с modes (generated-guns.js)
+  shake = 1, // «Тряска: вкл / сильно / выкл» в «Настройках» (shake.js): 1 | 2 | 0
+  allies = null, // «Собаки ▸ Союзники: вкл/выкл» (стая, robodog-horde.js); null — пункта нет
+  tower = false, // «Вышка: вкл/выкл» (tower.js): в «Собаки ▸», если он есть, иначе в «Настройки ▸»
+  drones = null, // «Собаки ▸ Квадрокоптеры: вкл/выкл» (drones.js); null — пункта нет
+  artillery = null, // «Собаки ▸ Артиллерия: вкл/выкл» (artillery.js); null — пункта нет
 }) {
+  const towerItem = { label: tower ? 'Вышка: вкл' : 'Вышка: выкл', keepOpen: true };
   const carItems = car ? [{ label: car === 'in' ? CAR_EXIT : CAR_ENTER }] : [];
   const outlineItem = { label: aimOutline ? 'Обводка прицела: вкл' : 'Обводка прицела: выкл', keepOpen: true };
   const physicsItem = {
@@ -58,8 +78,9 @@ export function buildMenu({
   // настройки: «Отцентрировать» (ctx.recenter: где стоишь и куда смотришь — начало мира),
   // «Расстояние между глазами» открывает панель IPD (ipd-panel.js)
   const timeLabel = `Время: ×${String(timeScale).replace('.', ',')}`;
-  const settingsItem = { label: 'Настройки', children: [{ label: 'Отцентрировать' }, { label: 'Расстояние между глазами' }, { label: timeLabel, keepOpen: true }, { label: inertia ? 'Инерция: вкл' : 'Инерция: выкл', keepOpen: true }, { label: prone ? 'Режим лёжа: вкл' : 'Режим лёжа: выкл' }] };
-  const common = [...(features.targets ? [physicsItem] : []), scenesItem, settingsItem];
+  const settingsItem = { label: 'Настройки', children: [{ label: 'Отцентрировать' }, { label: 'Расстояние между глазами' }, { label: timeLabel, keepOpen: true }, { label: inertia ? 'Инерция: вкл' : 'Инерция: выкл', keepOpen: true }, { label: prone ? 'Режим лёжа: вкл' : 'Режим лёжа: выкл' }, { label: tracersOff ? 'Трассеры: выкл' : 'Трассеры: вкл', keepOpen: true }, { label: shake === 0 ? 'Тряска: выкл' : shake === 2 ? 'Тряска: сильно' : 'Тряска: вкл', keepOpen: true }, ...(allies === null ? [towerItem] : [])] };
+  const dogsItem = allies === null ? [] : [{ label: DOGS_MENU, children: [{ label: allies ? 'Союзники: вкл' : 'Союзники: выкл', keepOpen: true }, towerItem, ...(drones === null ? [] : [{ label: drones ? DRONES_ON : DRONES_OFF, keepOpen: true }]), ...(artillery === null ? [] : [{ label: artillery ? ARTILLERY_ON : ARTILLERY_OFF, keepOpen: true }])] }];
+  const common = [...(features.targets ? [physicsItem] : []), ...dogsItem, scenesItem, settingsItem];
   if (heldKind === 'plate') {
     // глиняная тарелка в руке: курок не стреляет, а взводит бросок (clays.js)
     return { title: 'Тарелка', items: [...carItems, { label: 'Удалить тарелку' }, ...common] };
@@ -67,13 +88,14 @@ export function buildMenu({
   if (heldKind) {
     // оружие в руке: перенастроить его посадку (оно замирает, джойстик переставляют, второй хват
     // приклеивает; у пистолета и калаша посадка своя) или убрать его совсем
-    return { title: heldKind === 'ak' ? 'Калаш' : heldKind === 'ak2' ? 'Калаш 2.0' : heldKind === 'awp' ? 'АВП' : 'Пистолет', items: [
+    return { title: genEntry(heldKind)?.name ?? (heldKind === 'ak' ? 'Калаш' : heldKind === 'ak2' ? 'Калаш 2.0' : heldKind === 'awp' ? 'АВП' : 'Пистолет'), items: [
         ...carItems,
         { label: 'Перенастроить оси' },
         { label: 'Удалить оружие' },
         { label: laser ? 'Лазерный прицел: вкл' : 'Лазерный прицел: выкл', keepOpen: true },
         { label: 'Цвет прицела' }, // закрывает колесо и открывает панель laser-panel.js
-        ...(heldKind === 'awp' || heldKind === 'ak2' ? [{ label: scopeDebug ? 'Отладка прицела: вкл' : 'Отладка прицела: выкл', keepOpen: true }] : []),
+        ...(genEntry(heldKind)?.modes?.length > 1 ? [{ label: `${FIRE_MODE_PREFIX} ${fireMode === 'auto' ? 'авто' : 'полуавтомат'}`, keepOpen: true }] : []),
+        ...(heldKind === 'awp' || heldKind === 'ak2' || genEntry(heldKind)?.scope ? [{ label: scopeDebug ? 'Отладка прицела: вкл' : 'Отладка прицела: выкл', keepOpen: true }] : []),
       ],
     };
   }
@@ -81,7 +103,9 @@ export function buildMenu({
   const spawnItems = features.spawn
     ? [
         // всё, что можно заспавнить, — в одном подменю (onMenu смотрит только на подпись пункта)
-        { label: 'Заспавнить', children: [{ label: 'Заспавнить пистолет' }, { label: 'Заспавнить калаш' }, { label: 'Заспавнить калаш 2.0' }, { label: 'Заспавнить АВП' }, { label: 'Заспавнить тарелку' }] },
+        // сгенерированные пушки (generated-guns.js): «Заспавнить <name>»; больше трёх — своим подменю
+        { label: 'Заспавнить', children: [{ label: 'Заспавнить пистолет' }, { label: 'Заспавнить калаш' }, { label: 'Заспавнить калаш 2.0' }, { label: 'Заспавнить АВП' }, { label: 'Заспавнить тарелку' },
+          ...(GENERATED_GUNS.length > 3 ? [{ label: 'Новые пушки', children: GENERATED_GUNS.map((g) => ({ label: genSpawnLabel(g) })) }] : GENERATED_GUNS.map((g) => ({ label: genSpawnLabel(g) })))] },
         { label: gripMode === 'hold' ? 'Хват: держать' : 'Хват: нажать' },
       ]
     : [];

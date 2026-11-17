@@ -22,12 +22,12 @@ const GPU_SAMPLE_MS = 0; // 0 — не замерять
 export function createFps({ THREE, camera, renderer, scene }) {
   const canvas = document.createElement('canvas');
   canvas.width = 128;
-  canvas.height = 48;
+  canvas.height = 96; // строка 1 — FPS, строка 2 — фактическая скорость времени («×7,4»)
   const g = canvas.getContext('2d');
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   const label = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.064, 0.024),
+    new THREE.PlaneGeometry(0.064, 0.048),
     new THREE.MeshBasicMaterial({ map: texture, transparent: true, toneMapped: false, depthTest: false }),
   );
   label.renderOrder = 1001;
@@ -39,14 +39,16 @@ export function createFps({ THREE, camera, renderer, scene }) {
     for (const group of camera.children) {
       const dot = group.children?.find((c) => c.geometry?.type === 'CircleGeometry');
       if (!dot) continue;
-      label.position.copy(dot.position).add(new THREE.Vector3(0, -0.032, 0));
+      label.position.copy(dot.position).add(new THREE.Vector3(0, -0.044, 0));
       group.add(label);
       attached = dot;
       return;
     }
   };
 
-  const draw = (fps) => {
+  // speed — фактическая скорость сценового времени (прирост shared.sceneNowMs к реальному); null — не писать
+  // set — заказанная скорость: мир не успевает (world-clock.js) — пишется «×12/64»
+  const draw = (fps, speed = null, set = 1) => {
     g.clearRect(0, 0, canvas.width, canvas.height);
     g.font = 'bold 34px system-ui, sans-serif';
     g.textAlign = 'center';
@@ -57,6 +59,14 @@ export function createFps({ THREE, camera, renderer, scene }) {
     const text = String(Math.round(fps));
     g.strokeText(text, 64, 25);
     g.fillText(text, 64, 25);
+    if (speed !== null) {
+      const s = speed >= 9.95 ? String(Math.round(speed)) : speed.toFixed(1).replace('.', ',').replace(',0', '');
+      const line = speed < set * 0.9 ? `×${s}/${String(set).replace('.', ',')}` : `×${s}`;
+      g.font = line.length > 5 ? 'bold 24px system-ui, sans-serif' : 'bold 30px system-ui, sans-serif';
+      g.fillStyle = '#e5e7eb';
+      g.strokeText(line, 64, 70);
+      g.fillText(line, 64, 70);
+    }
     texture.needsUpdate = true;
   };
 
@@ -73,6 +83,7 @@ export function createFps({ THREE, camera, renderer, scene }) {
   };
 
   let frames = 0;
+  let speedSceneAt = null; // shared.sceneNowMs в начале окна замера
   let since = performance.now();
   let last = since;
   // за период телеметрии
@@ -130,7 +141,7 @@ export function createFps({ THREE, camera, renderer, scene }) {
     },
     update() {
       if (!attached) attach();
-      else label.position.set(attached.position.x, attached.position.y - 0.032, 0); // кружок могут сдвинуть (hud.js dotShiftM)
+      else label.position.set(attached.position.x, attached.position.y - 0.044, 0); // кружок могут сдвинуть (hud.js dotShiftM)
       askRate();
       const now = performance.now();
       const frameMs = now - last;
@@ -143,7 +154,12 @@ export function createFps({ THREE, camera, renderer, scene }) {
       if (frameMs > (1000 / hz) * 1.5) slow += 1;
 
       if (now - since >= 500) {
-        draw((frames * 1000) / (now - since));
+        // фактическая скорость времени: сколько сценовых мс прошло за реальные (с учётом ограничения dt)
+        const sceneMs = globalThis.__sceneState?.sceneNowMs ?? 0;
+        const speed = speedSceneAt === null ? 1 : (sceneMs - speedSceneAt) / (now - since);
+        speedSceneAt = sceneMs;
+        const set = globalThis.__sceneState?.timeScale ?? 1;
+        draw((frames * 1000) / (now - since), set !== 1 || Math.abs(speed - 1) > 0.05 ? speed : null, set);
         frames = 0;
         since = now;
       }

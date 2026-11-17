@@ -21,10 +21,15 @@ const GRIP = 1;
 const Y = 5;
 
 export class ControlMap {
-  constructor() {
+  // menuOpen(): открыто ли радиальное меню сейчас. Перезагрузка — только на жест «закрыто → открыто →
+  // закрыто» (первые два нажатия открыли и закрыли меню). Иначе пункты-переключатели (keepOpen, например
+  // «Время»), которые жмут Y несколько раз подряд при открытом меню, перезагружали страницу.
+  constructor(menuOpen = () => false) {
+    this.menuOpen = menuOpen;
     this.previous = [];
     this.yPressedAt = null;
     this.yPresses = [];
+    this.yMenuAt = []; // было ли меню открыто в момент каждого из yPresses
     this.yIsReload = false; // the press that completed three: its release does nothing
   }
 
@@ -35,10 +40,16 @@ export class ControlMap {
     const falling = (index) => !pressed(index) && Boolean(this.previous[index]);
 
     if (rising(Y)) {
-      this.yPresses = this.yPresses.filter((at) => nowMs - at <= TRIPLE_PRESS_MS);
+      const keep = this.yPresses.map((at) => nowMs - at <= TRIPLE_PRESS_MS);
+      this.yPresses = this.yPresses.filter((_, i) => keep[i]);
+      this.yMenuAt = this.yMenuAt.filter((_, i) => keep[i]);
       this.yPresses.push(nowMs);
-      if (this.yPresses.length >= 3) {
+      this.yMenuAt.push(Boolean(this.menuOpen()));
+      const m = this.yMenuAt;
+      const gesture = m.length >= 3 && !m[m.length - 3] && m[m.length - 2] && !m[m.length - 1];
+      if (gesture) {
         this.yPresses = [];
+        this.yMenuAt = [];
         this.yIsReload = true;
         actions.push('reload');
       } else {

@@ -73,6 +73,7 @@ export function createClays({ THREE, root, shooting, camera }) {
   clayMesh.frustumCulled = false;
   clayMesh.count = 0;
   root.add(clayMesh);
+  let clayWarm = 0; // кадров после создания (update: пустой меш скрыт)
 
   // белая обводка у тарелки, которую можно взять
   const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.BackSide });
@@ -227,6 +228,13 @@ export function createClays({ THREE, root, shooting, camera }) {
       rayVel.copy(rayClay.v).addScaledVector(dir, 2.5);
       shatter(rayClay, rayHit, rayVel);
       rayClay = null;
+    },
+    // автонаводка (shooting.js searchLock): летящие тарелки, центр и скорость
+    aimTargets(visit) {
+      for (let i = 0; i < list.length; i += 1) {
+        const clay = list[i];
+        if (clay.state === 'fly') visit(clay.p, clay.v.x, clay.v.y, clay.v.z, clay);
+      }
     },
   });
 
@@ -467,6 +475,10 @@ export function createClays({ THREE, root, shooting, camera }) {
         clayMesh.instanceMatrix.needsUpdate = true;
         dirty = false;
       }
+      // пустой видимый меш тоже стоит CPU (программа и униформы на каждый глаз): скрыт, пока тарелок
+      // нет; первые кадры виден — шейдер собирается при подмене сцены (материал держит программу)
+      if (clayWarm < 3) clayWarm += 1;
+      clayMesh.visible = clayMesh.count > 0 || clayWarm < 3;
 
       // осколки: гравитация, отскок от земли с трением, в конце жизни уменьшаются
       if (!shardMesh.visible) return;

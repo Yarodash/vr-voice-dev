@@ -7,7 +7,7 @@ import '@xterm/xterm/css/xterm.css';
 import * as THREE from 'three';
 import { createBridge } from './bridge-client.js';
 import { createControls } from './controls.js';
-import { extractDraft } from './draft.js';
+import { extractDraft, isTranscribing } from './draft.js';
 import { createMessagePanel } from './message-panel.js';
 import { createPointer } from './pointer.js';
 import { createRadialMenu } from './radial-menu.js';
@@ -134,6 +134,7 @@ let seenScreenVersion = -1;
 // What the user has dictated and not sent yet. It is not shown: the user remembers it.
 let draftText = '';
 let draftChangedAt = 0;
+let transcribing = false; // the hidden terminal shows `Transcribing…`: the draft is not final yet
 let awaitingAnswer = false; // the last phrase was sent and Claude has not answered yet (orange dot)
 let userMessageId = null; // the pop-up that shows the phrase the user has just sent
 let sendRequested = false; // "send" was pressed; wait until the recognition has finished
@@ -342,7 +343,7 @@ let cancelFlashUntil = 0;
 // Light blue: everything that was said is already text, nothing is still being recognised, so it
 // can be sent at once. Plain blue: there is text, but the recognition has not finished yet.
 function draftIsFinal(time) {
-  return voiceState === 'idle' && releaseTimer === null && time - draftChangedAt >= SETTLE_MS;
+  return voiceState === 'idle' && releaseTimer === null && !transcribing && time - draftChangedAt >= SETTLE_MS;
 }
 function paintDot(time) {
   const color = time < screenshotFlashUntil ? DOT.screenshot
@@ -531,7 +532,7 @@ const pointer = createPointer({ scene, panels: messagePanels, aim: pointerAim })
 // once the trigger is up, the bridge has finished the dictation and the text has stopped changing.
 const SETTLE_MS = 500;
 function sendWhenReady(time) {
-  if (!sendRequested || triggerPressed || releaseTimer !== null || voiceState !== 'idle') return;
+  if (!sendRequested || triggerPressed || releaseTimer !== null || voiceState !== 'idle' || transcribing) return;
   if (time - draftChangedAt < SETTLE_MS) return;
   sendRequested = false;
   if (draftText) {
@@ -568,7 +569,13 @@ renderer.setAnimationLoop((time) => {
   panel?.tick(time);
   if (panel && panel.version !== seenScreenVersion) {
     seenScreenVersion = panel.version;
-    const text = extractDraft(panel.readScreen(), { cursor: panel.cursor });
+    const rows = panel.readScreen();
+    const text = extractDraft(rows, { cursor: panel.cursor });
+    const nowTranscribing = isTranscribing(rows);
+    if (nowTranscribing !== transcribing) {
+      transcribing = nowTranscribing;
+      if (!transcribing) draftChangedAt = time; // the settle time counts from the end of recognition
+    }
     if (text !== draftText) {
       draftText = text;
       draftChangedAt = time;

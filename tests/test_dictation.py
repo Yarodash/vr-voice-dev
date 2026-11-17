@@ -71,7 +71,7 @@ class FakeDetector:
 
 def make(rec, player=None, pty_write=None, **overrides):
     player = player or FakePlayer(rec)
-    options = dict(repeat_s=0.005, listen_timeout_s=0.2, tail_s=0.02, min_audio_s=0.04,
+    options = dict(repeat_s=0.005, listen_timeout_s=0.2, lead_in_s=0, tail_s=0.02, min_audio_s=0.04,
                    restore_delay_s=0.01, min_spaces=6, idle_audio_s=5, max_hold_s=30, drain_grace_s=1)
     options.update(overrides)
     dictation = Dictation(

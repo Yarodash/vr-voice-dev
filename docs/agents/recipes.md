@@ -10,6 +10,7 @@ In `scene/main.js` the closure already has: `THREE, root, renderer, camera, scen
 - [Add a keepOpen toggle](#add-a-keepopen-toggle)
 - [Add a scene feature flag](#add-a-scene-feature-flag)
 - [New weapon kind](#new-weapon-kind)
+- [Сгенерированная пушка (picture → card → GLB)](#сгенерированная-пушка)
 - [New grabbable item (absolute or relative)](#new-grabbable-item)
 - [Add a sound](#add-a-sound)
 - [Add an effect](#add-an-effect)
@@ -150,6 +151,145 @@ Example kind `'shotgun'`.
    `shared.soundBank = { …, pistol: [], ak: [], shotgun: [] }` in `loadBank`, map the kind in `setWeapon`
    and `shot()` (they currently collapse everything that is not `'ak'` to `'pistol'`), bump
    `SOUND_VERSION`.
+
+## Сгенерированная пушка
+
+Pipeline «a gun from a generated picture» — the dispatcher only drops files and edits ONE registry
+entry in `web/src/scene/generated-guns.js` (`GENERATED_GUNS`). Every edit hot-swaps the scene; the
+gun stays in the hand (same item, pose, held state), only what is drawn inside its group changes.
+Code: `scene/generated-gun.js` (builders, caches), wired in `pistols.js` (kind `'gen:<id>'`),
+`main.js` (GUNS, calib, fire mode, scope tilt, spawnOnAdd), `menu.js` (spawn items, title, toggles).
+
+Files: `web/public/models/generated/<id>/card.png` (PNG with alpha, gun SIDE view, barrel to the
+RIGHT, any size — it is cropped/downscaled to 1024 px in the page) and `<id>/mesh.glb` (Tripo,
+~30k tris, 1K texture). The Tripo MCP pipeline (`D:\3d_models\output\mcp\<run>\`) already leaves
+`cutout.png` (= card.png) next to `mesh.glb`: copy both.
+
+Stages (each is one edit of the entry):
+
+0. **Placeholder, instantly** (no files yet):
+   ```js
+   { id: 'm4', name: 'М4', length: 0.9, auto: true, shape: 'rifle', card: false, glb: false, v: 1, spawnOnAdd: true },
+   ```
+   A translucent blue hologram of a generic `shape` (`rifle | smg | pistol | shotgun | sniper`;
+   without it — by `length`) with a floating label «М4 / генерирую…». Already grabbable and shoots
+   (GUN_AUTO / GUN_SEMI). «Заспавнить М4» appears in «Заспавнить ▸» (more than 3 generated guns —
+   nested «Новые пушки ▸»). `spawnOnAdd: true` puts one copy ~0.55 m in front of the head, sideways,
+   once per id+v (localStorage `scene.gen.spawned.<id>.<v>`, both pages spawn their own).
+1. **Card**: drop `card.png`, set `card: true`. The placeholder becomes a solid thick picture: two
+   picture faces ±`thicknessM/2` (default 3.5 cm; the back is mirrored) + side walls traced from the
+   alpha mask (incl. holes), coloured from the edge pixels. Scale: opaque bbox width = `length`.
+   Auto-estimated from the mask: muzzle = right edge at barrel height; grip (palm) = first downward
+   protrusion from the left (long guns skip the stock). Check: `npm run vr:eval --
+   "__sceneState.weaponDebug.gen()"` → per cache key `grip`, `muzzle` (fractions of the image),
+   `autoGrip` (false = fallback guess), `muzzleM` (metres in weapon space).
+2. **Model**: drop `mesh.glb`, set `glb: true`. Longest axis = barrel; which end is the muzzle is
+   decided by comparing silhouette heights at both ends with the card (`muzzleOnPlusAxis`,
+   `ratioPlus` vs `cardRatio` in `gen()`); up = +Y of the file. Scaled to `length`; grip and muzzle
+   are put at the same fractions of the bbox as on the card, so the gun does not jump in the hand.
+   Normals are rebuilt smooth (Tripo has none), white outline = shell along normals.
+3. **Scope / trigger / modes** (pixel coordinates of card.png at its REAL size — the Read tool
+   shows a downscaled image and prints the factor; or open the png in the browser):
+   ```js
+   scope: { eyepiece: [810, 483], objective: [1508, 485], radiusPx: 46, objectiveRadiusPx: 34, zoom: 3, offset: [-0.003, -0.003, 0] },
+   trigger: { box: [1018, 822, 1060, 893] },  // box around the trigger blade inside the guard; top = pivot
+   modes: ['semi', 'auto'],                   // «Режим: авто / полуавтомат» in the held menu
+   ```
+   Scope = real `scope-lens.js` glass (eyepiece at the rear end centre, objective at the front),
+   own stick tilt (`scene.gen.<id>.scopeTilt`) and «Отладка прицела» in the held menu; `offset`
+   (metres, weapon axes: x right, y up, z towards the stock) nudges both glasses to sit concentric
+   with the drawn tube; `reticle: 'pso'`, `tanApparent` optional. Trigger: on the card the box is
+   cut out of the picture into its own small mesh; on the GLB triangles whose centroids fall in the
+   box (whole thickness) become a separate mesh on the same vertex buffers; rotates with the
+   controller trigger (`maxAngle`, default 0.35 rad). Fire mode persists in
+   `scene.gen.<id>.mode`.
+
+Re-generated files: overwrite them and bump `v` (URLs get `?v=<v>`, caches are keyed by it).
+
+Tuning overrides in the entry: `grip: [u, v]`, `muzzle: [u, v]` (fractions of the whole image from
+the top-left), `thicknessM`, `glbFlip: true` (model came out backwards), `calib` (localStorage key
+of the hand seat; default own `scene.gen.<id>.calib`, falling back to the AK seat for guns ≥ 0.45 m
+and the pistol seat for shorter ones — recalibrate with «Перенастроить оси»), any firing field of
+`GUN_AUTO` / `GUN_SEMI` (`gapMs`, `kickRad`, `kickBackM`, `climbRad`, `speed`, `flash`, `sound`
+`'ak'|'pistol'`, `shotKind`, `rifleCasing`, `autoAim`).
+
+**Auto-aim** — `autoAim: <deg>` in the entry (e.g. `sam_rifle: autoAim: 5`; also works on any
+`GUNS` entry in main.js; default 0 = off). On every shot `fire()` calls
+`shooting.autoAim(muzzle, barrel, deg, speed)`: the best target inside the cone of half-angle `deg`
+around the barrel (no lock marker is drawn — removed at the user's request) — standing plates (not fallen), flying clays, alive/knocked ENEMY dogs (allies
+skipped; body centre) — smallest angle wins, within ~0.15° the nearer one; the bullet is launched
+at its centre with the exact ballistic angle for the gun's `speed` and lead `v·t` for moving
+targets (gravity per projectile: 9.81, mana 2.5). Only the bullet direction changes, the gun pose
+does not; the search runs only on shots. New target types join by adding
+`aimTargets(visit)` to their `addShootable` handler: `visit(centre: Vector3, vx, vy, vz)` per live
+target, no allocations (see robodog-horde.js / clays.js). Debug: `__sceneState.shooting.autoAimLock()`.
+
+**Mana projectile** — `projectile: 'mana'` (+ optional `projectileColor: 0xRRGGBB`, default cyan
+`0x39c6ff`; `gravity` m/s², mana default 2.5) and `sound: 'mana'` in the entry (or a GUNS entry):
+glowing orb with trail and sparkles on the bullet's own ballistic path (`scene/mana.js`, one
+instanced additive draw), blue muzzle glow + ring, magic burst on any hit; no tracer, smoke, AK
+flash, casings, metal sparks. Hit logic, damage and auto-aim are unchanged.
+
+**Homing** — `homing: { delayS = 0.05, turnDegS = 360, gravity = 0 }` + `autoAim: <deg>`: the
+target is picked in the auto-aim cone at fire time, the projectile leaves ALONG the barrel and after
+`delayS` steers its velocity toward the target's CURRENT centre (lead v·t) — turn rate
+`max(turnDegS, 2·angle / timeToGo)`, so the arc is visible and always converges; constant speed.
+Target gone (`aimTargets` no longer lists its `key`) or overshot → continues straight. Numeric flight
+in `shooting.js stepHoming` (1/120 s steps, each step is a hit segment), mana orb follows via
+`mana.track` (trail along the last head positions). Providers MUST pass a stable key:
+`visit(centre, vx, vy, vz, key)` (dog object, clay, drone). `sam_rifle`: `autoAim: 15, speed: 100,
+homing: { delayS: 0.04, turnDegS: 240 }` — hits 20/40/60 m targets 10–14° off the barrel in
+0.25/0.4/0.64 s with a 4–14 m sideways arc. Sound: effects-and-sound.md (`manaShot`/`manaHit`).
+
+**Black hole projectile** — `projectile: 'blackhole'` (`cosmo_sniper`, «Космо-снайперка»): no bullet;
+`shooting.shoot` hands off to `scene/blackhole.js` (`blackhole.fire(from, dir, { k })`, also wakes the
+horde/drones via `shootables[].shot`). A travelling hole (≤ 3; a 4th collapses the oldest): flies straight
+(no gravity) at `92 − 12k` m/s with drag 0.15/s (~200–260 m), lives `2.8 + 1.7k` s or until the ground, then collapses
+(shrinks + brightens for `COLLAPSE_SWELL_S / rate` so the reversed swell of the sound ends on the
+burst) → flash, rings, sparks, captured particles flung out, blast (`3 + 9k` m: damage + outward push
+to dogs/drones/plates, `screenShake` by distance). Gravity in `R = 4 + 15.5k` m: `a = min(120, A·0.3R/max(r,1))·(1 − (r/R)⁴)`,
+`A = 36 + 44k`, × mass factor `scale^−0.6` (dogs), `span^−0.5` (drones), × 0.6 for allies.
+**Capture = death** (user): an ENEMY dog/drone of any size where the raw pull `a > CAPTURE_A` (10), or
+anyone (allies too) inside the core, is killed at once (`unit.strike(…, 1e4)` / `droneStrike(…, 1e4)`,
+≤ 3 kills per substep); corpses in the vortex stay `dying` (sparks, arcs) and tumble on an orbit with
+random particle kicks (≤ `SWIRL_MAX` 4 simulated, = horde `RAGDOLL_MAX`); beyond that they are dragged
+along the ground (`ragdoll.pos` shift + `unit.settle()`, ≤ 6 per substep); captured drones spin hard.
+Allies outside the core: alive with `a > 10` → `unit.knock` + toss (≤ `LIFT_MAX` 6 lifted ragdolls at once), held airborne by the hook
+`unit.holdDown()` (robodog-unit.js: resets the «down» timer); heavier/over cap — slide toward it +
+stagger; corpses (dying / awake / close) pulled via `ragdoll.push`; near the core the ragdoll velocity
+is pulled toward the hole's (captured dogs are carried along). Core (`0.9 + 1.6k` m): `unit.strike` /
+`shared.droneStrike` every 0.3 s. Drones: velocity + yaw spin. Plates: knocked once per hole; flying
+clays pulled. Never within `SAFE_M` 6 m of the player's head or the tower (`shared.towerPos`).
+Look: one camera(head)-facing quad per hole, ShaderMaterial with premultiplied alpha (black core +
+dark-violet fresnel rim, tilted accretion disc from a cached 256×64 periodic noise texture
+`__sceneState.bhNoise` — bands rotate ∝ r^−1.5, white-blue → violet → orange, doppler side, front half
+over the core, lensed far side around the shadow, photon ring, halo, dark haze; flattening from the
+view elevation), + one additive particle batch (orbiting streaks in hole-relative coords, ground grit
+sucked up, bursts). 2 draws when active, hidden when idle; buffers written once per frame (last world
+substep). Telemetry `[blackhole] cpu=… holes= parts= lifted=` every 5 s.
+**Charge** — `charge: { minS: 0.3, maxS: 3 }` in the entry (main.js `chargeStep`, real time): the
+trigger charges, release fires with `shot.charge = k = clamp((held − minS)/(maxS − minS))`; charging
+starts only when `gapMs` (game time) has passed. While charging `shooting.chargeFx(item, k, s)` draws a
+growing pulsing hole at the muzzle — a disc mesh in the plane ⟂ BARREL (the gun's world quaternion,
+spinning about the barrel; same `heat/disc` GLSL cut out of `holeFragment`) + a black fresnel-rim core
+sphere, streaks orbit in that plane (2 extra draws only while charging) — + whine, `buzz()` every 90 ms
+growing with k; full → flash + «дзинь» + strong buzz. `chargeFx(null)` when released/dropped. Sound:
+`scene/blackhole-sound.js` (own baked bank `__sceneState.bhSoundBank`, voices `__sceneState.bhVoices`:
+4 one-shots + 2 loops — rumble of the nearest hole, charge whine with rate 0.55→2.15). Debug:
+`__sceneState.shooting.blackhole.stats()`; desktop only: `.blackhole.fire(from, dir, { k, speed })`.
+
+How the swap works: `buildGenerated` returns one item (pistols.js does not copy it) with a fixed
+`group` → `visual` child (placeholder / card meshes / GLB meshes), `outline` mesh, trigger pivot,
+scope mount; `muzzle`/`ejector` vectors are updated in place. Heavy work (mask analysis, canvases,
+GLB prep) is done once per id+v+code version in `__sceneState.genGunCache`; geometries/materials are
+shared (`userData.shared`, `pistols.remove` skips them). Card ready in cache → shown in the same
+frame; otherwise placeholder until the promise resolves. Debug: `__sceneState.weaponDebug.items()`
+(each gen item has `gen.shows`: `placeholder | card | glb`), `.spawn('gen:m16')`, `.gen()`.
+
+Verify without the headset: on the `[desktop]` page (`if (session) return 'skip'`)
+`__sceneState.weaponDebug.spawn('gen:<id>')`, then move `weaponDebug.items().at(-1).group` in front
+of `camera` and `return await screenshot()`. Objects added to `root` by an eval vanish at the next
+scene swap (other agents edit in parallel) — re-run.
 
 ## New grabbable item
 

@@ -19,6 +19,17 @@ const YELLOW = 0xf2b807;
 const BLACK = 0x1b1c1f;
 const STEEL = 0x6a7078; // голый металл (цвет умножается на текстуру стали)
 const RUBBER = 0x141416;
+// Окраски (стая: у каждого пса своя): [кожух вместо жёлтого, рама/голова вместо чёрной]. Меняются
+// цвета вершин (setPaint) — тот же материал и шейдер, атлас не перерисовывается.
+export const DOG_PAINTS = [
+  [YELLOW, BLACK], // предупреждающая жёлто-чёрная (как была)
+  [0x5d6332, 0xa88f60], // армейская: олива и песок
+  [0xe4e7ea, 0x5f666e], // арктическая: белая и серая
+  [0xb81d1a, 0x161618], // красно-чёрная
+  [0x1d4bb0, 0xe9ecef], // полицейская: синяя и белая
+  [0xc0601c, 0x4a2b1a], // ржавая: оранжевая и бурая
+  [0x2c9a4c, 0xe6ebe7], // 6 — союзники (стая): зелёная и белая, только у них
+];
 // где в атласе вид металла: [u0, v0, du, dv]
 const REGION = { paint: [0, 0, 0.5, 1], steel: [0.5, 0.5, 0.5, 0.5], rubber: [0.5, 0, 0.5, 0.5] };
 
@@ -136,6 +147,66 @@ export function makeDogTextures(THREE) {
       ormMap.dispose();
     },
   };
+}
+
+// Скелет без мешей (стая: псов рисует robodog-instances.js экземплярами, по вызову отрисовки на вид
+// детали для всех псов). Те же шарниры и setPose, что у buildRobodog; материалы — заглушки с полями,
+// которые читает robodog-unit.js (вспышка, глаза), окраска — номер. В сцену не добавляется: матрицы
+// считает хозяин (updateMatrixWorld), корень мира — единичный.
+export function buildRobodogRig(THREE) {
+  const group = new THREE.Group();
+  group.name = 'robodog-rig';
+  const body = new THREE.Object3D();
+  group.add(body);
+  const legs = HIPS.map(([x, y, z]) => {
+    const hip = new THREE.Object3D();
+    hip.position.set(x, y, z);
+    body.add(hip);
+    const upper = new THREE.Object3D();
+    hip.add(upper);
+    const knee = new THREE.Object3D();
+    knee.position.set(0, -L1, 0);
+    upper.add(knee);
+    return { hip, upper, knee, side: x < 0 ? 0 : 1 };
+  });
+  const tYaw = new THREE.Object3D();
+  tYaw.position.set(0, 0.112, 0.04);
+  tYaw.visible = false;
+  body.add(tYaw);
+  const tPitch = new THREE.Object3D();
+  tPitch.position.set(0, 0.07, 0);
+  tYaw.add(tPitch);
+  const tMuzzle = new THREE.Object3D();
+  tMuzzle.position.set(0, 0.004, -0.225);
+  tPitch.add(tMuzzle);
+  const rig = {
+    group,
+    body,
+    legs,
+    rig: true,
+    paint: 0,
+    material: { emissive: new THREE.Color(0, 0, 0), dispose() {} },
+    eyeMaterial: { color: new THREE.Color(0x45e8ff), dispose() {} },
+    turret: { yaw: tYaw, pitch: tPitch, muzzle: tMuzzle, pivotY: tPitch.position.y },
+    setPaint(index) {
+      rig.paint = ((Math.floor(index) % DOG_PAINTS.length) + DOG_PAINTS.length) % DOG_PAINTS.length || 0;
+    },
+    setPose(pose) {
+      body.position.set(pose.x, pose.y, 0);
+      body.rotation.set(pose.pitch, pose.yaw ?? 0, pose.roll);
+      for (let i = 0; i < 4; i += 1) {
+        const leg = legs[i];
+        const a = pose.legs[i];
+        leg.hip.rotation.set(0, 0, a.abd);
+        leg.upper.rotation.set(a.hip, 0, 0);
+        leg.knee.rotation.set(a.knee, 0, 0);
+      }
+    },
+    dispose() {
+      group.removeFromParent();
+    },
+  };
+  return rig;
 }
 
 export function buildRobodog(THREE, { textures = null, env = null } = {}) {
@@ -280,7 +351,86 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
     return { hip, upper, knee };
   });
 
+  // ---- пулемёт на спине (стая: у каждого пятого; по умолчанию скрыт). Поворотная башенка (рысканье) и
+  // качалка со стволом (тангаж); тот же материал — без новых шейдеров, +2 вызова отрисовки, когда виден.
+  const tYaw = new THREE.Object3D();
+  tYaw.position.set(0, 0.112, 0.04);
+  tYaw.visible = false;
+  body.add(tYaw);
+  const tb = [];
+  part(STEEL, new THREE.CylinderGeometry(0.05, 0.055, 0.025, 10).translate(0, 0.012, 0), tb, 'steel'); // поворотный круг
+  box(BLACK, tb, 0.08, 0.02, 0.08, 0, 0.03, 0);
+  box(YELLOW, tb, 0.014, 0.05, 0.03, -0.034, 0.06, 0); // вилка
+  box(YELLOW, tb, 0.014, 0.05, 0.03, 0.034, 0.06, 0);
+  const turretBaseGeometry = merged(tb);
+  const turretBase = new THREE.Mesh(turretBaseGeometry, material);
+  turretBase.name = 'robodog-turret-base';
+  tYaw.add(turretBase);
+  const tPitch = new THREE.Object3D();
+  tPitch.position.set(0, 0.07, 0);
+  tYaw.add(tPitch);
+  const tg = [];
+  box(BLACK, tg, 0.046, 0.042, 0.11, 0, 0, 0.01); // коробка
+  box(YELLOW, tg, 0.03, 0.034, 0.05, 0.036, -0.008, 0.015); // патронный ящик
+  steelBox(tg, 0.014, 0.014, 0.17, 0, 0.004, -0.125); // ствол
+  steelBox(tg, 0.022, 0.022, 0.035, 0, 0.004, -0.2); // дульный тормоз
+  steelBox(tg, 0.008, 0.02, 0.008, 0, 0.026, -0.03); // мушка
+  const turretGunGeometry = merged(tg);
+  const turretGun = new THREE.Mesh(turretGunGeometry, material);
+  turretGun.name = 'robodog-turret-gun';
+  tPitch.add(turretGun);
+  const tMuzzle = new THREE.Object3D();
+  tMuzzle.position.set(0, 0.004, -0.225);
+  tPitch.add(tMuzzle);
+  const turret = { yaw: tYaw, pitch: tPitch, muzzle: tMuzzle, pivotY: tPitch.position.y };
+
+  // Окраска: вершины жёлтой краски → цвет 0, чёрной → цвет 1 (сталь и резина не меняются). Списки
+  // вершин — один раз; смена — запись в атрибут цвета (~тысяча вершин, только при появлении пса).
+  let paintIndex = 0;
+  let paintSets = null;
+  const setPaint = (index) => {
+    index = ((Math.floor(index) % DOG_PAINTS.length) + DOG_PAINTS.length) % DOG_PAINTS.length || 0;
+    if (index === paintIndex) return;
+    const scheme = DOG_PAINTS[index];
+    if (!paintSets) {
+      const yl = new THREE.Color(YELLOW);
+      const bl = new THREE.Color(BLACK);
+      const near = (a, i, c) => Math.abs(a[i] - c.r) + Math.abs(a[i + 1] - c.g) + Math.abs(a[i + 2] - c.b) < 1e-4;
+      paintSets = [bodyMesh.geometry, ...upperGeometry, ...lowerGeometry, turretBaseGeometry, turretGunGeometry].map((g) => {
+        const a = g.attributes.color.array;
+        const first = [];
+        const second = [];
+        for (let i = 0; i < a.length; i += 3) {
+          if (near(a, i, yl)) first.push(i);
+          else if (near(a, i, bl)) second.push(i);
+        }
+        return { attr: g.attributes.color, first: Uint32Array.from(first), second: Uint32Array.from(second) };
+      });
+    }
+    paintIndex = index;
+    const c0 = color.set(scheme[0]).clone();
+    const c1 = color.set(scheme[1]);
+    for (const { attr, first, second } of paintSets) {
+      const a = attr.array;
+      for (const i of first) {
+        a[i] = c0.r;
+        a[i + 1] = c0.g;
+        a[i + 2] = c0.b;
+      }
+      for (const i of second) {
+        a[i] = c1.r;
+        a[i + 1] = c1.g;
+        a[i + 2] = c1.b;
+      }
+      attr.needsUpdate = true;
+    }
+  };
+
   return {
+    setPaint,
+    turret,
+    // геометрии модели — для отрисовки всех псов стаи экземплярами (robodog-instances.js)
+    geometries: { body: bodyMesh.geometry, eye: eyeGeometry, upper: upperGeometry, lower: lowerGeometry, turretBase: turretBaseGeometry, turretGun: turretGunGeometry },
     group,
     body,
     eye,
@@ -289,7 +439,7 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
     legs,
     setPose(pose) {
       body.position.set(pose.x, pose.y, 0);
-      body.rotation.set(pose.pitch, 0, pose.roll);
+      body.rotation.set(pose.pitch, pose.yaw ?? 0, pose.roll);
       for (let i = 0; i < 4; i += 1) {
         const leg = legs[i];
         const a = pose.legs[i];
@@ -303,6 +453,8 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
       bodyMesh.geometry.dispose();
       eyeGeometry.dispose();
       for (const g of [...upperGeometry, ...lowerGeometry]) g.dispose();
+      turretBaseGeometry.dispose();
+      turretGunGeometry.dispose();
       material.dispose();
       eyeMaterial.dispose();
     },

@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -23,7 +24,8 @@ from bridge.claude_pty import (
 from bridge.config import Config, load_config
 # режим «конфиг» выключен по просьбе пользователя: все фразы идут в основную сессию (bridge/config_agent.py оставлен)
 from bridge.dictation import Dictation
-from bridge.server import HUB, create_app, load_or_create_pair_code
+from bridge.screen import TerminalScreen
+from bridge.server import HUB, KEYS, create_app, load_or_create_pair_code
 from bridge.virtual_mic import VirtualMicPlayer
 
 log = logging.getLogger("bridge")
@@ -32,15 +34,22 @@ log = logging.getLogger("bridge")
 # Nothing is sent on release: the words pile up in the prompt until the user presses "send".
 VR_CLAUDE_SETTINGS = {"voice": {"enabled": True, "mode": "hold", "autoSubmit": False}}
 
+# Claude Code's prompt box: a long horizontal rule with the `❯` prompt line right under it.
+PROMPT_BOX = re.compile(r"^─{20,}.*\n\s*[❯>]", re.M)
+
 
 class ClaudeRunner:
     """Keeps one Claude Code session alive in a pseudo-terminal and restarts it if it exits."""
 
-    def __init__(self, cfg: Config, root: Path, settings_file: Path, state_file: Path, on_output):
+    def __init__(self, cfg: Config, root: Path, settings_file: Path, state_file: Path, on_output,
+                 on_start=None):
         self._cfg, self._root = cfg, root
         self._settings_file, self._state_file = settings_file, state_file
         self._on_output = on_output
+        self._on_start = on_start  # called (on any thread) after every start, restarts included
         self._host: PtyHost | None = None
+        # The rendered screen, for what has to be read off it (the `listening…` footer).
+        self.screen = TerminalScreen(cfg.terminal.cols, cfg.terminal.rows)
         self._stopping = False
         self._started = 0.0
         self._quick_exits = 0
@@ -55,11 +64,19 @@ class ClaudeRunner:
             session_id, is_new = str(uuid.uuid4()), True
         argv = build_claude_argv(self._cfg.claude, session_id, is_new, self._settings_file)
         log.info("starting Claude Code (%s session %s)", "new" if is_new else "resumed", session_id)
+        screen = self.screen = TerminalScreen(self._cfg.terminal.cols, self._cfg.terminal.rows)
+
+        def on_output(text: str) -> None:  # terminal reader thread
+            screen.feed(text)
+            self._on_output(text)
+
         self._host = PtyHost(argv, cwd=str(self._root), env=child_env(os.environ),
                              cols=self._cfg.terminal.cols, rows=self._cfg.terminal.rows,
-                             on_output=self._on_output, on_exit=self._on_exit)
+                             on_output=on_output, on_exit=self._on_exit)
         self._started = time.monotonic()
         self._host.start()
+        if self._on_start is not None:
+            self._on_start()
 
     def write(self, data: str) -> None:
         if self._host is not None:
@@ -103,10 +120,50 @@ async def serve(cfg: Config, root: Path) -> None:
 
     def deliver(text: str) -> None:
         hub.pty_output(text)
-        dictation.on_pty_output(text)
+        if dictation.state == "warmup":
+            # Read off the rendered screen: the raw output never has "listening" whole.
+            dictation.on_pty_output(runner.screen.text())
+
+    priming: list[asyncio.Task] = []
+
+    def schedule_priming() -> None:  # after every (re)start of Claude Code, on any thread
+        def create():
+            priming[:] = [asyncio.create_task(prime_when_ready(runner.screen))]
+        loop.call_soon_threadsafe(create)
+
+    async def prime_when_ready(screen: TerminalScreen) -> None:
+        # Ready = the prompt box has been on screen for a second without interruption.
+        deadline = loop.time() + 60
+        shown_since = None
+        while loop.time() < deadline:
+            if runner.screen is not screen:
+                return  # restarted meanwhile: that start primes on its own
+            if PROMPT_BOX.search(screen.text()):
+                shown_since = shown_since or loop.time()
+                if loop.time() - shown_since >= 1.0:
+                    break
+            else:
+                shown_since = None
+            await asyncio.sleep(0.1)
+        else:
+            log.warning("Claude Code did not show its prompt within 60 s; dictation not primed")
+            return
+        try:
+            if not await dictation.prime():
+                log.info("priming skipped: the user is dictating")
+                return
+            end = loop.time() + 5
+            while "Transcribing" in screen.text() and loop.time() < end:
+                await asyncio.sleep(0.05)
+            if dictation.state == "idle":  # never wipe a dictation the user has started meanwhile
+                runner.write(KEYS["clear"])
+            log.info("dictation primed")
+        except Exception:
+            log.exception("priming failed")
 
     runner = ClaudeRunner(cfg, root, settings_file, state_dir / "session.json",
-                          on_output=lambda text: loop.call_soon_threadsafe(deliver, text))
+                          on_output=lambda text: loop.call_soon_threadsafe(deliver, text),
+                          on_start=schedule_priming)
     dictation = Dictation(runner.write, ListeningDetector(), defaults, player,
                           on_state=lambda state: hub.voice_state(state),
                           on_error=lambda text: hub.voice_error(text))

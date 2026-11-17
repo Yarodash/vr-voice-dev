@@ -106,7 +106,14 @@ export function createRobodog({ THREE, root, camera, renderer = null, shooting, 
     textures = makeDogTextures(THREE);
     const env = renderer ? ensureWeaponEnv(THREE, renderer) : null;
     unit = createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera, textures, env, shared });
-    removeShootable = shooting?.addShootable?.({ cast, hit, shot }) ?? null;
+    // автонаводка (shooting.js): живой пёс — центр корпуса и скорость
+    const aimTargets = (visit) => {
+      if (!enabled || !unit || !run || run.pending || (unit.mode !== 'alive' && !unit.knocked)) return;
+      const d = unit.dog;
+      const v = unit.mode === 'alive' ? d.v ?? 0 : 0;
+      visit(unit.bodyCenter, -Math.sin(d.yaw) * v, 0, -Math.cos(d.yaw) * v, d);
+    };
+    removeShootable = shooting?.addShootable?.({ cast, hit, shot, aimTargets }) ?? null;
   };
   const teardown = () => {
     removeShootable?.();

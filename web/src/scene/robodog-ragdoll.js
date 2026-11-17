@@ -7,7 +7,7 @@
 // «Мышцы» — мягкие связи стопы и колена с корпусом, длины из позы в момент смерти: пока сила мышц
 // не упала до нуля, пёс ещё стоит и дёргается, потом ноги подкашиваются. Земля — по высоте
 // ground(x, z): частица не уходит ниже, на касании трение гасит скорость вдоль земли.
-// Подшаг 1/120 с (один на кадр шлема), 10 итераций связей, скорость частиц ограничена; успокоился —
+// Подшаг 1/120 с (по накопленному сценовому времени: ~1 на кадр при ×1), 10 итераций связей, скорость частиц ограничена; успокоился —
 // засыпает, пока его не толкнут.
 import { HIPS, L1, L2 } from './robodog-gait.js';
 
@@ -38,12 +38,13 @@ export function createRagdoll() {
   const contact = new Uint8Array(COUNT);
   // удары о землю за последний step(): самый сильный (м/с вниз) и где, самое быстрое скольжение
   const hits = { impact: 0, slide: 0, x: 0, y: 0, z: 0 };
-  for (let i = 0; i < COUNT; i += 1) {
-    radius[i] = i < 4 ? 0.055 : i < 8 ? 0.05 : i < FOOT ? 0.035 : 0.028;
-    invMass[i] = i < 8 ? 1 : 1.8; // ноги легче корпуса
-  }
+  let scale = 1; // размер пса (стая: маленький 1 … огромный 4) — все длины ×scale
+  let maxSpeed = MAX_SPEED;
+  for (let i = 0; i < COUNT; i += 1) invMass[i] = i < 8 ? 1 : 1.8; // ноги легче корпуса
   // связи: a, b, min, max, вид (0 — жёсткая, 1 — предел, 2 — мышца)
-  const MAX_C = 64;
+  // 28 жёстких в корпусе + 20 у ног + 20 мышц = 68. Было 64: последние связи читались за концом
+  // массивов (undefined → NaN), и весь расчёт куклы сваливался в медленный режим (~0,5 мс на подшаг)
+  const MAX_C = 96;
   const ca = new Int16Array(MAX_C);
   const cb = new Int16Array(MAX_C);
   const cmin = new Float32Array(MAX_C);
@@ -58,22 +59,28 @@ export function createRagdoll() {
     ckind[nc] = kind;
     nc += 1;
   };
-  for (let a = 0; a < 8; a += 1) {
-    for (let b = a + 1; b < 8; b += 1) {
-      const pa = BODY_POINTS[a];
-      const pb = BODY_POINTS[b];
-      const d = Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]);
-      add(a, b, d, d, 0);
+  // жёсткие связи и пределы под размер s (мышцы — в start(), из позы, уже нужного размера)
+  const build = (s) => {
+    nc = 0;
+    for (let i = 0; i < COUNT; i += 1) radius[i] = (i < 4 ? 0.055 : i < 8 ? 0.05 : i < FOOT ? 0.035 : 0.028) * s;
+    for (let a = 0; a < 8; a += 1) {
+      for (let b = a + 1; b < 8; b += 1) {
+        const pa = BODY_POINTS[a];
+        const pb = BODY_POINTS[b];
+        const d = Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]) * s;
+        add(a, b, d, d, 0);
+      }
     }
-  }
-  for (let leg = 0; leg < 4; leg += 1) {
-    add(leg, KNEE + leg, L1, L1, 0);
-    add(KNEE + leg, FOOT + leg, L2, L2, 0);
-    add(leg, FOOT + leg, 0.12, L1 + L2, 1); // колено не складывается до конца
-    add(leg ^ 1, FOOT + leg, 0.2, 10, 1); // стопа не проходит под корпусом на другую сторону
-    add(leg < 2 ? 4 : 5, KNEE + leg, 0.22, 10, 1); // колено не уходит внутрь корпуса
-  }
-  const rigidCount = nc;
+    for (let leg = 0; leg < 4; leg += 1) {
+      add(leg, KNEE + leg, L1 * s, L1 * s, 0);
+      add(KNEE + leg, FOOT + leg, L2 * s, L2 * s, 0);
+      add(leg, FOOT + leg, 0.12 * s, (L1 + L2) * s, 1); // колено не складывается до конца
+      add(leg ^ 1, FOOT + leg, 0.2 * s, 10 * s, 1); // стопа не проходит под корпусом на другую сторону
+      add(leg < 2 ? 4 : 5, KNEE + leg, 0.22 * s, 10 * s, 1); // колено не уходит внутрь корпуса
+    }
+    return nc;
+  };
+  let rigidCount = build(1);
   let muscleStart = nc;
   let muscle = 0;
   let sleepFrames = 0;
@@ -112,7 +119,7 @@ export function createRagdoll() {
 
   const substep = (ground) => {
     const h2 = SUBSTEP * SUBSTEP;
-    const maxStep = MAX_SPEED * SUBSTEP;
+    const maxStep = maxSpeed * SUBSTEP;
     let moved = 0;
     for (let i = 0; i < COUNT; i += 1) {
       const j = i * 3;
@@ -137,12 +144,16 @@ export function createRagdoll() {
     }
     // высота земли под частицей — раз за подшаг (за подшаг частица смещается на миллиметры)
     for (let i = 0; i < COUNT; i += 1) floor[i] = ground(pos[i * 3], pos[i * 3 + 2]) + radius[i];
-    for (let it = 0; it < ITERATIONS; it += 1) {
+    const iterations = muscle > 0 ? ITERATIONS : 6; // обмякшему хватает меньше итераций
+    for (let it = 0; it < iterations; it += 1) {
       solve();
       for (let i = 0; i < COUNT; i += 1) {
         const j = i * 3;
         const g = floor[i];
         if (pos[j + 1] < g) {
+          // вытолкнуть без прибавки скорости: prev сдвигается так же (иначе глубокое проникновение
+          // превращалось в рывок вверх, и убитых псов подбрасывало)
+          prev[j + 1] += g - pos[j + 1];
           pos[j + 1] = g;
           contact[i] = 1;
         }
@@ -183,14 +194,30 @@ export function createRagdoll() {
     get muscle() {
       return muscle;
     },
+    get scale() {
+      return scale;
+    },
+    // размер куклы (до start): длины костей и корпуса, радиусы частиц ×s, предел скорости ×√s
+    setScale(s = 1) {
+      if (s === scale) return;
+      scale = s;
+      maxSpeed = MAX_SPEED * Math.min(1.6, s ** 0.25); // большие не разгоняются до «выстрела в небо»
+      rigidCount = build(s);
+      muscleStart = nc;
+    },
     // points: 16 мировых точек (как BODY_POINTS + колени + стопы) в позе на момент смерти;
     // (vx, vy, vz) — скорость пса, м/с
-    start(points, vx = 0, vy = 0, vz = 0) {
+    // ground(x, z) — если дан: точки ниже земли сразу поднимаются на неё (без скорости)
+    start(points, vx = 0, vy = 0, vz = 0, ground = null) {
       for (let i = 0; i < COUNT; i += 1) {
         const j = i * 3;
         pos[j] = points[j];
         pos[j + 1] = points[j + 1];
         pos[j + 2] = points[j + 2];
+        if (ground) {
+          const g = ground(pos[j], pos[j + 2]) + radius[i];
+          if (pos[j + 1] < g) pos[j + 1] = g;
+        }
         prev[j] = pos[j] - vx * SUBSTEP;
         prev[j + 1] = pos[j + 1] - vy * SUBSTEP;
         prev[j + 2] = pos[j + 2] - vz * SUBSTEP;
@@ -205,6 +232,19 @@ export function createRagdoll() {
       muscle = 0;
       asleep = false;
       sleepFrames = 0;
+      accumulator = 0;
+    },
+    // сразу улечься (бюджет кукол в стае): все точки — на землю под собой, без скорости, уснуть
+    settle(ground) {
+      for (let i = 0; i < COUNT; i += 1) {
+        const j = i * 3;
+        pos[j + 1] = ground(pos[j], pos[j + 2]) + radius[i];
+        prev[j] = pos[j];
+        prev[j + 1] = pos[j + 1];
+        prev[j + 2] = pos[j + 2];
+      }
+      muscle = 0;
+      asleep = true;
       accumulator = 0;
     },
     // сила мышц 0..1 (0 — обмяк)
@@ -251,13 +291,15 @@ export function createRagdoll() {
       hits.impact = 0;
       hits.slide = 0;
       if (asleep) return;
-      accumulator = Math.min(accumulator + dt, SUBSTEP * 3);
+      // копится сценовое время (замедление/ускорение, world-clock.js): подшаг мира до 0,05 с = до 6 шагов
+      accumulator = Math.min(accumulator + dt, SUBSTEP * 7);
       while (accumulator >= SUBSTEP) {
         accumulator -= SUBSTEP;
         const moved = substep(ground);
-        if (moved < 4e-5 && muscle <= 0) sleepFrames += 1;
+        // засыпает раньше (было 4e-5 и 1 с): трупы-куклы дорогие на Quest (~0,5 мс каждый)
+        if (moved < 1.2e-4 * scale && muscle <= 0) sleepFrames += 1;
         else sleepFrames = 0;
-        if (sleepFrames > 120) {
+        if (sleepFrames > 60) {
           asleep = true;
           accumulator = 0;
           break;
@@ -292,9 +334,10 @@ export function createRagdoll() {
       const hx = (p[0] + p[3] + p[6] + p[9]) / 4;
       const hy = (p[1] + p[4] + p[7] + p[10]) / 4;
       const hz = (p[2] + p[5] + p[8] + p[11]) / 4;
-      out.c[0] = hx + yx * 0.03;
-      out.c[1] = hy + yy * 0.03;
-      out.c[2] = hz + yz * 0.03;
+      const up = 0.03 * scale;
+      out.c[0] = hx + yx * up;
+      out.c[1] = hy + yy * up;
+      out.c[2] = hz + yz * up;
       out.x[0] = rx;
       out.x[1] = ry;
       out.x[2] = rz;

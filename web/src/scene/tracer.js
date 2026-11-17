@@ -176,6 +176,7 @@ export function createTracers({ THREE, group }) {
   const spd = new Float32Array(MAX), grav = new Float32Array(MAX), ids = new Int32Array(MAX);
   let count = 0;
   let nextId = 1;
+  let warm = 0; // кадров после создания (см. конец update)
 
   const copy = (i, j) => {
     sx[i] = sx[j]; sy[i] = sy[j]; sz[i] = sz[j];
@@ -273,6 +274,10 @@ export function createTracers({ THREE, group }) {
         }
       }
       geometry.instanceCount = m;
+      // пустой видимый меш тоже стоит CPU (программа и униформы ставятся на каждый глаз): скрыт, пока
+      // пусто; первые кадры виден — шейдер собирается при подмене сцены (material держит программу)
+      if (warm < 3) warm += 1;
+      mesh.visible = m > 0 || warm < 3;
     },
 
     dispose() {

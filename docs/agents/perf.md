@@ -59,7 +59,18 @@ FPS number under the HUD dot: green ≥ 114, yellow ≥ 70, red below.
 - 120 Hz = 8.3 ms per frame; keep scene CPU well under ~4 ms.
 - Every mesh is drawn for both eyes: prefer `InstancedMesh` and merged geometry
   (pistol: per-material merge -> 8 calls; targets: 2 instanced meshes; clays/shards instanced;
-  smoke/tracers one draw each, zero draws when empty).
+  smoke/tracers one draw each). **A draw call costs ~25–30 µs of CPU on Quest** (measured:
+  `rend` 2.1 ms for ~78 calls), so the object count is the main render-CPU lever.
+- **An empty but visible mesh still costs CPU**: with `count`/`instanceCount` 0 three skips only the
+  final `gl.draw*`, but still runs `setProgram`, uniforms and VAO binding for each eye. Pattern
+  (effects, smoke, tracer, impact, mana, clays, drones): visible for the first 3 frames (so the
+  swap precompiles the shader; the material keeps its program afterwards), then
+  `mesh.visible = count > 0`.
+- **Transparent + `DoubleSide` = two draws per eye and a program re-check every frame**: three
+  renders back faces, then front faces, setting `material.needsUpdate = true` twice per draw. Use
+  `forceSinglePass: true` unless the two-pass order matters (drones-rotor had it). Find them:
+  `scene.traverse(o => …m.transparent && m.side === THREE.DoubleSide && !m.forceSinglePass…)`;
+  find any material whose `version` grows every frame the same way.
 - Canvas texture upload: 1600×640 ≈ 10 ms on Quest. Repaint only on change; one big texture per
   frame at most.
 - `getImageData` on a canvas used as a texture puts it into software mode (uploads ~10 ms).
@@ -71,6 +82,36 @@ FPS number under the HUD dot: green ≥ 114, yellow ≥ 70, red below.
   `worst` spikes. `pistols.save` writes localStorage at most every 500 ms.
 - `console.log` per frame floods the WebSocket and the log file. Log periodically with a tag.
 - `gl.finish` for GPU timing is unreliable on Quest and drops frames (`GPU_SAMPLE_MS = 0`).
+
+## Optimization pass 2026-11-17 (Сцена 3: robot-dog battle, 90 Hz)
+
+Where the frame goes (Quest, `[perf]` + `[horde]` + `[scope]`): cpu 6–8 ms = horde 1.5–7 ms +
+`rend` ~2 ms + scope passes + ~1 ms other scene. With cpu at 6–7 ms the page still ran at 80–85 fps:
+XR frame gaps sit at 11–13.5 ms (not vsync-quantised) while JS work ends ~7 ms into the frame, i.e.
+the rest is GPU/compositor. Read-only probe: `session.requestAnimationFrame` from `vr:eval`, compare
+the callback's `t` with `performance.now()`.
+
+| Change | Before | After |
+|---|---|---|
+| Effect particles (`effects.js`: muzzle flash, sparks, dust) — one mesh+material each → 4 `InstancedMesh` batches (per-instance colour + `aOpacity`) | a shot = 17 meshes = 34 draws; battle dust 16–50 meshes visible | ≤ 4 draws total (e.g. 33 dust puffs = 1 draw) |
+| Empty effect meshes hidden (tracer, impact, mana, smoke, clays) | 4 empty meshes set up per eye per frame | 0 |
+| `drones-rotor` `forceSinglePass` | 2 draws + 2 `needsUpdate` per eye per frame | 1 draw |
+| Scope (`scope-lens.js`): both eyes see the glass → one texture for both (MONO, camera between the eye directions, FOV widened ~25 %); `FAR_EVERY` every frame only within 0.25 m | x6 scope: 750–814 renders/5 s × 1.2 ms (≈ 2.4 ms/frame) | ≈ 200/5 s while held, 90/s when aiming (≈ 0.8–1.5 ms/frame) |
+| Generated gun GLB simplified at load (`generated-gun.js` `SIMPLIFY_ERROR` 0.001, meshoptimizer from `three/addons/libs`, ~90 ms once on Quest) | sam_rifle 77k tris (×2 eyes = 30 % of the frame) | 22k (m16 30k → 9k); close-up identical (`logs/screenshots/simp/`) |
+| `car.js` `groundHeight` (per dog per frame): `Math.hypot`/`**` → plain math | 10 KB/frame garbage | 1.5 KB/frame |
+
+Tried and dropped: frustum-culled grass tiles for the scope pass (12 m tiles) — looking along the
+meadow the scope still saw 33 tiles = 33 draws (≈ 1 ms CPU) to save vertex work; net loss.
+
+Still open (not mine / shell): horde `apply` on swap is most of `setup` (~45 of 50 ms on Quest:
+each save by any agent is a ~60–80 ms hitch); foveation is 0 (shell) — fixed foveation 0.3–0.5
+would cut fragment cost at the edges if the user accepts it; screenshots cost ~300 ms.
+
+Profiling without the headset: a headless Chrome (Playwright from `D:\ClaudeWebsites\claude-browser`)
+opened on the dev URL with the same `localStorage` runs the same scene; CDP
+`HeapProfiler.startSampling` (with `includeObjectsCollectedByMinor/MajorGC`) gives allocation sites,
+`Profiler.start` gives CPU per function. It is not paired with the bridge, so it never shows up in
+`vr:eval`. Desktop GPU timer queries (RTX) were too noisy to rank Quest GPU costs.
 
 ## Adding telemetry for your system
 

@@ -14,14 +14,19 @@ const smooth = (a, b, x) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
 };
+// Вызывается каждый кадр на каждого робопса (robodog-unit groundLocal): без Math.hypot и `**` —
+// они медленнее и на Quest выделяли память под числа (≈10 КБ/кадр мусора для GC)
 const formula = (x, z) =>
-  smooth(6, 70, Math.hypot(x, z)) *
+  smooth(6, 70, Math.sqrt(x * x + z * z)) *
   (1.2 * Math.sin(x * 0.019) * Math.cos(z * 0.016) + 0.6 * Math.sin(x * 0.052 + z * 0.041) + 0.3 * Math.sin(z * 0.1 - x * 0.07));
 const G_SIZE = 9000;
 const G_HALF = G_SIZE / 2;
 const G_SEG = 128;
 const G_STEP = G_SIZE / G_SEG;
-const warp = (v) => Math.sign(v) * G_HALF * (Math.abs(v) / G_HALF) ** 2;
+const warp = (v) => {
+  const a = Math.abs(v) / G_HALF;
+  return Math.sign(v) * G_HALF * a * a;
+};
 const unwarp = (w) => Math.sign(w) * G_HALF * Math.sqrt(Math.min(1, Math.abs(w) / G_HALF));
 export const groundHeight = (x, z) => {
   const ix = Math.min(G_SEG - 1, Math.max(0, Math.floor((unwarp(x) + G_HALF) / G_STEP)));
