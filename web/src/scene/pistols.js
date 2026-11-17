@@ -9,10 +9,12 @@ import { buildAk2 } from './ak2-model.js';
 import { cachedBuild } from './model-cache.js';
 import { genEntry } from './generated-guns.js';
 import { buildGenerated } from './generated-gun.js';
+import { gunScaleOf } from './gun-resize.js';
 
 const STORE_KEY = 'scene.pistols';
 const OLD_STORE_KEY = 'scene.pistol'; // прежний формат: один пистолет
 const OUTLINE_M = 0.0025; // толщина белой обводки, метры (у калаша обводка готовая, в файле модели)
+const NEAR_OUTLINE_COLOR = 0x7dd3fc; // обводка «в досягаемости руки» (голубая); луч — белая
 const KINDS = ['pistol', 'ak', 'awp', 'ak2']; // 'awp' — снайперка с прицелом (awp-model.js, линза — scope-lens.js); 'ak2' — «Калаш 2.0»: калаш с прицелом (ak2-model.js)
 
 // makeLens(scope) → стёкла прицела АВП (createScopeLens из scope-lens.js): item.lens; каждый кадр
@@ -25,10 +27,32 @@ export function createPistols({ THREE, root, makeLens = null }) {
   // обводка не зависит от того, куда смотрят нормали и обход граней (у скачанного калаша магазин и
   // цевьё вывернуты — раньше оболочка белила их целиком).
   const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.BackSide, depthWrite: false });
+  // Цвет обводки: белая — на оружие смотрит луч (ray-grab), голубая — оно в досягаемости руки (хват
+  // возьмёт сейчас). У каждого белого материала обводки (общий здесь, свой у картинки сгенерированной
+  // пушки) — один голубой близнец, заводится при первой нужде (userData.nearTwin), потом только подмена
+  // material у мешей обводки: без выделений в кадре, другие копии не задеты.
+  const twinOf = (material, near) => {
+    if (!material) return material;
+    const base = material.userData.whiteTwin ?? material;
+    if (!near) return base;
+    let twin = base.userData.nearTwin;
+    if (!twin) {
+      twin = base.clone();
+      twin.color.set(NEAR_OUTLINE_COLOR);
+      twin.userData = { shared: true, whiteTwin: base }; // не освобождать при удалении оружия
+      base.userData.nearTwin = twin;
+    }
+    return twin;
+  };
+  const tint = (mesh, near) => {
+    if (!mesh) return;
+    const want = twinOf(mesh.material, near);
+    if (mesh.material !== want) mesh.material = want;
+  };
   const liftModel = (group, outline) => {
-    outline.renderOrder = 1;
+    outline.renderOrder = 901; // после неба (900): иначе небо закрашивает обводку над горизонтом
     group.traverse((o) => {
-      if (o.isMesh && o !== outline && o.material !== outlineMaterial) o.renderOrder = 2; // (обводки прицела — свои, renderOrder 1)
+      if (o.isMesh && o !== outline && o.material !== outlineMaterial) o.renderOrder = 902; // (обводки прицела — свои, renderOrder 1)
     });
   };
 
@@ -74,20 +98,20 @@ export function createPistols({ THREE, root, makeLens = null }) {
           lens.eyepiece.position.set(0, scope.y, scope.eyepieceZ);
           lens.objective.position.set(0, scope.y, scope.objectiveZ);
           lens.objective.scale.setScalar(scope.objectiveR);
-          lens.eyepiece.renderOrder = lens.objective.renderOrder = 2;
+          lens.eyepiece.renderOrder = lens.objective.renderOrder = 902;
           scope.node.add(lens.eyepiece, lens.objective);
         }
         model.lens = lens;
         if (scope.outlineGeometry) {
           model.scopeOutline = new THREE.Mesh(scope.outlineGeometry, outlineMaterial);
           model.scopeOutline.visible = false;
-          model.scopeOutline.renderOrder = 1;
+          model.scopeOutline.renderOrder = 901;
           scope.node.add(model.scopeOutline);
         }
         if (model.fixedOutlineGeometry && model.fixedNode) { // неподвижная часть крепления
           model.fixedOutline = new THREE.Mesh(model.fixedOutlineGeometry, outlineMaterial);
           model.fixedOutline.visible = false;
-          model.fixedOutline.renderOrder = 1;
+          model.fixedOutline.renderOrder = 901;
           model.fixedNode.add(model.fixedOutline);
         }
       }
@@ -98,6 +122,7 @@ export function createPistols({ THREE, root, makeLens = null }) {
       item.group.position.fromArray(pose.position);
       item.group.quaternion.fromArray(pose.quaternion);
     }
+    item.group.scale.setScalar(gunScaleOf(kind)); // «Размер» вида (gun-resize.js); в руке — main.js вокруг рукоятки
     root.add(item.group);
     items.push(item);
     return item;
@@ -143,6 +168,12 @@ export function createPistols({ THREE, root, makeLens = null }) {
     // Без аллокаций; вызывается каждый кадр.
     // Выстрел: затвор откатывается (25 мс), возвращается (75 мс); onEject(item) — когда он в крайней точке.
     // при подмене сцены: группы освобождает оболочка, а текстуры прицелов — здесь
+    // цвет обводки оружия (и его прицела): near — голубая (в досягаемости руки), иначе белая; каждый кадр
+    tintOutline(item, near) {
+      tint(item.outline, near);
+      tint(item.scopeOutline, near);
+      tint(item.fixedOutline, near);
+    },
     disposeLenses() {
       for (const item of items) item.lens?.dispose();
     },

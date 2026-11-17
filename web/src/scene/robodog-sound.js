@@ -4,11 +4,11 @@
 // Как в sound.js (docs/agents/effects-and-sound.md): ничего не синтезируется на лету. Каждый
 // рецепт один раз «запекается» в буферы через OfflineAudioContext (по несколько случайных
 // вариантов) и живёт в __sceneState.dogSoundBank. Голоса — постоянные цепочки (усиление → HRTF-панорама
-// → master, и посыл в реверб), их VOICES штук, в __sceneState.dogVoices. На звук создаётся только
+// → npcBus, и посыл в реверб), их VOICES штук, + OWN своих (→ master), в __sceneState.dogVoices. На звук создаётся только
 // AudioBufferSourceNode; голосов не хватает — самый старый быстро гаснет и уступает.
 //
 // createDogSound(shared) → { zap(p, k), crackle(p), powerDown(p), clank(p), clankHeavy(p, k),
-//   thud(p), servo(p, speed), groundThud(p, k), scrape(p, k), whoosh(p), bark(p), mg(p),
+//   thud(p), servo(p, speed), groundThud(p, k), scrape(p, k), whoosh(p), bark(p), growl(p), howl(p), mg(p),
 //   turretWind(p) } — p: мировая точка, k: 0..1 сила; у всех третий аргумент size — размер пса
 //   (ниже и громче)
 //
@@ -19,9 +19,14 @@
 // (rattle), шипение гидравлики (hiss, только шум). Высокие тоны и свипы звучат «птицами» — не
 // добавлять (замер: спектральный центроид шагов < 1,5 кГц). Новые рецепты нормируются после запекания
 // (recipe.peak), чтобы громкость задавалась только в методах ниже.
+import { audioBudget, npcOut } from './audio-budget.js';
+
 const BAKE_VERSION = 6; // 2: whoosh (лапа), mg (пулемёт); 3: bark (ярость); 5: металл, шарниры, ricochet, hiss, turretWind; 6: ниже и шумнее (было «как птицы»)
-const POOL_VERSION = 2; // 2: 12 голосов
-const VOICES = 12;
+const POOL_VERSION = 3; // 2: 12 голосов; 3: + OWN своих голосов (к master), голоса мира — в npcBus
+const VOICES = 12; // звуки мира (их число ограничивает audio-budget.js)
+const OWN = 4; // звон от СВОЕЙ пули (own = true): только эти голоса, мир их не занимает, бюджет не спрашивают
+// категория бюджета (audio-budget.js) по звуку
+const CAT = { zap: 'zap', crackle: 'zap', powerDown: 'boom', clank: 'hit', clankHeavy: 'hit', ricochet: 'hit', thud: 'hit', servo: 'step', groundThud: 'step', scrape: 'step', whoosh: 'step', turretWind: 'gun', mg: 'gun', bark: 'voice', hiss: 'voice', growl: 'voice', howl: 'voice' };
 
 // ---- рецепты (офлайн-контекст c, вывод в out); возвращают длительность, с
 const rnd = (a, b) => a + Math.random() * (b - a);
@@ -361,6 +366,88 @@ const RECIPES = {
       noise(c, hot, t0, { seconds: 0.06, type: 'highpass', from: 5000, to: 2500, gain: 0.35, decay: 0.04 });
     }
   } },
+  // рык перед броском/в засаде: низкий перегруженный гул с «рокотом» (АМ 18–28 Гц) и натужным
+  // сервоприводом поверх — электрическое «ррр»
+  growl: { variants: 3, seconds: 0.85, peak: 0.85, render(c, out) {
+    const len = rnd(0.6, 0.78);
+    const hot = drive(c, out, 4);
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 2;
+    lp.frequency.setValueAtTime(450, 0);
+    lp.frequency.linearRampToValueAtTime(rnd(850, 1100), len * 0.35);
+    lp.frequency.linearRampToValueAtTime(380, len);
+    const am = c.createGain();
+    am.gain.value = 0.55;
+    const lfo = c.createOscillator();
+    lfo.type = 'triangle';
+    lfo.frequency.value = rnd(18, 28);
+    const depth = c.createGain();
+    depth.gain.value = 0.45;
+    lfo.connect(depth).connect(am.gain);
+    const e = c.createGain();
+    e.gain.setValueAtTime(0.0001, 0);
+    e.gain.exponentialRampToValueAtTime(0.8, 0.08);
+    e.gain.setValueAtTime(0.8, len * 0.7);
+    e.gain.exponentialRampToValueAtTime(0.0001, len);
+    lp.connect(am).connect(e).connect(hot);
+    const f = rnd(55, 75);
+    const oscs = [lfo];
+    for (const [type, mul, g] of [['sawtooth', 1, 0.6], ['sawtooth', 1.012, 0.5], ['square', 2, 0.25]]) {
+      const o = c.createOscillator();
+      o.type = type;
+      for (let k = 0; k <= 8; k += 1) o.frequency.setValueAtTime(f * mul * rnd(0.94, 1.06), (k * len) / 8);
+      const og = c.createGain();
+      og.gain.value = g;
+      o.connect(og).connect(lp);
+      oscs.push(o);
+    }
+    for (const o of oscs) {
+      o.start(0);
+      o.stop(len + 0.02);
+    }
+    motorLayer(c, out, 0.05, len * 0.8, { f: rnd(100, 130), glide: 1.12, cut: 800, teeth: [30, 55], gain: 0.3 });
+  } },
+  // рёв перед атакой (большие псы встают на дыбы, засада срывается в бег): электрический вой —
+  // три расстроенные пилы, тон 130 → 260 Гц с дрожью → вниз, форманта 600 → 1500 → 700 Гц,
+  // сильный перегруз, треск разрядов, низкий гул под ним
+  howl: { variants: 3, seconds: 1.4, peak: 0.9, render(c, out) {
+    const len = rnd(1.05, 1.3);
+    const hot = drive(c, out, 5);
+    const bp = c.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.3;
+    bp.frequency.setValueAtTime(600, 0);
+    bp.frequency.linearRampToValueAtTime(rnd(1300, 1600), len * 0.35);
+    bp.frequency.linearRampToValueAtTime(700, len);
+    const e = c.createGain();
+    e.gain.setValueAtTime(0.0001, 0);
+    e.gain.exponentialRampToValueAtTime(0.9, 0.12);
+    e.gain.setValueAtTime(0.9, len * 0.6);
+    e.gain.exponentialRampToValueAtTime(0.0001, len);
+    bp.connect(e).connect(hot);
+    const f0 = rnd(120, 145);
+    const top = f0 * rnd(1.8, 2.05);
+    const oscs = [];
+    for (const [mul, g] of [[1, 0.6], [1.008, 0.5], [0.5, 0.45]]) {
+      const o = c.createOscillator();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(f0 * mul, 0);
+      o.frequency.exponentialRampToValueAtTime(top * mul, len * 0.3);
+      for (let k = 1; k <= 10; k += 1) o.frequency.setValueAtTime(top * mul * rnd(0.93, 1.07) * (1 - (0.3 * k) / 10), len * 0.3 + (k * len * 0.6) / 10);
+      o.frequency.exponentialRampToValueAtTime(f0 * mul * 1.1, len);
+      const og = c.createGain();
+      og.gain.value = g;
+      o.connect(og).connect(bp);
+      oscs.push(o);
+    }
+    for (const o of oscs) {
+      o.start(0);
+      o.stop(len + 0.02);
+    }
+    tone(c, out, 0, { type: 'sawtooth', from: 55, to: 42, gain: 0.35, decay: len });
+    for (let k = 0; k < 6; k += 1) noise(c, out, rnd(0.05, len * 0.8), { seconds: 0.05, type: 'highpass', from: rnd(2500, 4000), gain: rnd(0.2, 0.4), decay: 0.035 });
+  } },
   // пулемёт на спине пса: механический выстрел — щелчок во всю полосу, перегруженный хлопок,
   // пинок снизу, звон стальной ствольной коробки, через ~40 мс «клац» затвора, короткое эхо
   // (синтетический и с механикой — не похож на сэмплы оружия игрока)
@@ -449,10 +536,12 @@ const RECIPES = {
 // варианту каждого звука, потом вторые и т. д. — всё звучит почти сразу.
 const bake = (shared, sampleRate) => {
   const key = `${BAKE_VERSION}|${sampleRate}`;
-  if (shared.dogSoundBank?.key === key) return shared.dogSoundBank;
-  const bank = (shared.dogSoundBank = { key, buffers: {} });
+  const old = shared.dogSoundBank;
+  // та же версия, но добавились новые рецепты (подмена файла) — допечь только их, остальное не трогать
+  if (old?.key === key && Object.keys(RECIPES).every((name) => old.buffers[name])) return old;
+  const bank = old?.key === key ? old : (shared.dogSoundBank = { key, buffers: {} });
   if (typeof OfflineAudioContext === 'undefined') return bank;
-  const entries = Object.entries(RECIPES);
+  const entries = Object.entries(RECIPES).filter(([name]) => !bank.buffers[name]);
   for (const [name] of entries) bank.buffers[name] = [];
   const most = Math.max(...entries.map(([, r]) => r.variants));
   (async () => {
@@ -481,8 +570,9 @@ const bake = (shared, sampleRate) => {
 // поменялся сам выход (sound.js пересобрал шину) или POOL_VERSION.
 const voicesFor = (shared, g) => {
   const pool = shared.dogVoices;
-  if (pool?.version === POOL_VERSION && pool.master === g.master && pool.context === g.context) return pool;
-  for (const v of pool?.voices ?? []) {
+  const bus = npcOut(g);
+  if (pool?.version === POOL_VERSION && pool.master === g.master && pool.bus === bus && pool.context === g.context) return pool;
+  for (const v of [...(pool?.voices ?? []), ...(pool?.own ?? [])]) {
     try {
       v.input.disconnect();
       v.panner.disconnect();
@@ -491,8 +581,7 @@ const voicesFor = (shared, g) => {
     }
   }
   const c = g.context;
-  const voices = [];
-  for (let i = 0; i < VOICES; i += 1) {
+  const make = (out) => {
     const input = c.createGain();
     input.gain.value = 0;
     const panner = c.createPanner();
@@ -501,20 +590,24 @@ const voicesFor = (shared, g) => {
     panner.refDistance = 1.5;
     panner.rolloffFactor = 0.5;
     panner.maxDistance = 200;
-    input.connect(panner).connect(g.master);
+    input.connect(panner).connect(out);
     const send = c.createGain();
     send.gain.value = 0.18;
     if (g.reverbSend) input.connect(send).connect(g.reverbSend);
-    voices.push({ input, panner, source: null, endAt: 0, startedAt: 0 });
-  }
-  return (shared.dogVoices = { version: POOL_VERSION, master: g.master, context: c, voices });
+    return { input, panner, source: null, endAt: 0, startedAt: 0 };
+  };
+  const voices = Array.from({ length: VOICES }, () => make(bus));
+  const own = Array.from({ length: OWN }, () => make(g.master));
+  return (shared.dogVoices = { version: POOL_VERSION, master: g.master, bus, context: c, voices, own });
 };
 
 export function createDogSound(shared) {
   let bank = null;
   const ok = (v) => Number.isFinite(v);
 
-  const play = (name, position, gain, rate = 1) => {
+  const budget = audioBudget(shared);
+  // own — звон от своей пули (свои голоса, без бюджета); иначе — звук мира, спрашивает бюджет
+  const play = (name, position, gain, rate = 1, own = false) => {
     try {
       const g = shared.audioGraph;
       const c = g?.context;
@@ -523,11 +616,13 @@ export function createDogSound(shared) {
       bank = bank?.key === `${BAKE_VERSION}|${c.sampleRate}` ? bank : bake(shared, c.sampleRate);
       const list = bank.buffers[name];
       if (!list?.length) return; // ещё запекается
+      const buffer = list[Math.floor(Math.random() * list.length)];
+      if (!own && !budget.admit(CAT[name] ?? 'hit', position, gain, buffer.duration / rate, 1.5, 0.5)) return;
       const pool = voicesFor(shared, g);
       const t = c.currentTime;
       // свободный голос; нет — самый старый
       let voice = null;
-      for (const v of pool.voices) {
+      for (const v of own ? pool.own : pool.voices) {
         if (v.endAt <= t) {
           voice = v;
           break;
@@ -555,7 +650,7 @@ export function createDogSound(shared) {
         p.positionZ.setValueAtTime(position.z, at);
       } else p.setPosition(position.x, position.y, position.z);
       const source = c.createBufferSource();
-      source.buffer = list[Math.floor(Math.random() * list.length)];
+      source.buffer = buffer;
       source.playbackRate.value = rate;
       source.connect(voice.input);
       source.onended = () => {
@@ -581,9 +676,10 @@ export function createDogSound(shared) {
   const jitter = (a = 0.06) => 1 + (Math.random() - 0.5) * a;
   // size — размер пса (1 маленький … 4 огромный): ниже (playbackRate 1/√size, огромный — на октаву)
   // и громче (size^0.4); тот же буфер и голос, ничего нового не строится
-  const big = (fn) => (p, k, size = 1) => {
-    if (size === 1) return fn(p, k, 1, 1);
-    return fn(p, k, size ** 0.4, 1 / Math.sqrt(size));
+  // own (4-й аргумент) — звук от своей пули: свои голоса, без бюджета (audio-budget.js)
+  const big = (fn) => (p, k, size = 1, own = false) => {
+    if (size === 1) return fn(p, k, 1, 1, own);
+    return fn(p, k, size ** 0.4, 1 / Math.sqrt(size), own);
   };
   // шипение гидравлики: не чаще раза в 1,2 с на всех псов (по времени звука)
   let hissAt = -1;
@@ -594,15 +690,15 @@ export function createDogSound(shared) {
     play('hiss', p, 0.16 * g, r * jitter(0.12));
   };
   return {
-    zap: big((p, k = 1, g, r) => play('zap', p, 0.6 * k * g, r * jitter(0.12))),
+    zap: big((p, k = 1, g, r, own) => play('zap', p, 0.6 * k * g, r * jitter(0.12), own)),
     crackle: big((p, _k, g, r) => play('crackle', p, 0.4 * g, r * jitter())),
     powerDown: big((p, _k, g, r) => play('powerDown', p, 0.7 * g, r * jitter(0.04))),
     // попадание по живому: стальной «дзанг» разной высоты, иногда рикошет со свистом
-    clank: big((p, _k, g, r) => (Math.random() < 0.1 ? play('ricochet', p, 0.7 * g, r * jitter(0.15)) : play('clank', p, 0.8 * g, r * jitter(0.2)))),
+    clank: big((p, _k, g, r, own) => (Math.random() < 0.1 ? play('ricochet', p, 0.7 * g, r * jitter(0.15), own) : play('clank', p, 0.8 * g, r * jitter(0.2), own))),
     // k: 0..1 — калибр (пистолет ~0.4, калаш ~0.7, AWP 1): громче и ниже
-    clankHeavy: big((p, k = 0.5, g, r) => (Math.random() < 0.06
-      ? play('ricochet', p, 0.6 * g, r * 0.8 * jitter(0.15))
-      : play('clankHeavy', p, (0.55 + 0.6 * k) * g, r * (1.12 - 0.3 * k) * jitter(0.15)))),
+    clankHeavy: big((p, k = 0.5, g, r, own) => (Math.random() < 0.06
+      ? play('ricochet', p, 0.6 * g, r * 0.8 * jitter(0.15), own)
+      : play('clankHeavy', p, (0.55 + 0.6 * k) * g, r * (1.12 - 0.3 * k) * jitter(0.15), own))),
     thud: big((p, _k, g, r) => play('thud', p, 0.95 * g, r * jitter(0.04))),
     // шаг: шарнир (мотор + тик петли + скрип), быстрее — громче и выше; иногда шипит гидравлика
     servo: big((p, speed = 1, g, r) => {
@@ -616,6 +712,8 @@ export function createDogSound(shared) {
     scrape: big((p, k = 0.5, g, r) => play('scrape', p, (0.15 + 0.45 * k) * g, r * (0.85 + 0.3 * k) * jitter(0.08))),
     whoosh: big((p, _k, g, r) => play('whoosh', p, 0.8 * g, r * jitter(0.08))),
     bark: big((p, _k, g, r) => play('bark', p, 0.8 * g, r * jitter(0.14))),
+    growl: big((p, _k, g, r) => play('growl', p, 0.8 * g, r * jitter(0.1))), // присел перед броском, засада
+    howl: big((p, _k, g, r) => play('howl', p, 1.0 * g, r * jitter(0.08))), // рёв: на дыбы, рывок из засады
     mg: big((p, _k, g, r) => play('mg', p, 0.85 * g, r * jitter(0.1))),
   };
 }

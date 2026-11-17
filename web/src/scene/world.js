@@ -20,7 +20,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     shared.worldCache = {
       key: WORLD_KEY,
       free() {
-        for (const item of [this.noiseTexture, this.cloudTexture, this.shadowTarget, this.ground, this.starGeometry]) item?.dispose();
+        for (const item of [this.noiseTexture, this.bladeTexture, this.cloudTexture, this.shadowTarget, this.ground, this.starGeometry]) item?.dispose();
         for (const lod of this.lods ?? []) lod.geometry.dispose();
       },
     };
@@ -94,6 +94,63 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     noiseTexture.minFilter = THREE.LinearMipmapLinearFilter;
     noiseTexture.generateMipmaps = true;
     noiseTexture.needsUpdate = true;
+  }
+
+  // ---------- «травинки сверху» для шейдера земли: повторяющаяся текстура 256² из тысяч коротких
+  // штрихов (травинка, видимая сверху/наискось: у основания тёмная и широкая, к кончику светлая и
+  // узкая) на тёмном фоне-просвете. R — яркость штриха (0 — просвет), G — желтизна кончика.
+  // Строится один раз (кэш); мип-уровни вдали сводят её в ровный «ворс» без мерцания.
+  const BLADE_TEX = 256;
+  const bladeData = (cache.bladeData ??= (() => {
+    const data = new Uint8Array(BLADE_TEX * BLADE_TEX * 4);
+    let s = 91;
+    const rnd = () => {
+      s = (s * 1664525 + 1013904223) % 4294967296;
+      return s / 4294967296;
+    };
+    const wrap = (n) => ((n % BLADE_TEX) + BLADE_TEX) % BLADE_TEX;
+    for (let n = 0; n < 2600; n += 1) {
+      const x0 = rnd() * BLADE_TEX;
+      const y0 = rnd() * BLADE_TEX;
+      const a = rnd() * Math.PI * 2;
+      const len = 10 + rnd() * 30;
+      const bright = 0.5 + rnd() * 0.5;
+      const dry = rnd() < 0.12 ? 0.6 + rnd() * 0.4 : rnd() * 0.25;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      for (let t = 0; t <= len; t += 0.6) {
+        const k = t / len;
+        const x = x0 + ca * t;
+        const y = y0 + sa * t;
+        const half = 1.3 * (1 - k) + 0.35; // сужается к кончику
+        const value = bright * (0.3 + 0.7 * k); // кончик светлее
+        for (let dy = -2; dy <= 2; dy += 1) {
+          for (let dx = -2; dx <= 2; dx += 1) {
+            const px = Math.floor(x) + dx;
+            const py = Math.floor(y) + dy;
+            const d = Math.hypot(px + 0.5 - x, py + 0.5 - y);
+            const cover = Math.min(1, Math.max(0, half + 0.5 - d));
+            if (cover <= 0) continue;
+            const i = (wrap(py) * BLADE_TEX + wrap(px)) * 4;
+            const v = Math.round(value * cover * 255);
+            if (v > data[i]) {
+              data[i] = v;
+              data[i + 1] = Math.round(dry * 255);
+            }
+          }
+        }
+      }
+    }
+    return data;
+  })());
+  const bladeTexture = (cache.bladeTexture ??= new THREE.DataTexture(bladeData, BLADE_TEX, BLADE_TEX, THREE.RGBAFormat, THREE.UnsignedByteType));
+  if (bladeTexture.version === 0) {
+    bladeTexture.wrapS = bladeTexture.wrapT = THREE.RepeatWrapping;
+    bladeTexture.magFilter = THREE.LinearFilter;
+    bladeTexture.minFilter = THREE.LinearMipmapLinearFilter;
+    bladeTexture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy()); // штрихи вскользь не размываются в кашу
+    bladeTexture.generateMipmaps = true;
+    bladeTexture.needsUpdate = true;
   }
 
   // ---------- небо: шейдер на сфере, которая следует за головой
@@ -444,23 +501,17 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   stars.frustumCulled = false;
   skyGroup.add(stars);
 
-  // Луг: где растёт трава. Впереди, в сторону мишеней (−Z), и по бокам; позади игрока её нет.
-  // До FLARE_FROM поле шириной 2×HALF_WIDTH, дальше расходится конусом до FAR. Края поля волнистые
-  // и мягкие; одна и та же формула здесь (где сажать травинки) и в шейдере земли (где земля под
-  // травой темнее), чтобы трава и земля под ней совпадали.
-  const GRASS_AREA = { halfWidth: 15, near: 2, far: -100, flareFrom: -20, flare: 0.55 }; // метры
-  const wobble = (t) => 1.1 * Math.sin(t * 0.61) + 0.7 * Math.sin(t * 1.53 + 1.7);
-  const meadow = (x, z) => {
-    const beyond = Math.max(0, GRASS_AREA.flareFrom - z);
-    const half = GRASS_AREA.halfWidth + beyond * GRASS_AREA.flare;
-    const ramp = 5 + beyond * 0.12;
-    return Math.min(
-      smooth(-half, -half + ramp, x + wobble(z)),
-      1 - smooth(half - ramp, half, x - wobble(z + 20)),
-      smooth(GRASS_AREA.far, GRASS_AREA.far + 20, z + 3 * wobble(x * 0.5 + 40)),
-      1 - smooth(GRASS_AREA.near - 2.5, GRASS_AREA.near, z - 0.5 * wobble(x + 60)),
-    );
-  };
+  // Трава везде, во все стороны до горизонта (пользователь: «всё, что я вижу, — трава»). Три кольца
+  // вокруг центра игровой зоны (там игрок и вышка):
+  //  - до LOD_DISTANCE — настоящие травинки с изгибом (LOD0);
+  //  - до CLUMP_FROM — травинки-треугольники (LOD1), дальше до GRASS_RING — кустики-«короны» (LOD2,
+  //    4 травинки одним экземпляром); всё реже и крупнее с расстоянием; к краю кольца их цвет
+  //    сходится с цветом поля под ними, так что края кольца не видно. Всего 3 вызова отрисовки;
+  //    ветер только в вершинном шейдере, на процессоре каждый кадр — ничего;
+  //  - дальше — шейдер земли рисует «поле травы издали»: средний цвет густой травы (тот же свет, что у
+  //    травинок), пятна оттенков, сухие проплешины, бегущие волны ветра и просвет против солнца.
+  // Земля между редкими дальними травинками — то же поле, вблизи под густой травой — тёмная глубина.
+  const GRASS_RING = 60; // м: дальше травинок нет, только поле в шейдере земли
   // то же, что meadowPatch в шейдере, но на процессоре: билинейная выборка текстуры шума
   const noiseAt = (x, z, channel) => {
     const u = (x / NOISE_CELLS) * NOISE_SIZE - 0.5;
@@ -481,21 +532,29 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   const MEADOW_GLSL = `
     uniform sampler2D noiseTex;
     vec4 noise4(vec2 p) { return texture2D(noiseTex, p * ${f(1 / NOISE_CELLS)}); }
-    float wobble(float t) { return 1.1 * sin(t * 0.61) + 0.7 * sin(t * 1.53 + 1.7); }
-    float meadowMask(vec2 p) {
-      float beyond = max(0.0, ${f(GRASS_AREA.flareFrom)} - p.y);
-      float halfWidth = ${f(GRASS_AREA.halfWidth)} + beyond * ${f(GRASS_AREA.flare)};
-      float ramp = 5.0 + beyond * 0.12;
-      return min(
-        min(smoothstep(-halfWidth, -halfWidth + ramp, p.x + wobble(p.y)),
-            1.0 - smoothstep(halfWidth - ramp, halfWidth, p.x - wobble(p.y + 20.0))),
-        min(smoothstep(${f(GRASS_AREA.far)}, ${f(GRASS_AREA.far + 20)}, p.y + 3.0 * wobble(p.x * 0.5 + 40.0)),
-            1.0 - smoothstep(${f(GRASS_AREA.near - 2.5)}, ${f(GRASS_AREA.near)}, p.y - 0.5 * wobble(p.x + 60.0))));
-    }
+    uniform float time; // часы мира (world.update получает dt с учётом хода времени)
     // пятна луга: желтоватая и сизая зелень; по ним же окрашены травинки
     float meadowPatch(vec2 p) { return noise4(p * 0.09).b * 0.65 + noise4(p * 0.23 + 5.3).a * 0.35; }
     // земля под травой: тёмная, как глубина густой травы
     vec3 meadowGround(float tint) { return mix(vec3(0.022, 0.044, 0.012), vec3(0.048, 0.068, 0.017), smoothstep(0.3, 0.75, tint)); }
+    // Волны ветра по полю: широкие извилистые полосы (~40 м) бегут по ветру (+X) ~7 м/с, 0..1.
+    // Травинки в волне сильнее гнутся и светлеют, поле в шейдере земли светлеет так же — волна
+    // непрерывно идёт от ног до горизонта. Только синусы: выборка текстуры в вершинах на Quest дорогая.
+    float windWave(vec2 p) {
+      float bend = 1.6 * sin(p.y * 0.031 + p.x * 0.012) + 0.8 * sin(p.y * 0.083 - p.x * 0.02 + 1.3);
+      float w = sin(p.x * 0.15 + p.y * 0.05 - time * 1.0 + bend);
+      return (w * 0.5 + 0.5) * (0.55 + 0.45 * sin(p.x * 0.041 - p.y * 0.067 - time * 0.37));
+    }
+    // цвет травинки: сизо-зелёный ↔ жёлто-зелёный
+    vec3 grassLush(float tone) { return mix(vec3(0.030, 0.095, 0.020), vec3(0.090, 0.140, 0.022), tone); }
+    // Поле густой травы издали: свет травинок, усреднённый по их случайным поворотам (небо сверху,
+    // низкое солнце сбоку, просвечивание — особенно взглядом против солнца). viewDir — от глаза.
+    vec3 grassField(vec3 lush, vec3 viewDir) {
+      vec3 L = normalize(vec3(sunDir.x, 0.18, sunDir.z));
+      vec3 glow = (lush * 1.6 + vec3(0.05, 0.035, 0.0)) * vec3(1.0, 0.8, 0.3) * 0.8;
+      float against = pow(clamp(dot(viewDir, L), 0.0, 1.0), 3.0);
+      return lush * vec3(0.30, 0.34, 0.48) * 0.85 + lush * vec3(1.0, 0.58, 0.28) * 0.38 + glow * (0.19 + against * 1.6);
+    }
   `;
 
   // ---------- земля: слегка волнистая; цвет считает шейдер по мировым координатам
@@ -509,6 +568,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     const amplitude = smooth(6, 70, Math.hypot(x, z)); // рядом с игроком ровно
     return amplitude * (1.2 * Math.sin(x * 0.019) * Math.cos(z * 0.016) + 0.6 * Math.sin(x * 0.052 + z * 0.041) + 0.3 * Math.sin(z * 0.1 - x * 0.07));
   };
+  const grassTime = { value: 0 }; // время ветра: у травинок и у поля в шейдере земли общее
   const groundFresh = !cache.ground;
   const ground = (cache.ground ??= new THREE.PlaneGeometry(SIZE, SIZE, SEGMENTS, SEGMENTS));
   if (groundFresh) {
@@ -533,6 +593,8 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         shadowMatrix: { value: new THREE.Matrix4() },
         shadowOn: { value: 0 },
         noiseTex: { value: noiseTexture },
+        bladeTex: { value: bladeTexture },
+        time: grassTime,
       },
       vertexShader: `
         varying vec3 vWorld;
@@ -548,6 +610,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         uniform vec3 hazeWarm;
         uniform vec3 hazeCool;
         uniform sampler2D grassShadow;
+        uniform sampler2D bladeTex;
         uniform mat4 shadowMatrix;
         uniform float shadowOn;
         varying vec3 vWorld;
@@ -562,29 +625,40 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
           float big = noise4(p * 0.012).r;   // большие пятна полей
           float tint = meadowPatch(p);
           float mid = mix(0.5, tint, midFade);    // пятна травы
-          vec4 spots = noise4(p * 0.03 + 40.0);    // сухие и земляные пятна
+          vec4 spots = noise4(p * 0.03 + 40.0);    // сухие пятна
           float fine = mix(0.5, noise4(p * 1.7).r, fineFade);  // мелкая рябь у ног
-          vec3 darkGreen = vec3(0.030, 0.062, 0.016);
-          vec3 green = vec3(0.052, 0.098, 0.024);
-          vec3 lightGreen = vec3(0.100, 0.140, 0.036);
-          vec3 dry = vec3(0.170, 0.145, 0.060);
-          vec3 earth = vec3(0.085, 0.060, 0.032);
-          vec3 col = mix(darkGreen, green, smoothstep(0.25, 0.7, mid));
-          col = mix(col, lightGreen, smoothstep(0.55, 0.8, big) * 0.8);
+          vec3 viewDir = normalize(vWorld - cameraPosition);
+          // Травинки, нарисованные на земле (текстура штрихов): мелкие (плитка 2,5 м — травинки
+          // 10–45 см) и крупные, повёрнутые (плитка 11 м — кустики, видны и за сотни метров). Земля
+          // везде — густая трава: светлые кончики над тёмными просветами; настоящие травинки сверху.
+          vec2 strokeA = texture2D(bladeTex, p * 0.4).rg;
+          vec2 strokeB = texture2D(bladeTex, vec2(p.x * 0.6 - p.y * 0.8, p.x * 0.8 + p.y * 0.6) * 0.09 + 0.37).rg;
+          // и самые крупные (плитка 45 м): вдали, где мелкие уже слились в ровный цвет, они дают
+          // пёстрый «ворс» кочек до самого горизонта
+          float strokeC = texture2D(bladeTex, vec2(p.x * 0.8 + p.y * 0.6, p.y * 0.8 - p.x * 0.6) * 0.022 + 0.71).r;
+          float strokes = max(max(strokeA.r, strokeB.r * 0.9), strokeC * 0.85);
+          // поле травы: оттенок по пятнам луга и большим пятнам полей, сухая трава пятнами и кончиками
+          float tone = clamp(mid * 0.7 + smoothstep(0.35, 0.8, big) * 0.45 - 0.15, 0.0, 1.0);
+          vec3 lush = grassLush(tone);
           float patchFade = 1.0 - smoothstep(300.0, 1200.0, far);
-          col = mix(col, dry, smoothstep(0.62, 0.85, spots.r) * 0.6 * patchFade);
-          col = mix(col, earth, smoothstep(0.68, 0.88, spots.g) * 0.5 * patchFade);
-          col *= 0.88 + fine * 0.24;
-          // закатный свет: склоны к солнцу теплее и светлее, от солнца темнее и холоднее
+          float dry = smoothstep(0.62, 0.85, spots.r) * 0.45 * patchFade + max(strokeA.g, strokeB.g) * 0.35;
+          lush = mix(lush, vec3(0.16, 0.13, 0.05), dry);
+          vec3 field = grassField(lush, viewDir) * 1.15;
+          // бегущие волны ветра: пригнутая трава светлее (вдали гаснут, иначе у горизонта рябь)
+          field *= 1.0 + 0.3 * windWave(p) * (1.0 - smoothstep(250.0, 900.0, far));
+          // Сколько видно травинок, а сколько тёмной глубины: по штрихам; вскользь (к горизонту)
+          // травинки загораживают просветы — «ворс», почти одна трава.
+          float graze = 1.0 - clamp(-viewDir.y, 0.0, 1.0);
+          graze *= graze;
+          float cover = clamp(strokes * 1.3 + graze * 0.35 - 0.05, 0.0, 1.0);
+          vec3 col = mix(meadowGround(tint) * (0.85 + fine * 0.3), field * (0.6 + 0.8 * strokes), cover);
+          // закатный свет на холмах: склоны к солнцу теплее и светлее, от солнца темнее (ровное место ×1)
           float light = clamp(dot(normalize(vNormal), normalize(vec3(sunDir.x, 0.45, sunDir.z))), 0.0, 1.0);
-          col *= 0.62 + 0.5 * light;
-          col += vec3(0.05, 0.022, 0.0) * light;
-          // под травой земля тёмная, как глубина густой травы: просветы между травинками не светятся
-          float mask = meadowMask(p);
-          col = mix(col, meadowGround(tint), mask);
+          col *= 1.0 + 0.9 * (light - 0.41);
+          col += vec3(0.03, 0.013, 0.0) * max(light - 0.41, 0.0);
           // тени травинок (текстура силуэтов со стороны солнца); две точки с линейной фильтрацией
-          // смягчают края. Вне луга травы нет — и выборок нет.
-          if (shadowOn > 0.5 && mask > 0.0) {
+          // смягчают края. Вне текстуры (дальше ~30 м) выборок нет.
+          if (shadowOn > 0.5) {
             vec4 lc = shadowMatrix * vec4(vWorld, 1.0);
             vec2 suv = lc.xy * 0.5 + 0.5;
             if (suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0) {
@@ -613,11 +687,13 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   // кустиками: в кустике 4–10 травинок, расходятся веером, у кустика свой рост и оттенок; между
   // кустиками — одиночные. Сторона травинки к солнцу (справа, низко) тёплая и светлая, обратная
   // тёмная, а против солнца травинки просвечивают. Вдали трава сливается с землёй под ней.
-  const GRASS_COUNT = 36000;
-  // Ближние травинки — полоска из двух звеньев (изгиб виден), дальше LOD_DISTANCE от игрока — один
+  // Бюджет в травинках на круг до GRASS_RING (было 36 000 на конус впереди): ≈ 8k ближних (6 вершин),
+  // ≈ 22k треугольников (3), ≈ 7k корон по 6 травинок (12) — ≈ 200k вершин на глаз (было 141k).
+  const GRASS_COUNT = 72000;
+  // Ближние травинки — полоска из двух звеньев (изгиб виден), дальше LOD_DISTANCE от центра — один
   // треугольник той же формы: вершин втрое меньше, а издали разницы нет. Трава упирается в
   // вершинный шейдер, так что это прямой выигрыш в кадрах.
-  const LOD_DISTANCE = 10;
+  const LOD_DISTANCE = 8;
   const blade = new THREE.PlaneGeometry(0.05, 1, 1, 2);
   blade.translate(0, 0.5, 0); // основание у земли
   const bladePositions = blade.attributes.position;
@@ -629,16 +705,43 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   const farBlade = new THREE.BufferGeometry();
   farBlade.setAttribute('position', new THREE.Float32BufferAttribute([-0.025, 0, 0, 0.025, 0, 0, 0, 1, 0.12], 3));
   farBlade.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0.5, 1], 2));
+  farBlade.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1], 3));
+  // Дальше CLUMP_FROM — кустик-«корона» одним экземпляром: 6 травинок веером, сильно наклонённых
+  // наружу (сверху, с вышки, они закрывают больше земли), у соседних общие нижние вершины
+  // (12 вершин на 6 травинок вместо 18), экземпляров вшестеро меньше. Один вызов на всё кольцо.
+  const CLUMP_FROM = 20; // м
+  const CROWN_BLADES = 6;
+  const crown = new THREE.BufferGeometry();
+  {
+    const ring = [];
+    const tips = [];
+    const uvs = [];
+    const index = [];
+    for (let k = 0; k < CROWN_BLADES; k += 1) {
+      const a = (k / CROWN_BLADES) * Math.PI * 2;
+      const mid = a + Math.PI / CROWN_BLADES;
+      const lean = k % 2 ? 0.32 : 0.2; // через одну — сильнее наклонены и ниже
+      const top = k % 2 ? 0.8 : 1;
+      ring.push(Math.cos(a) * 0.1, 0, Math.sin(a) * 0.1); // основание широкое: травинка — хорда кольца
+      tips.push(Math.cos(mid) * lean, top, Math.sin(mid) * lean);
+      index.push(k, (k + 1) % CROWN_BLADES, CROWN_BLADES + k);
+    }
+    for (let k = 0; k < CROWN_BLADES; k += 1) uvs.push(0, 0);
+    for (let k = 0; k < CROWN_BLADES; k += 1) uvs.push(0.5, 1);
+    crown.setAttribute('position', new THREE.Float32BufferAttribute([...ring, ...tips], 3));
+    crown.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    crown.setIndex(index);
+    crown.computeVertexNormals(); // у кончика — нормаль своей травинки; низ в тени, там нормаль не важна
+  }
   // на травинку: оттенок кустика, своя случайность (0..1) и пятно луга под ней (meadowPatch из шейдера,
   // посчитанный здесь заранее: выборка текстуры в вершинном шейдере на Quest дорогая)
   const grassFresh = !cache.lods; // травинки уже расставлены (подмена сцены): берём готовые
-  const lods = cache.lods ?? [blade, farBlade].map((geometry) => ({
+  const lods = cache.lods ?? [blade, farBlade, crown].map((geometry) => ({
     geometry,
     count: 0,
     matrices: new Float32Array(GRASS_COUNT * 16),
     variation: new Float32Array(GRASS_COUNT * 3),
   }));
-  const grassTime = { value: 0 };
   const grassMaterial = new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
     toneMapped: false,
@@ -647,7 +750,6 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     // пикселе, а на узкой травинке разницы не видно. Фрагментный шейдер только выбирает сторону.
     vertexShader: `
       attribute vec3 aVariation;
-      uniform float time;
       uniform vec3 sunDir;
       varying vec3 vFront;
       varying vec3 vBack;
@@ -660,21 +762,22 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         float h = uv.y;
         float bend = h * h;
         float gust = sin(time * 1.3 + base.x * 0.35 + base.z * 0.22) * 0.6 + sin(time * 2.9 + base.x * 1.7 + base.z * 0.9) * 0.25;
+        float wave = windWave(base.xz); // широкая волна ветра, та же, что бежит по полю вдали
         float sway = bend * (0.4 + tall * 1.6); // высокие гнутся сильнее
-        world.x += sway * (0.06 + gust * 0.07);
+        world.x += sway * (0.06 + gust * 0.07 + wave * 0.1);
         world.z += sway * gust * 0.03;
         gl_Position = projectionMatrix * viewMatrix * world;
 
         // цвет: сизо-зелёный ↔ жёлто-зелёный по пятнам луга и по кустику; изредка сухая травинка
         float tint = aVariation.z;
         float tone = clamp(tint * 0.7 + aVariation.x * 0.6 - 0.25, 0.0, 1.0);
-        vec3 lush = mix(vec3(0.030, 0.095, 0.020), vec3(0.090, 0.140, 0.022), tone);
+        vec3 lush = grassLush(tone);
         lush *= 0.8 + 0.4 * aVariation.y;
         lush = mix(lush, vec3(0.16, 0.13, 0.05), step(0.94, aVariation.y) * 0.8);
         vec3 ground = meadowGround(tint);
         vec3 albedo = mix(ground * 0.8, lush, smoothstep(0.0, 0.7, h));
         // свет: небо сверху, низкое тёплое солнце справа; низ травинок в тени соседних
-        vec3 n = normalize(mat3(m) * vec3(0.0, -0.5 * h, 1.0));
+        vec3 n = normalize(mat3(m) * (normal + vec3(0.0, -0.5 * h, 0.0)));
         vec3 L = normalize(vec3(sunDir.x, 0.18, sunDir.z));
         float ndl = dot(n, L);
         float sunReach = smoothstep(0.15, 1.0, h);
@@ -682,13 +785,20 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         vec3 sun = vec3(1.0, 0.58, 0.28) * 1.5 * sunReach;
         // просвечивание: обратная к солнцу сторона и особенно взгляд против солнца
         vec3 glow = (lush * 1.6 + vec3(0.05, 0.035, 0.0)) * vec3(1.0, 0.8, 0.3) * sunReach;
-        float against = pow(clamp(dot(normalize(world.xyz - cameraPosition), L), 0.0, 1.0), 3.0);
-        vFront = sky + albedo * sun * max(ndl, 0.0) + glow * (max(-ndl, 0.0) * 0.6 + against * 1.6);
-        vBack = sky + albedo * sun * max(-ndl, 0.0) + glow * (max(ndl, 0.0) * 0.6 + against * 1.6);
-        // вдали травинки сливаются с землёй под ними: поле густое, без мерцания
-        float fade = smoothstep(8.0, 28.0, length(world.xz - cameraPosition.xz)) * 0.55;
-        vFront = mix(vFront, ground * 1.25, fade);
-        vBack = mix(vBack, ground * 1.25, fade);
+        vec3 viewDir = normalize(world.xyz - cameraPosition);
+        float against = pow(clamp(dot(viewDir, L), 0.0, 1.0), 3.0);
+        float waveLight = 1.0 + 0.3 * wave; // пригнутая волной трава светлее
+        vFront = (sky + albedo * sun * max(ndl, 0.0) + glow * (max(-ndl, 0.0) * 0.6 + against * 1.6)) * waveLight;
+        vBack = (sky + albedo * sun * max(-ndl, 0.0) + glow * (max(ndl, 0.0) * 0.6 + against * 1.6)) * waveLight;
+        // вдали травинки сливаются с землёй под ними (тот же расчёт, что в шейдере земли): поле
+        // густое, без мерцания; к краю кольца травинок — целиком, так что края кольца не видно
+        float ringR = length(base.xz);
+        float graze = 1.0 - clamp(-viewDir.y, 0.0, 1.0);
+        float cover = clamp(0.5 + graze * graze * 0.5, 0.0, 1.0); // в среднем как у земли под травой
+        vec3 under = mix(ground * 1.1, grassField(grassLush(tone), viewDir) * 1.08 * waveLight, cover);
+        float fade = max(smoothstep(8.0, 28.0, length(world.xz - cameraPosition.xz)) * 0.55, smoothstep(${f(GRASS_RING * 0.6)}, ${f(GRASS_RING)}, ringR));
+        vFront = mix(vFront, under, fade);
+        vBack = mix(vBack, under, fade);
       }`,
     fragmentShader: `
       varying vec3 vFront;
@@ -721,31 +831,47 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
       if (fx + fz <= 1) return at(0, 0) + (at(1, 0) - at(0, 0)) * fx + (at(0, 1) - at(0, 0)) * fz;
       return at(1, 1) + (at(0, 1) - at(1, 1)) * (1 - fx) + (at(1, 0) - at(1, 1)) * (1 - fz);
     };
-    // густота: у игрока полная, к мишеням реже, дальше по конусу ещё реже (1 / (1 + (d/10)²))
-    const density = (z) => 1 / (1 + (Math.max(0, -z - 3) / 10) ** 2);
-    const widest = GRASS_AREA.halfWidth + (GRASS_AREA.flareFrom - GRASS_AREA.far) * GRASS_AREA.flare;
+    // Густота по кругу: у центра полная, дальше 1 / (1 + ((d − 2)/12)²) — густо там, куда смотрят с
+    // вышки (10–40 м); впереди (−Z, куда смотрят в бою) чуть гуще, чем сзади (×1 и ×0,8).
+    const density = (d, z) => (0.9 - 0.1 * (z / Math.max(d, 1))) / (1 + (Math.max(0, d - 2) / 12) ** 2);
     let i = 0;
     while (i < GRASS_COUNT) {
-      const cx = (seeded() * 2 - 1) * widest;
-      const cz = GRASS_AREA.far + seeded() * (GRASS_AREA.near - GRASS_AREA.far);
-      const m = meadow(cx, cz);
-      if (m < 0.02 || seeded() > (0.3 + 0.7 * m) * density(cz)) continue; // к краям поля и вдали реже
+      const cd = GRASS_RING * Math.sqrt(seeded()); // равномерно по площади круга
+      const ca = seeded() * Math.PI * 2;
+      const cx = Math.cos(ca) * cd;
+      const cz = Math.sin(ca) * cd;
+      if (seeded() > density(cd, cz)) continue;
       // вдали травинки крупнее и кустики шире: редкое поле всё равно читается травой
-      const far = Math.max(0, -cz - 20);
-      const grow = 1 + far / 35;
+      const far = Math.max(0, cd - 20);
+      const grow = 1 + Math.max(0, cd - 12) / 30; // шире уже с 12 м: с вышки поле должно быть густым
       const single = seeded() < 0.45;
       const count = single ? 1 : 4 + Math.floor(seeded() * 7);
       const radius = single ? 0 : (0.07 + seeded() * 0.16) * grow;
-      const GRASS_HEIGHT = 0.5; // общий множитель высоты травы (пользователь: «в 2 раза ниже»; было 1)
+      const GRASS_HEIGHT = 1; // общий множитель высоты травы (пользователь: было 0,5 — «в 2 раза выше»)
       const clumpTall = (0.22 + seeded() ** 1.5 * 0.5) * (1 + far / 120) * GRASS_HEIGHT;
       const clumpTone = seeded();
+      if (cd >= CLUMP_FROM) {
+        // среднее кольцо: кустик — одна «корона» (считается за CROWN_BLADES травинок)
+        const lod = lods[2];
+        const spread = (0.8 + seeded() * 0.6) * (1 + (cd - CLUMP_FROM) / 40); // вдали кустики крупнее
+        yaw.setFromAxisAngle(up, seeded() * Math.PI * 2);
+        where.set(cx, groundHeight(cx, cz), cz);
+        size.set(spread, clumpTall * (0.75 + 0.4 * seeded()), spread);
+        matrix.compose(where, yaw, size);
+        matrix.toArray(lod.matrices, lod.count * 16);
+        lod.variation[lod.count * 3] = clumpTone;
+        lod.variation[lod.count * 3 + 1] = seeded();
+        lod.variation[lod.count * 3 + 2] = meadowPatch(cx, cz);
+        lod.count += 1;
+        i += CROWN_BLADES;
+        continue;
+      }
       for (let k = 0; k < count && i < GRASS_COUNT; k += 1, i += 1) {
         const angle = seeded() * Math.PI * 2;
         const r = radius * Math.sqrt(seeded());
         const x = cx + Math.cos(angle) * r;
         const z = cz + Math.sin(angle) * r;
-        const edge = meadow(x, z);
-        const tall = clumpTall * (0.65 + 0.55 * seeded()) * (0.15 + 0.85 * edge); // к краю ниже
+        const tall = clumpTall * (0.65 + 0.55 * seeded());
         // наклон наружу от середины кустика (веером)
         const lean = single ? seeded() * 0.15 : (0.1 + 0.4 * (r / radius)) * (0.6 + 0.4 * seeded());
         axis.set(Math.sin(angle), 0, -Math.cos(angle));
@@ -801,9 +927,10 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     THREE.MathUtils.degToRad(90 - SHADOW_ELEVATION),
     THREE.MathUtils.degToRad(90 + SUN_AZIMUTH),
   );
-  // текстура теней покрывает ближние ~45 м поля (где тени видны); дальние редкие травинки без теней
-  const grassCenter = new THREE.Vector3(0, 0, -16);
-  const shadowCamera = new THREE.OrthographicCamera(-28, 28, 28, -28, 1, 300);
+  // текстура теней покрывает круг у центра (±30 м поперёк солнца, ±80 м вдоль — косой взгляд солнца
+  // растягивает её по земле), где тени видны; дальние редкие травинки без теней
+  const grassCenter = new THREE.Vector3(0, 0, 0);
+  const shadowCamera = new THREE.OrthographicCamera(-30, 30, 30, -30, 1, 300);
   shadowCamera.position.copy(grassCenter).addScaledVector(shadowSun, 120);
   shadowCamera.lookAt(grassCenter);
   shadowCamera.updateMatrixWorld(true);
@@ -854,6 +981,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
       // размер звёзд в пикселях: половина высоты кадра (в шлеме — кадра одного глаза)
       const eye = renderer.xr.isPresenting ? renderer.xr.getCamera().cameras[0] : null;
       skyUniforms.starPx.value = (eye ? eye.viewport.w : renderer.domElement.height) / 2;
+      shared.skyStarPx = skyUniforms.starPx; // свои камеры (камера дрона) подменяют на время своего кадра
       grassTime.value += dt;
       if (!shadowBaked) bakeGrassShadows(); // один раз, в первом кадре
     },

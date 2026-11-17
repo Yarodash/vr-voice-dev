@@ -203,6 +203,44 @@ Stages (each is one edit of the entry):
    box (whole thickness) become a separate mesh on the same vertex buffers; rotates with the
    controller trigger (`maxAngle`, default 0.35 rad). Fire mode persists in
    `scene.gen.<id>.mode`.
+4. **Scope the picture does not have** — `addScope` (`scope-addon.js`, e.g. `railgun`):
+   ```js
+   addScope: { at: [1408, 508], length: 0.28, zoom: 5, height: 0.045, style: 'emerald' },
+   ```
+   Builds a MODELLED scope (`scope-model.js buildScopeBody`: bell, tube, turrets, rings on risers)
+   on a low rail sunk into the receiver top; real `scope-lens.js` glass at its ends (eyepiece to
+   the stock, objective to the muzzle), axis parallel to the barrel (−Z). `at` = card.png pixels of
+   the receiver top under the middle of the mount (measure the alpha top edge per column in the
+   browser; then check the GLB top profile under the scope — `root.getObjectByName('addedScope')`
+   is the mount, its parent the gun group — and pick `at`/`height` so the ocular does not sink into
+   tall parts behind). `height` = axis above `at`, m (default bell radius + 14 mm); `length` scales
+   the body lengthwise (radii fixed: bell 30 mm, tube 16 mm, eye glass 19 mm); `style`: `'emerald'`
+   (gunmetal + glowing green rings round both glasses, bands, rail strips) or `'black'`; `reticle`,
+   `tanApparent` as in `scope`. Same stick tilt / «Отладка прицела» / gun-resize as `scope`
+   (ignored if the entry also has `scope`).
+
+**Scope acceptance test** (any added or fitted scope — `addScope`, `scope`, a procedural one; the
+user wants it right the first time). Verify EACH point with your own desktop screenshots before
+reporting (guard `if (session) return 'skip'`; render with a separate `PerspectiveCamera` into a
+`WebGLRenderTarget` in gun-local poses and return `{ note, file: { ext: 'jpg', base64 } }` from
+`vr:eval` — the bridge saves it to `logs/screenshots/`):
+1. Nothing sticks out or intersects: body sits on its mount, mount on the receiver (no floating gap,
+   no clipping into tall parts); no model polygon in front of either glass — close-ups of the
+   eyepiece from behind and the objective from the front.
+2. Glass fills the scope ends: eyepiece glass radius ≈ inner radius of the eyepiece (no dark ring
+   wider than ~1 mm, no hole around it), objective likewise; concentric — shoot straight down the axis.
+3. Through the eyepiece at a normal eye relief (~8 cm): magnified view with the reticle, centred,
+   clean, no black blobs. The lens draws only for the REAL page camera, so move the gun in front of
+   `camera` (eyepiece at camera + relief), wait ~20 frames, `screenshot()`. Desktop `camera.near` is
+   0.05 — nearer than that clips the eyecup. Avoid explosions in view (5× of a fireball = white).
+4. Aligned with the barrel (zero tilt by default: `__sceneState['genScopeTilt:<id>']`), sensible
+   height above the barrel and over tall parts behind the eyepiece (the eye looks over them); white
+   outline (force BackSide meshes visible for one render) clean against sky and ground.
+5. Works scaled (`gun.scale.setScalar(0.7 / 1.5)`) and with stick tilt (set the tilt prop, side
+   view: the scope pivots on its mount). `scope-lens.js` is scale-aware (eyepiece world scale from
+   `matrixWorld` each frame: field `tanA × s`, eye relief / pupil / view distance in real metres), so
+   at the SAME real eye distance (~8 cm) a ×1.5 or ×0.7 scope fills its glass like ×1. Move other
+   scoped guns out of the way first — an earlier test may have parked one at the same spot.
 
 Re-generated files: overwrite them and bump `v` (URLs get `?v=<v>`, caches are keyed by it).
 
@@ -277,6 +315,36 @@ growing with k; full → flash + «дзинь» + strong buzz. `chargeFx(null)` 
 `scene/blackhole-sound.js` (own baked bank `__sceneState.bhSoundBank`, voices `__sceneState.bhVoices`:
 4 one-shots + 2 loops — rumble of the nearest hole, charge whine with rate 0.55→2.15). Debug:
 `__sceneState.shooting.blackhole.stats()`; desktop only: `.blackhole.fire(from, dir, { k, speed })`.
+
+**Arena projectiles** — `projectile: 'rocket' | 'rail' | 'plasma'` (`rocket_launcher`, `railgun`,
+`plasma_gun`). Code `scene/arena-weapons.js` (owned by shooting.js like mana/blackhole; FX + splash)
+and `scene/arena-sound.js` (JS-baked bank `__sceneState.arenaSoundBank`, voices `__sceneState.arenaVoices`:
+10 one-shot HRTF + 1 looping hiss given to the nearest rocket). No casings / AK flash / tracer.
+- **Rocket**: a bullet of the shooting.js pool with `b.g = gravity` (entry `speed: 48, gravity: 7` —
+  visible arc; drop ≈ 3.8 m at 50 m) and `b.life = ROCKET_LIFE` 4 s; arena draws the same parabola
+  (`fire(kind, from, dir, speed, g)`): instanced body (nose along the velocity tangent, rolls), flame
+  + glow + exhaust sparks, smoke trail through the shared smoke system (`effects.smokePuff` →
+  `smoke.puff`, step 0.5 m near / `dist·0.035` far; smoke CAP raised to 280). Contact with anything
+  (ground, plate, clay, dog, drone) or end of life → `arena.impact(id, point, what)` → explosion:
+  `artillerySystem.explode(x, y, z, 0.3)` (new artillery API: scaled-down shell blast, FX only;
+  air bursts skip crater/scorch) + flash, shock ring, sparks; splash `ROCKET_R` 4 m (+0.4×scale): enemy
+  dogs `unit.strike` dmg `1 + 5k²` (kill → `unit.blast`, small/medium → `unit.knock`), corpses blasted,
+  drones `droneStrike` + push, plates knocked; allies unharmed; `screenShake(min(0.85, 2.4/d))` < 32 m.
+  Direct hit also does the bullet hit with `shotKind: 'ak'`. Gap 800 ms.
+- **Rail**: `shooting.js railShot` — instant, no bullet: ground by 1.5 m march + bisection (≤ 300 m),
+  candidates = every plate intersection, clay, each horde unit `unit.cast`, each drone sphere; sorted,
+  each hit through its normal handler with a 0.35 m `castExtra` from 5 cm before it (so damage/legs/
+  allies/corpses behave like a bullet with `shotKind: 'awp'` → small/medium/large dogs die, legs break).
+  `arena.rail(...)`: core + soft glow + green helix ribbon (vertex-shader strip, 1024 segments, first
+  60 m, pitch 0.55 m, radius grows as it fades over 1 s, front sweeps out at 2600 m/s), sparks at
+  each hit and at the end. Debug: `__sceneState.shooting.railInfo()` → `{ far, ground, candidates, hits, any }`.
+- **Plasma**: pool bullet with `g = 0`, `speed: 50`, `gapMs: 90` (~11/s), `shotKind: 'pistol'` (1 dmg);
+  blue core + halo + short streak trail; impact: rings (radius `PLASMA_R` 1 m), flash, sparks, and if it
+  did not hit a shootable directly — 1 dmg splash to enemy dogs/drones within ~1 m. Hit sound ≤ 1/45 ms.
+- Draws: sprites (one additive InstancedBufferGeometry; kinds core/glow/ring/streak/flame), beams,
+  rocket bodies — each hidden when empty (3 warm frames). Telemetry `[arena]` every 10 s while active.
+  Debug: `__sceneState.shooting.arena.stats()`. Desktop test: spawn `gen:<id>` via `weaponDebug`, pose
+  the item, `weaponDebug.fire(index)`; or `shooting.shoot(from, dir, { projectile: 'rail' })`.
 
 How the swap works: `buildGenerated` returns one item (pistols.js does not copy it) with a fixed
 `group` → `visual` child (placeholder / card meshes / GLB meshes), `outline` mesh, trigger pivot,

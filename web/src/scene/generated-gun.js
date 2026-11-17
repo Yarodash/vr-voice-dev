@@ -22,6 +22,7 @@
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshoptSimplifier } from 'three/addons/libs/meshopt_simplifier.module.js';
+import { createAddedScope } from './scope-addon.js';
 
 const HANDLE = { x: 0, y: -0.04, z: 0.045 }; // ладонь в системе оружия (main.js HANDLE)
 const BASE = `${import.meta.env.BASE_URL}models/generated/`;
@@ -181,9 +182,9 @@ function prepareCard(THREE, image, entry, outlineM) {
   }
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 4;
+  texture.anisotropy = 16; // three ограничит максимумом устройства; резче под углом вблизи
   const outlineTexture = new THREE.CanvasTexture(ring);
-  outlineTexture.anisotropy = 4;
+  outlineTexture.anisotropy = 16;
   // из пикселей исходной картинки — в систему оружия: ладонь в HANDLE, вправо по картинке — −Z
   const gx = info.grip[0] * W;
   const gy = info.grip[1] * H;
@@ -436,6 +437,94 @@ function simplifyParts(THREE, parts, entry) {
   console.log(`[gen] ${entry.id}: упрощение ${before} → ${after} треугольников (${(performance.now() - t0).toFixed(0)} мс)`);
 }
 
+// ---- Прицел на модели (entry.scope): торцы трубы ищутся на самой модели. У каждого конца — вершины
+// в цилиндре вокруг оси, проведённой по точкам card.png (±FIT_SEARCH по оси, радиус ×FIT_R от стекла
+// с картинки); торец — самая дальняя по оси вершина, центр и радиус трубы — по кольцу у торца. Стекло
+// ставится чуть СНАРУЖИ торца (GLASS_PROUD), а треугольники под стеклом (до FIT_DEPTH вглубь трубы)
+// вырезаются: Tripo закрывает трубу выпуклой заглушкой, и она торчала перед стеклом («чёрная клякса»).
+// Возвращает центры стёкол [x, y, z] и радиусы в системе оружия; parts меняет на месте (только индекс).
+const FIT_SEARCH = 0.03; // м
+const FIT_R = 1.5; // радиус поиска — во столько раз больше стекла с картинки
+const FIT_DEPTH = 0.03; // м
+const GLASS_PROUD = 0.0012; // м
+function fitScope(THREE, parts, sc, mapPx, mPerPx) {
+  const [ey, ez] = mapPx(sc.eyepiece[0], sc.eyepiece[1]);
+  const [oy, oz] = mapPx(sc.objective[0], sc.objective[1]);
+  const len = Math.hypot(oy - ey, oz - ez);
+  const ay = (oy - ey) / len, az = (oz - ez) / len; // ось: от окуляра к объективу (в плоскости yz)
+  const ny = -az, nz = ay; // поперёк оси в плоскости yz («вверх» прицела)
+  const cardR = [(sc.radiusPx ?? 40) * mPerPx, (sc.objectiveRadiusPx ?? sc.radiusPx ?? 40) * mPerPx];
+  const ends = [0, 1].map((k) => ({ t0: k ? len : 0, dir: k ? 1 : -1, R: cardR[k] * FIT_R, tEnd: k ? -Infinity : Infinity, x0: Infinity, x1: -Infinity, u0: Infinity, u1: -Infinity, cx: 0, cu: 0, rOut: 0 }));
+  const local = (pos, i) => {
+    const y = pos.getY(i) - ey, z = pos.getZ(i) - ez;
+    return [pos.getX(i), y * ay + z * az, y * ny + z * nz]; // x, t (по оси), u (поперёк)
+  };
+  const eachVertex = (fn) => {
+    for (const p of parts) {
+      const pos = p.geometry.attributes.position;
+      const idx = p.geometry.index?.array;
+      const used = new Uint8Array(pos.count);
+      if (idx) for (let i = 0; i < idx.length; i += 1) used[idx[i]] = 1;
+      else used.fill(1);
+      for (let i = 0; i < pos.count; i += 1) if (used[i]) fn(...local(pos, i));
+    }
+  };
+  // 1) торец: самая дальняя вершина
+  eachVertex((x, t, u) => {
+    for (const e of ends) {
+      if (Math.abs(t - e.t0) > FIT_SEARCH || Math.hypot(x, u) > e.R) continue;
+      e.tEnd = e.dir > 0 ? Math.max(e.tEnd, t) : Math.min(e.tEnd, t);
+    }
+  });
+  if (!ends.every((e) => Number.isFinite(e.tEnd))) return null;
+  // 2) кольцо у торца (12 мм вглубь): центр по размаху, радиус трубы
+  const ring = (e, t) => (e.tEnd - t) * e.dir < 0.012 && Math.abs(t - e.t0) <= FIT_SEARCH;
+  eachVertex((x, t, u) => {
+    for (const e of ends) {
+      if (!ring(e, t) || Math.hypot(x, u) > e.R) continue;
+      e.x0 = Math.min(e.x0, x); e.x1 = Math.max(e.x1, x); e.u0 = Math.min(e.u0, u); e.u1 = Math.max(e.u1, u);
+    }
+  });
+  for (const e of ends) { e.cx = (e.x0 + e.x1) / 2; e.cu = (e.u0 + e.u1) / 2; }
+  eachVertex((x, t, u) => {
+    for (const e of ends) if (ring(e, t) && Math.hypot(x, u) <= e.R) e.rOut = Math.max(e.rOut, Math.hypot(x - e.cx, u - e.cu));
+  });
+  // стекло: с картинки, но не меньше 0,7 радиуса трубы на модели
+  // (сверху не ограничено: стекло больше трубы — по просьбе, ободок тогда просто шире стекла на 4 %)
+  ends.forEach((e, k) => { e.glassR = Math.max(cardR[k], 0.7 * e.rOut); });
+  // 3) вырез под стеклом
+  let cut = 0;
+  for (const p of parts) {
+    const g = p.geometry;
+    const pos = g.attributes.position;
+    const idx = g.index ? g.index.array : Array.from({ length: pos.count }, (_, i) => i);
+    const keep = [];
+    for (let i = 0; i + 2 < idx.length; i += 3) {
+      const A = local(pos, idx[i]), B = local(pos, idx[i + 1]), C = local(pos, idx[i + 2]);
+      const x = (A[0] + B[0] + C[0]) / 3, t = (A[1] + B[1] + C[1]) / 3, u = (A[2] + B[2] + C[2]) / 3;
+      // только треугольники ЦЕЛИКОМ под стеклом: край выреза не выходит за стекло — дыр вокруг нет
+      const inside = ends.some((e) => {
+        const depth = (e.tEnd - t) * e.dir;
+        const r = (P) => Math.hypot(P[0] - e.cx, P[2] - e.cu);
+        return depth > -0.002 && depth < FIT_DEPTH && r(A) < e.glassR && r(B) < e.glassR && r(C) < e.glassR;
+      });
+      if (inside) cut += 1;
+      else keep.push(idx[i], idx[i + 1], idx[i + 2]);
+    }
+    if (keep.length !== idx.length) g.setIndex(keep);
+  }
+  const point = (e) => {
+    const t = e.tEnd + e.dir * GLASS_PROUD;
+    return [e.cx, ey + t * ay + e.cu * ny, ez + t * az + e.cu * nz];
+  };
+  const [eye, obj] = ends;
+  // ringR — внешний радиус тёмного ободка вокруг стекла (закрывает щель между стеклом и стенкой трубы)
+  const fit = { eye: point(eye), objective: point(obj), lensR: eye.glassR, objectiveR: obj.glassR, tubeR: [eye.rOut, obj.rOut], ringR: [Math.max(eye.glassR * 1.04, eye.rOut * 0.97), Math.max(obj.glassR * 1.04, obj.rOut * 0.97)], cut };
+  const mm = (n) => (n * 1000).toFixed(1);
+  console.log(`[gen] прицел по модели: торцы ${mm(eye.tEnd)} / ${mm(obj.tEnd - len)} мм от точек картинки, центр окуляра x ${mm(eye.cx)} u ${mm(eye.cu)}, труба r ${mm(eye.rOut)} / ${mm(obj.rOut)}, стёкла r ${mm(eye.glassR)} / ${mm(obj.glassR)} мм, вырезано ${cut} треугольников`);
+  return fit;
+}
+
 // ---- Модель: ориентация, масштаб, совмещение с картинкой, обводка (один раз на id+v)
 function prepareGlb(THREE, gltf, entry, card, outlineM) {
   const shared = globalThis.__sceneState ?? {};
@@ -552,7 +641,7 @@ function prepareGlb(THREE, gltf, entry, card, outlineM) {
     if (mat.isMeshStandardMaterial) {
       mat.envMap = shared.weaponEnv ?? null;
       mat.envMapIntensity = 0.35;
-      if (mat.map) mat.map.anisotropy = 4;
+      if (mat.map) mat.map.anisotropy = 16;
     }
     mat.userData.shared = true;
   }
@@ -600,12 +689,13 @@ function prepareGlb(THREE, gltf, entry, card, outlineM) {
     }
     if (trigParts.length) trigger = { parts: trigParts, pivot: [0, yTop, (zA + zB) / 2] };
   }
-  return { parts, outlineGeometry, muzzle, ejector, plus, ratioPlus, cardRatio, mapPx, mPerPx: card?.mPerPx ?? null, trigger };
+  const scopeFit = entry.scope && mapPx ? fitScope(THREE, parts, entry.scope, mapPx, card.mPerPx) : null;
+  return { parts, outlineGeometry, muzzle, ejector, plus, ratioPlus, cardRatio, mapPx, mPerPx: card?.mPerPx ?? null, trigger, scopeFit };
 }
 
 const loadGlb = (THREE, entry, cardSlot, outlineM) => {
   const cache = cacheOf();
-  const key = `glb|${GLB_CODE ??= codeKey(prepareGlb, prepareCard, analyzeCard, cleanGeometry, simplifyParts)}|${SIMPLIFY_ERROR}|${entry.simplify ?? ''}|${JSON.stringify(entry.clean ?? true)}|${entry.id}|${entry.v ?? 1}|${entry.length}|${entry.grip ?? ''}|${entry.muzzle ?? ''}|${Boolean(entry.glbFlip)}|${entry.trigger?.box ?? ''}|${outlineM}`;
+  const key = `glb|${GLB_CODE ??= codeKey(prepareGlb, prepareCard, analyzeCard, cleanGeometry, simplifyParts, fitScope)}|${SIMPLIFY_ERROR}|${entry.simplify ?? ''}|${JSON.stringify(entry.clean ?? true)}|${entry.id}|${entry.v ?? 1}|${entry.length}|${entry.grip ?? ''}|${entry.muzzle ?? ''}|${Boolean(entry.glbFlip)}|${entry.trigger?.box ?? ''}|${entry.scope ? [entry.scope.eyepiece, entry.scope.objective, entry.scope.radiusPx, entry.scope.objectiveRadiusPx] : ''}|${outlineM}`;
   let slot = cache.get(key);
   if (!slot) {
     slot = { result: undefined };
@@ -744,7 +834,7 @@ export function buildGenerated(THREE, entry, { outlineMaterial, outlineM = 0.002
   group.add(visual);
   const outline = new THREE.Mesh(new THREE.BufferGeometry(), outlineMaterial);
   outline.visible = false;
-  outline.renderOrder = 1;
+  outline.renderOrder = 901; // после неба (900)
   group.add(outline);
   const length = entry.length ?? 0.25;
   const muzzle = new THREE.Vector3(0, 0.03, HANDLE.z - length * 0.7);
@@ -761,38 +851,72 @@ export function buildGenerated(THREE, entry, { outlineMaterial, outlineM = 0.002
   // прицел: mount — в точке окуляра, −Z смотрит на объектив; node — узел для наклона (updateLenses)
   const mount = entry.scope ? new THREE.Group() : null;
   const scopeNode = mount ? new THREE.Group() : null;
+  let ringMaterial = null; // ободки стёкол (placeScope)
   if (mount) {
     mount.add(scopeNode);
     group.add(mount);
   }
+  // прицел-модель (addScope, scope-addon.js): корпус и стёкла над коробкой, если на картинке прицела нет
+  const added = entry.addScope && !entry.scope ? createAddedScope(THREE, entry.addScope, { outlineMaterial, outlineM, makeLens, model }) : null;
+  if (added) group.add(added.mount);
   const placeScope = (from) => {
+    added?.place(from);
     const sc = entry.scope;
     if (!mount || !from.mapPx || !from.mPerPx) return;
+    // у модели — стёкла по настоящим торцам трубы (fitScope, уже снаружи торца), у картинки — по точкам
+    const fit = from.scopeFit ?? null;
     const [ey, ez] = from.mapPx(sc.eyepiece[0], sc.eyepiece[1]);
     const [oy, oz] = from.mapPx(sc.objective[0], sc.objective[1]);
-    const dist = Math.hypot(oy - ey, oz - ez);
+    const e = fit?.eye ?? [0, ey, ez];
+    const o = fit?.objective ?? [0, oy, oz];
+    const pad = fit ? 0 : EYE_OFF;
+    const dx = o[0] - e[0], dy = o[1] - e[1], dz = o[2] - e[2];
+    const dist = Math.hypot(dx, dy, dz);
     const off = sc.offset ?? [0, 0, 0]; // подгонка стёкол к трубе прицела, м (x вправо, y вверх, z назад)
-    mount.position.set(off[0], ey + off[1], ez + off[2]);
-    mount.rotation.set(Math.atan2(oy - ey, -(oz - ez)), 0, 0);
-    const objectiveR = (sc.objectiveRadiusPx ?? sc.radiusPx ?? 40) * from.mPerPx;
+    mount.position.set(e[0] + off[0], e[1] + off[1], e[2] + off[2]);
+    mount.rotation.set(Math.atan2(dy, Math.hypot(dx, dz)), Math.atan2(-dx, -dz), 0, 'YXZ'); // −Z — на объектив
+    const objectiveR = fit?.objectiveR ?? (sc.objectiveRadiusPx ?? sc.radiusPx ?? 40) * from.mPerPx;
+    const lensR = fit?.lensR ?? (sc.radiusPx ?? 40) * from.mPerPx;
+    // стекло окуляра другого радиуса (картинка → модель) — пересоздать: радиус зашит в геометрию и шейдер
+    if (model.scope && model.lens && Math.abs(model.scope.lensR - lensR) > 0.0005) {
+      model.lens.dispose();
+      model.lens = null;
+      model.scope = null;
+    }
     if (!model.scope) {
       model.scope = {
-        node: scopeNode, y: 0, eyepieceZ: EYE_OFF, objectiveZ: -dist - EYE_OFF, objectiveR,
-        lensR: (sc.radiusPx ?? 40) * from.mPerPx, minZ: 0, maxZ: 0, defaultZ: 0,
+        node: scopeNode, y: 0, eyepieceZ: pad, objectiveZ: -dist - pad, objectiveR,
+        lensR, minZ: 0, maxZ: 0, defaultZ: 0,
         magnification: sc.zoom ?? 4, tanApparent: sc.tanApparent ?? 0.26, reticle: sc.reticle ?? 'duplex',
       };
       model.lens = makeLens?.(model.scope) ?? null;
       if (model.lens) {
-        model.lens.eyepiece.renderOrder = model.lens.objective.renderOrder = 2;
+        model.lens.eyepiece.renderOrder = model.lens.objective.renderOrder = 902;
         scopeNode.add(model.lens.eyepiece, model.lens.objective);
       }
     }
-    model.scope.objectiveZ = -dist - EYE_OFF;
+    model.scope.eyepieceZ = pad;
+    model.scope.objectiveZ = -dist - pad;
     model.scope.objectiveR = objectiveR;
     if (model.lens) {
-      model.lens.eyepiece.position.set(0, 0, EYE_OFF);
-      model.lens.objective.position.set(0, 0, -dist - EYE_OFF);
+      model.lens.eyepiece.position.set(0, 0, pad);
+      model.lens.objective.position.set(0, 0, -dist - pad);
       model.lens.objective.scale.setScalar(objectiveR);
+    }
+    // тёмные ободки вокруг стёкол (только у модели): от края стекла почти до стенки трубы, чуть
+    // глубже стекла — через щель между стеклом и вырезом не видно фона
+    for (const ring of model.scopeRings ?? []) { ring.removeFromParent(); ring.geometry.dispose(); }
+    model.scopeRings = [];
+    if (fit) {
+      ringMaterial ??= new THREE.MeshStandardMaterial({ color: 0x14111b, roughness: 0.55, metalness: 0.3, side: THREE.DoubleSide });
+      const rings = [[lensR, fit.ringR[0], -0.0006], [objectiveR, fit.ringR[1], -dist + 0.0006]];
+      for (const [r0, r1, z] of rings) {
+        const ring = new THREE.Mesh(new THREE.RingGeometry(r0 * 0.97, r1, 48, 1), ringMaterial);
+        ring.position.z = z;
+        ring.renderOrder = 902;
+        scopeNode.add(ring);
+        model.scopeRings.push(ring);
+      }
     }
   };
   const placeTrigger = (from) => {
@@ -804,14 +928,14 @@ export function buildGenerated(THREE, entry, { outlineMaterial, outlineM = 0.002
     for (const part of t.parts) {
       const mesh = new THREE.Mesh(part.geometry, part.material);
       mesh.position.set(-t.pivot[0], -t.pivot[1], -t.pivot[2]);
-      mesh.renderOrder = 2;
+      mesh.renderOrder = 902;
       triggerPivot.add(mesh);
     }
   };
   const show = (objects, outlineGeometry, outlineMat, from, shows) => {
     visual.clear();
     for (const object of objects) {
-      if (object.isMesh) object.renderOrder = 2;
+      if (object.isMesh) object.renderOrder = 902;
       visual.add(object);
     }
     outline.geometry = outlineGeometry;

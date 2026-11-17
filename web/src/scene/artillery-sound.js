@@ -12,8 +12,10 @@
 // тон ~1,8 с, громче к концу; его голос двигается за снарядом (меняется только позиция).
 //
 // createArtillerySound(shared) → { boom(p, dist), thump(p), whistle(p) → h, move(h, x, y, z), stats() }
+import { audioBudget, npcOut } from './audio-budget.js';
+
 const BAKE_VERSION = 2;
-const POOL_VERSION = 1;
+const POOL_VERSION = 2; // 2: голоса — в npcBus (шина мира), звуки спрашивают audio-budget.js
 const BOOMS = 6;
 const WHISTLES = 4;
 const THUMPS = 3;
@@ -191,7 +193,8 @@ const bake = (shared, c) => {
 // POOL_VERSION.
 const voicesFor = (shared, g) => {
   const pool = shared.artilleryVoices;
-  if (pool?.version === POOL_VERSION && pool.master === g.master && pool.context === g.context) return pool;
+  const bus = npcOut(g);
+  if (pool?.version === POOL_VERSION && pool.master === g.master && pool.bus === bus && pool.context === g.context) return pool;
   for (const v of [...(pool?.boom ?? []), ...(pool?.whistle ?? []), ...(pool?.thump ?? [])]) {
     try {
       v.source?.stop();
@@ -211,7 +214,7 @@ const voicesFor = (shared, g) => {
     panner.refDistance = ref;
     panner.rolloffFactor = 1;
     panner.maxDistance = 3000;
-    input.connect(panner).connect(g.master);
+    input.connect(panner).connect(bus);
     if (g.reverbSend) {
       const send = c.createGain();
       send.gain.value = sendGain;
@@ -223,6 +226,7 @@ const voicesFor = (shared, g) => {
   return (shared.artilleryVoices = {
     version: POOL_VERSION,
     master: g.master,
+    bus,
     context: c,
     boom: make(BOOMS, 'HRTF', 30, 0.35),
     whistle: make(WHISTLES, 'HRTF', 35, 0.08),
@@ -250,6 +254,10 @@ export function createArtillerySound(shared) {
   };
 
   // голос из пула kind: свободный или самый старый (гаснет за 20 мс); возвращает { voice, source } | null
+  const budget = audioBudget(shared);
+  // бюджет звуков мира (audio-budget.js): категория и опорное расстояние голоса по kind
+  const CAT = { boom: ['boom', 30], whistle: ['far', 35], thump: ['far', 80] };
+  const at3 = { x: 0, y: 0, z: 0 };
   const play = (kind, name, x, y, z, gain, rate = 1) => {
     try {
       const g = ready();
@@ -258,6 +266,12 @@ export function createArtillerySound(shared) {
       if (c.state === 'suspended') c.resume();
       const list = bank.buffers[name];
       if (!list?.length) return null; // ещё запекается
+      const buffer = list[Math.floor(Math.random() * list.length)];
+      at3.x = x;
+      at3.y = y;
+      at3.z = z;
+      const [cat, ref] = CAT[kind] ?? ['boom', 30];
+      if (!budget.admit(cat, at3, gain, buffer.duration / rate, ref, 1)) return null;
       const voices = voicesFor(shared, g)[kind];
       const t = c.currentTime;
       let voice = null;
@@ -283,7 +297,7 @@ export function createArtillerySound(shared) {
       voice.input.gain.setValueAtTime(Math.min(2, Math.max(0, gain)), at);
       setPos(voice.panner, x, y, z, at);
       const source = c.createBufferSource();
-      source.buffer = list[Math.floor(Math.random() * list.length)];
+      source.buffer = buffer;
       source.playbackRate.value = rate;
       source.connect(voice.input);
       source.onended = () => {

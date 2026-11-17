@@ -182,6 +182,11 @@ export function createEffects({ THREE, group }) {
       smoke.impact(point, normal);
     },
 
+    // один клуб дыма (след ракеты, выхлоп — arena-weapons.js; см. smoke.puff)
+    smokePuff(x, y, z, ux, uy, uz, s0, s1, life, a) {
+      smoke.puff(x, y, z, ux, uy, uz, s0, s1, life, a);
+    },
+
     // облачко пыли (разбитая глиняная тарелка)
     dust(point) {
       smoke.impact(point, up);
@@ -191,14 +196,25 @@ export function createEffects({ THREE, group }) {
     },
 
     // пуля упала в землю: облачко пыли без глиняной рыжины
-    groundHit(point) {
-      smoke.impact(point, up);
+    // scale > 1 (пулемёт «Моего дрона»): «бабах» — вспышка с искрами, бурый ком земли и столб пыли,
+    // всё крупнее с размером дрона
+    groundHit(point, scale = 1) {
+      smoke.impact(point, up, scale);
+      if (scale > 1) {
+        impacts.hit(point, up);
+        spawn(sphere, { color: 0xffd08a, additive: true, opacity: 0.9 }, point, { life: 110 + 25 * scale, scale0: 0.06 * scale, scale1: 0.22 * scale });
+        spawn(sphere, { color: 0x5a4430, opacity: 0.75 }, point, { life: 450 + 70 * scale, scale0: 0.08 * scale, scale1: 0.42 * scale, fadePower: 0.7 });
+        const v = Math.sqrt(scale);
+        for (let k = 0; k < 3; k += 1) {
+          smoke.puff(point.x, point.y, point.z, (Math.random() - 0.5) * 0.6 * v, (1.4 + k * 0.9) * v, (Math.random() - 0.5) * 0.6 * v, 0.08 * scale, (0.35 + 0.15 * k) * scale, 1.2 + 0.2 * scale, 0.45);
+        }
+      }
     },
 
     // след пули: раскалённая чёрточка летит от дула по параболе (tracer.js); вернёт номер для tracerLand
     // «Настройки ▸ Трассеры: выкл» (globalThis.__sceneState.tracersOff) — трассер не запускается (−1)
-    tracer(from, dir, speed, gravity, maxLen) {
-      if (globalThis.__sceneState?.tracersOff) return -1;
+    tracer(from, dir, speed, gravity, maxLen, force = false) {
+      if (globalThis.__sceneState?.tracersOff && !force) return -1;
       return tracers.fire(from, dir, speed, gravity, maxLen);
     },
     // пуля номер id остановилась через along м (вдоль ствола)

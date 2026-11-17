@@ -4,7 +4,7 @@
 // Частицы считаются на процессоре без выделения памяти в кадре; пока дыма нет — ни одного вызова.
 
 const DENSITY = 0.5; // густота всего дыма: 1 — как было, 0,5 — вдвое реже
-const CAP = 200; // не больше стольких клубов одновременно; лишний заменяет самый старый
+const CAP = 280; // не больше стольких клубов одновременно; лишний заменяет самый старый (+80 — след ракет, arena-weapons.js)
 
 // Ветер и солнце: солнце низко справа (+X), ветер оттуда же — дым сносит к −X.
 const WIND_X = -0.11;
@@ -345,14 +345,24 @@ export function createSmoke({ THREE, group }) {
       }
     },
 
+    // один клуб порохового дыма (след ракеты, выхлоп ракетницы — arena-weapons.js): точка, скорость, м/с,
+    // полуразмер от/до, м, жизнь, с, густота (до DENSITY)
+    puff(x, y, z, ux, uy, uz, s0, s1, lifeS, a) {
+      emit(x, y, z, ux, uy, uz, set(lifeS, s0, s1, a, 2.2, 0.22, 0.12));
+    },
+
     // облачко пыли в месте попадания; normal — наружу от поверхности
-    impact(point, normal) {
-      for (let k = 0; k < 5; k += 1) {
-        const s = random(0.4, 1.4);
+    // scale > 1 — крупнее, выше и дольше (пулемёт дрона: видно издалека), клубов чуть больше
+    impact(point, normal, scale = 1) {
+      const n = scale > 1 ? Math.min(9, Math.round(4 + scale)) : 5;
+      const v = Math.sqrt(scale);
+      const life = scale > 1 ? 1 + 0.25 * Math.min(scale, 4) : 1;
+      for (let k = 0; k < n; k += 1) {
+        const s = random(0.4, 1.4) * v;
         emit(
           point.x, point.y, point.z,
           (normal.x + random(-0.6, 0.6)) * s, (normal.y + random(-0.4, 0.8)) * s, (normal.z + random(-0.6, 0.6)) * s,
-          set(random(1.3, 2.2), 0.015, random(0.09, 0.17), random(0.2, 0.28), 5, 0.06, 0.08, 1),
+          set(random(1.3, 2.2) * life, 0.015 * scale, random(0.09, 0.17) * scale, random(0.2, 0.28), 5, 0.06, 0.08, 1),
         );
       }
     },

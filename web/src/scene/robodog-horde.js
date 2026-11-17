@@ -98,22 +98,20 @@ const ALLY_PAINT = 6;
 const ALLY_ANGLE = (40 * Math.PI) / 180; // широкой дугой позади
 const ALLY_NEAR = 15;
 const ALLY_FAR = 30;
-const ALLY_SHARE = 0.8; // союзная стая меньше вражеской (перевес в псах у врагов)
-const ALLY_POOL = 30; // союзникам — не больше 30 из POOL
+// стороны наравне (по просьбе пользователя): у каждой не больше половины POOL моделей (живые и трупы)
+const TEAM_POOL = POOL / 2;
 const ALLY_FIRST = 3; // с до первой союзной стаи
-const ALLY_GAP = 0.85; // паузы между союзными стаями — от вражеских
 const RETARGET_S = 0.6;
 // волны (surgeStep): большая волна стороны раз в SURGE_EVERY с, SURGE_SIZE псов стаями по SURGE_PACK
 // через SURGE_GAP с; между волнами — стаи TRICKLE_PACK раз в TRICKLE_GAP с
 const SURGE_EVERY = [25, 40];
-// размер волны — от живых у другой стороны (не меньше SURGE_SIZE[0]). Перевес в псах — у врагов
-// (по просьбе пользователя; у игрока перевес в дронах): враги ×1,3–1,5, союзники ×0,6–0,8
-const ENEMY_WAVE_REL = [1.3, 1.5];
-const ALLY_WAVE_REL = [0.6, 0.8];
-const ENEMY_BIGGER = 0.3; // доля врагов, у которых размер выбирается из двух — больший
+// размер волны — от живых у другой стороны (не меньше SURGE_SIZE[0]), у обеих сторон одинаково
+// (по просьбе пользователя — наравне): ×0,9–1,2
+const WAVE_REL = [0.9, 1.2];
 const COUNTER_NEAR = 25; // враги ближе к игроку — ответная волна союзников
 const COUNTER_DELAY = [12, 18]; // или через столько секунд после начала волны врагов
 const WAVE_MAX_S = 30; // волна кончается не позже этого (время сцены)
+const AFTER_ALLY_WAVE = [5, 10]; // с от конца волны союзников до волны врагов (не позже их таймера)
 const NO_ENEMY_S = 8; // врагов нет дольше — волна врагов сразу
 const SURGE_SIZE = [10, 20];
 const SURGE_PACK = 6;
@@ -121,6 +119,13 @@ const SURGE_GAP = 1.6;
 const FIRST_SURGE = 15;
 const TRICKLE_PACK = [2, 4];
 const TRICKLE_GAP = [9, 13];
+// подкрепления вровень (matchStep): цель — живые у другой стороны × MATCH, пол растёт от MATCH_FLOOR[0]
+// на MATCH_RAMP в секунду до MATCH_FLOOR[1]; отстала больше MATCH_TOL — стаи чаще (MATCH_FAST с)
+const MATCH = [0.95, 1.1];
+const MATCH_FLOOR = [6, 30];
+const MATCH_RAMP = 0.1;
+const MATCH_TOL = 0.2;
+const MATCH_FAST = [2, 3.5];
 // перевес (momentumStep): множитель здоровья стороны от отношения живых, степень и пределы
 const MOMENTUM_K = 0.7;
 const HP_MUL = [0.4, 1.6];
@@ -137,11 +142,47 @@ const TURRET_SPREAD = 0.0106;
 const TURRET_HIT_R = 0.25;
 const TURRET_SPEED = 160; // м/с — видно, как летит
 const TURRET_TURN = 2.5; // рад/с наводки
+// Характер и приёмы («чтобы реально внушали», по просьбе пользователя). Роль пса dog.kind:
+// 'rusher' — в лоб, ближе CHARGE_NEAR срывается в рывок (×CHARGE_MUL, галоп с фазой полёта) с рёвом,
+//   издалека бросается наскоком (POUNCE: присел, глаза добела, рык — длинный прыжок на грудь);
+// 'flanker' — заходит сбоку фронта (±FLANK_ANGLE, стороны по очереди — клещи), вблизи — в лоб;
+// 'stalker' — ближе STALK_R крадётся по кругу пригнувшись, корпус довёрнут к цели, рычит, потом с
+//   рёвом срывается в рывок (и тоже наскок).
+// Ещё: спокойные крадутся (prowl), уворот маленьких — прыжком вбок, через трупы перепрыгивают,
+// резкое торможение — юзом с пылью, большие (paw) бьют сериями: мах, двойной мах (левой-правой),
+// на дыбы с рёвом и удар обеими лапами (REAR_*); тревога большого — встал на дыбы и ревёт.
+// Игрок на вышке: мелкие кружат у подножия и прыгают на её ноги (CLIMB_*), срываются.
+// Глаза: тусклее вдали, ярче у цели, добела перед атакой (unit.glow).
+const KINDS = [['rusher', 0.4], ['flanker', 0.35], ['stalker', 0.25]];
+const CHARGE_MUL = 1.3;
+const CHARGE_S = [1.6, 2.6];
+const CHARGE_NEAR = 24;
+const STALK_R = 13; // м × √размер
+const STALK_S = [2.2, 4];
+const POUNCE = [4.2, 7]; // × размер: с такого расстояния наскок
+const POUNCE_CROUCH = 0.42;
+const POUNCE_T = 0.62; // с полёта (× √размер)
+const POUNCE_CD = [4, 7];
+const FLANK_ANGLE = 0.85; // рад (≈49°) от «вперёд» мира
+const ALERT_REAR_S = 1.5; // тревога большого: на дыбах
+const CLIMB_H = [1.2, 2.2]; // × размер, м: прыжок на ногу вышки
+const CLIMB_GAP = [2.5, 6];
+const TOWER_LEG_R = 2.3; // м от центра вышки: тут ноги — отскакивает
 
 const wrap = (a) => {
   while (a > Math.PI) a -= Math.PI * 2;
   while (a < -Math.PI) a += Math.PI * 2;
   return a;
+};
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const smooth01 = (x) => {
+  const t = clamp01(x);
+  return t * t * (3 - 2 * t);
+};
+const pickKind = () => {
+  let r = Math.random();
+  for (const [name, w] of KINDS) if ((r -= w) <= 0) return name;
+  return KINDS[0][0];
 };
 
 export function createHorde({ THREE, root, camera, renderer = null, shooting, onPlayerHit, onKill }) {
@@ -417,12 +458,29 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     return null;
   };
   const rand = (a, b) => a + Math.random() * (b - a);
+  // роль и приёмы (KINDS); флангеры заходят по очереди слева и справа. Зовётся и для псов, переживших
+  // подмену файла из версии без ролей (steer)
+  const initTraits = (dog, size) => {
+    run.sides = (run.sides ?? 0) + 1;
+    dog.kind = size.giant && Math.random() < 0.6 ? 'rusher' : pickKind();
+    dog.side = run.sides % 2 ? 1 : -1;
+    dog.prowl = dog.rear = dog.rearReach = dog.brake = dog.look = 0;
+    dog.charge = 0;
+    dog.charged = false;
+    dog.stalk = 0;
+    dog.pounceCd = rand(1, 3);
+    dog.hopCd = 0;
+    dog.skidT = 0;
+    dog.climb = null;
+    dog.climbCd = rand(1, 4);
+  };
   // поставить пса размера size в (x, z) мордой к игроку; delay — с до старта (стая не в ногу)
   const placeDog = (unit, size, x, z, speedMul, delay = 0, team = 'enemy') => {
     const dog = createDog();
     dog.scale = size.scale;
     dog.team = team;
     dog.wave = curWave; // из какой волны (0 — не из волны)
+    dog.squad = curSquad; // стая (spawnPack): к ней drones.js цепляет коптеры-сопровождение; 0 — без стаи
     // союзники — своя зелёно-белая окраска (DOG_PAINTS[6]) и зелёные глаза, всегда «в бою»
     dog.paint = team === 'ally' ? ALLY_PAINT : Math.floor(Math.random() * PAINTS);
     dog.angry = team === 'ally';
@@ -437,6 +495,7 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     dog.dodgeSide = 1;
     // каждый пятый — с пулемётом на спине
     run.spawned = (run.spawned ?? 0) + 1;
+    initTraits(dog, size);
     dog.turret = run.spawned % TURRET_EVERY === 0;
     dog.gun = null;
     dog.x = x;
@@ -483,6 +542,11 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     },
   };
   const placed = []; // [x, z, scale] уже поставленных в этой стае (только при появлении стаи)
+  // Стаи и коптеры-сопровождение (drones.js): у каждой стаи свой номер dog.squad (счётчик в
+  // shared.squadSeq — не сбрасывается); о новой стае — событие в shared.squadQueue ({ id, team, n, x, z },
+  // drones.js забирает и шлёт 1–3 коптера); shared.squadMarks[id] — цель, которую видит сопровождение
+  // стаи (пёс другой команды): псы стаи её предпочитают (pickTarget)
+  let curSquad = 0;
   // Волна: PACK псов кучкой — размеры по весам (пока есть места), вокруг центра на 2–4 м (×√размер),
   // не внахлёст; скорость общая для стаи ±8 %, старт вразнобой до 0,7 с.
   // wantOverride — сколько псов (волна); иначе по PACK. Возвращает, сколько поставлено.
@@ -490,24 +554,12 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     refreshHead();
     let free = MAX_ALIVE - aliveCount();
     let want = wantOverride || PACK[0] + Math.floor(Math.random() * (PACK[1] - PACK[0] + 1));
-    if (team === 'ally') {
-      // союзников ~ALLY_SHARE от врагов и не больше ALLY_POOL моделей (пул общий)
-      if (!wantOverride) want = Math.max(1, Math.round(want * ALLY_SHARE));
-      // союзникам — не больше половины поля всегда (иначе волне врагов негде появиться)
-      free = Math.min(free, ALLY_POOL - teamInUse('ally'));
-      if (free <= 0) return 0;
-    } else {
-      // враги не занимают всё поле: союзникам остаётся их половина (кроме своей волны)
-      free = Math.min(free, waveActive() === 'enemy' ? POOL - teamInUse('ally') : POOL - ALLY_POOL - teamInUse('enemy') + 4);
-      if (free <= 0) return 0;
-    }
+    // у каждой стороны — не больше половины поля (иначе волне другой стороны негде появиться)
+    free = Math.min(free, TEAM_POOL - teamInUse(team));
+    if (free <= 0) return 0;
     const sizes = [];
     for (let k = 0; k < want && free > 0; k += 1) {
-      let size = pickSize(free);
-      if (team !== 'ally' && Math.random() < ENEMY_BIGGER) {
-        const other = pickSize(free); // враги в среднем крупнее
-        if (other.scale > size.scale) size = other;
-      }
+      const size = pickSize(free);
       if (size.slots > free) break;
       sizes.push(size);
       free -= size.slots;
@@ -523,6 +575,8 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     } else packCentre(sizes[0].scale, centre);
     const packMul = rand(RUN_MUL[0], RUN_MUL[1]);
     placed.length = 0;
+    shared.squadSeq = (shared.squadSeq ?? 0) + 1;
+    curSquad = shared.squadSeq;
     let n = 0;
     for (const size of sizes) {
       const unit = freeUnit();
@@ -542,6 +596,12 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
       placeDog(unit, size, x, z, packMul * rand(0.92, 1.08), n === 0 ? 0 : rand(0, 0.7), team);
       n += 1;
     }
+    if (n > 0) {
+      const q = (shared.squadQueue ??= []);
+      if (q.length >= 8) q.shift(); // коптеров нет (выключены) — очередь не растёт
+      q.push({ id: curSquad, team, n, x: centre.x, z: centre.z });
+    }
+    curSquad = 0;
     return n;
   };
   const teamInUse = (team) => {
@@ -594,17 +654,35 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
         p.leg = Math.random() < 0.5 ? 0 : 1;
         if ((dog.broken | 0) & (1 << p.leg)) p.leg ^= 1; // перебитой лапой не бьёт
         p.hit = false;
+        // приём: на дыбы и обеими лапами (первым делом и потом через раз; хромой не встаёт), двойной
+        // мах левой-правой или одиночный
+        const r = Math.random();
+        p.kind = !dog.broken && (!p.used || r < 0.3) ? 'rear' : !dog.broken && r < 0.65 ? 'combo' : 'swipe';
+        p.used = true;
+        p.chain = p.kind === 'combo' ? 1 : 0;
+        p.quick = false;
+        if (p.kind === 'rear') {
+          sfx.howl(unit.bodyCenter, s);
+          unit.kick(-6, 0);
+        }
       }
       return;
     }
     p.t += dt;
     const side = p.leg === 0 ? -1 : 1;
     const ahead = Math.min(0.85, dist / s); // где игрок впереди, в единицах модели
-    // медленно и читаемо (по просьбе пользователя): замах ~1–1,2 с, удар ~0,35–0,55 с, опускает ~1 с
+    // медленно и читаемо (по просьбе пользователя): замах ~1–1,2 с, удар ~0,35–0,55 с, опускает ~1 с;
+    // второй мах серии (quick) — вдвое быстрее; на дыбы — встаёт ~1 с, удар ~0,3 с
     const lame = dog.broken ? 1.4 : 1; // хромой бьёт медленнее
-    const tw = (0.9 + 0.025 * s) * lame; // замах
+    const fast = p.quick ? 0.45 : 1;
+    const tw = (0.9 + 0.025 * s) * lame * fast; // замах
     const ts = (0.3 + 0.02 * s) * lame; // удар
-    const tr = (0.8 + 0.03 * s) * lame; // опустить
+    const tr = (0.8 + 0.03 * s) * lame * (p.chain > 0 ? 0.35 : 1); // опустить (перед вторым махом — быстро)
+    if (p.kind === 'rear') {
+      rearStep(unit, dog, p, s, tw * 1.1, ts * 0.9, tr);
+      dog.pawPose = null;
+      return;
+    }
     const pose = p.pose;
     pose.leg = p.leg;
     const wx = side * 0.26;
@@ -652,11 +730,79 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
       const k = Math.min(1, p.t / tr);
       pose.k = 1 - k * k * (3 - 2 * k);
       if (k >= 1) {
-        p.phase = 0;
-        p.cd = rand(0.5, 0.9); // пауза до следующего замаха
+        if (p.chain > 0) {
+          // серия: сразу второй мах другой лапой
+          p.chain -= 1;
+          if (!((dog.broken | 0) & (1 << (p.leg ^ 1)))) p.leg ^= 1;
+          p.phase = 1;
+          p.t = 0;
+          p.hit = false;
+          p.quick = true;
+        } else {
+          p.phase = 0;
+          p.cd = rand(0.5, 0.9); // пауза до следующего замаха
+        }
       }
     }
     dog.pawPose = p.phase ? pose : null;
+  };
+  // На дыбы и удар обеими лапами (большие): встаёт (передние молотят воздух, глаза добела, рёв —
+  // в pawStep), обрушивается лапами вперёд-вниз; попал — если середина передних стоп рядом с целью.
+  // Мимо — земля дрожит: пыль, глухой удар, игрока рядом или на вышке над ним слегка трясёт (не ранит).
+  const rearStep = (unit, dog, p, s, tw, ts, tr) => {
+    if (p.phase === 1) {
+      dog.rear = smooth01(p.t / (tw * 0.5));
+      if (p.t >= tw) {
+        p.phase = 2;
+        p.t = 0;
+        sfx.whoosh(unit.bodyCenter, s);
+      }
+    } else if (p.phase === 2) {
+      const u = Math.min(1, p.t / ts);
+      dog.rear = 1 - u * u;
+      dog.rearReach = smooth01(u * 1.6);
+      if (!p.hit && u >= 0.7 && !tp.rally && (!tp.player || Math.abs(bearingOf(dog)) < FRONT_ANGLE + 0.25)) {
+        unit.foot(0, v1);
+        unit.foot(1, v2);
+        v1.lerp(v2, 0.5);
+        if (Math.hypot(v1.x - tp.x, v1.z - tp.z) < 0.45 + 0.25 * s + tp.r && v1.y < tp.y + 0.25 && !(tp.player && (shared.playerElevation ?? 0) > s * 1.25)) {
+          p.hit = true;
+          if (tp.player) {
+            v2.set(head.x, head.y - 0.4, head.z);
+            playerHit(v2, head.x - dog.x, head.z - dog.z, 0.85 + 0.1 * s, s, 1.2);
+          } else if (tp.unit) targetHit(unit, tp.unit, v1, tp.x - dog.x, tp.z - dog.z, 2.5);
+        }
+      }
+      if (u >= 1) {
+        p.phase = 3;
+        p.t = 0;
+        unit.foot(0, v1);
+        unit.foot(1, v2);
+        footfall(v1);
+        footfall(v2);
+        v1.lerp(v2, 0.5);
+        sfx.groundThud(v1, 1, s);
+        // земля дрожит: игрок рядом (или на вышке прямо над псом) — лёгкая тряска, спереди
+        if (!p.hit && tp.player && Math.abs(bearingOf(dog)) < FRONT_ANGLE + 0.25) {
+          const tw2 = shared.towerPos;
+          const near = Math.hypot(v1.x - head.x, v1.z - head.z) < 2.5 * s || (tw2 && Math.hypot(v1.x - tw2.x, v1.z - tw2.z) < 3.5 + 0.3 * s);
+          if (near) {
+            try {
+              shared.screenShake?.(Math.min(0.35, 0.05 * s + 0.08), shakeDir.set(head.x - dog.x, 0, head.z - dog.z).normalize());
+            } catch {
+              // тряска не важнее игры
+            }
+          }
+        }
+      }
+    } else {
+      const k = Math.min(1, p.t / tr);
+      dog.rearReach = 1 - smooth01(k);
+      if (k >= 1) {
+        p.phase = 0;
+        p.cd = rand(0.7, 1.2);
+      }
+    }
   };
   const bearingOf = (dog) => Math.atan2(dog.x - head.x, head.z - dog.z);
 
@@ -697,6 +843,12 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
         const cd = cur === 'player' ? Math.hypot(head.x - dog.x, head.z - dog.z) : Math.hypot(cur.dog.x - dog.x, cur.dog.z - dog.z);
         if (bestD > 0.75 * cd) best = cur;
       }
+      // сопровождение стаи (drones.js) метит цель — псы стаи бегут на неё, если она не намного дальше
+      const mark = dog.squad ? shared.squadMarks?.[dog.squad] : null;
+      if (mark && mark !== best && mark !== unit && mark.dog && alive(mark) && !mark.emerging && (mark.dog.team === 'ally') !== ally) {
+        const md = Math.hypot(mark.dog.x - dog.x, mark.dog.z - dog.z);
+        if (md < 1.5 * bestD + 4) best = mark;
+      }
       dog.target = best;
     }
     const t = dog.target;
@@ -734,12 +886,50 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     return result;
   };
 
+  let forcePose = null; // отладка: { rear, rearReach, prowl, brake, look } поверх поведения (только с ПК)
+  let skidLeft = 0; // сколько облачков пыли юзом ещё можно в этом кадре (update ставит 3)
+  // рывок вбок (уворот, 0,4 с; идёт и в прыжке вбок)
+  const dodgeTick = (dog, rs, dt) => {
+    if (!(dog.dodgeT > 0)) {
+      dog.vs = 0;
+      return;
+    }
+    dog.dodgeT -= dt;
+    dog.vs = dog.dodgeSide * 3.2 * rs * Math.sin(Math.PI * clamp01(1 - dog.dodgeT / 0.4));
+    if (dog.dodgeT <= 0) dog.vs = 0;
+  };
+  // прыжок на ногу вышки (dog.climb): присел — стоит; взлетел — к центру; у ног или в верхней точке —
+  // отскок назад (скрежет когтей), падает
+  const climbStep = (unit, dog, j, s) => {
+    const c = dog.climb;
+    if (j.phase === 0) {
+      dog.v = 0.3;
+      return;
+    }
+    if (!c.go) {
+      c.go = true;
+      dog.v = c.v;
+    }
+    if (!c.bounced && j.phase === 1 && (unit.jumpVy <= 0.3 || Math.hypot(dog.x - c.x, dog.z - c.z) < TOWER_LEG_R)) {
+      c.bounced = true;
+      dog.v = -1.3 * Math.sqrt(s);
+      unit.kick(-7, (Math.random() - 0.5) * 6);
+      sfx.scrape(unit.bodyCenter, 0.9, s);
+    }
+  };
   // ---- поведение одного пса (бег к игроку, бросок или лапа, отскок)
   const steer = (unit, dt) => {
     const dog = unit.dog;
     const s = unit.scale; // размер: дальности ×s, время броска ×√s
     const rs = Math.sqrt(s);
     const size = sizeOf(dog);
+    if (dog.kind === undefined) initTraits(dog, size);
+    if (dog.frozen) {
+      // отладка (снимки поз с ПК): стоит на месте, поза — debug.force
+      dog.v = dog.w = dog.vs = 0;
+      if (forcePose) Object.assign(dog, forcePose);
+      return;
+    }
     dog.t += dt;
     dog.age = (dog.age ?? 0) + dt;
     pickTarget(unit, dt); // tp: игрок, пёс другой команды или точка сбора союзников
@@ -750,13 +940,26 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     const bearing = bearingOf(dog);
     const inFront = !tp.player || Math.abs(bearing) < FRONT_ANGLE;
     const j = dog.jump;
+    // поза и глаза: цели на этот кадр (на дыбы и удар с дыб выставляют pawStep/тревога, сглаживания им
+    // не нужно — кривые и так плавные); крадётся и довёрнут — сглаживаются ниже
+    dog.rear = 0;
+    dog.rearReach = 0;
+    let prowlGoal = 0;
+    let lookGoal = 0;
+    let brakeGoal = 0;
+    // глаза: вдали тусклее, у цели — ярко и пульсируют, перед атакой — добела
+    let glow = !dog.angry ? 1 : dist < 25 ? 1 + 0.12 * Math.sin(dog.age * 9) : 0.72;
+    dog.hopCd = (dog.hopCd ?? 0) - dt;
     if (j) {
       // бросок: присел — почти стоит; полетел — с расчётной скоростью к игроку
       if (dog.leap) {
-        if (j.phase === 0) dog.v = 0.4;
-        else if (j.phase === 1 && !dog.leap.flying) {
+        if (j.phase === 0) {
+          dog.v = 0.4;
+          glow = 1.3 + 0.2 * Math.random(); // присел перед броском: глаза добела, мерцают
+        } else if (j.phase === 1 && !dog.leap.flying) {
           dog.leap.flying = true;
           dog.v = dog.leap.v;
+          if (dog.leap.pounce) sfx.whoosh(unit.bodyCenter, s);
         }
         // в полёте: центр корпуса у линии голова–грудь — удар
         if (j.phase === 1 && !dog.leap.struck && tp.unit) {
@@ -783,7 +986,8 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
             playerHit(v1, dx, dz, 0.5 + 0.1 * s, s);
           }
         }
-      }
+      } else if (dog.climb) climbStep(unit, dog, j, s);
+      else dodgeTick(dog, rs, dt); // прыжок вбок (уворот) или через труп: рывок вбок продолжается
       dog.w = 0;
     } else {
       if (dog.leap) {
@@ -791,6 +995,13 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
         dog.state = 'recover';
         dog.t = dog.leap.struck ? -0.6 : 0.4; // ударил — дольше приходит в себя (1,4 с)
         dog.leap = null;
+        dog.charged = false;
+      }
+      if (dog.climb) {
+        // сорвался с ноги вышки: приземлился, встряхнулся
+        dog.climb = null;
+        dog.state = 'recover';
+        dog.t = 0.3;
       }
       let goal = 0;
       let face = yawTo(dx, dz);
@@ -802,16 +1013,39 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
       } else if (dog.state === 'recover') {
         if (dog.t > 0.8) dog.state = 'run';
       } else if (dog.state === 'alert') {
-        // тревога: встал, дёрнулся, злой лай — и вперёд
+        // тревога: встал, дёрнулся, злой лай — и вперёд; большой — встаёт на дыбы и ревёт
+        const big = size.paw && !dog.broken;
         if (dog.t >= 0 && !dog.alerted) {
           dog.alerted = true;
           unit.kick(-8, (Math.random() - 0.5) * 8);
-          sfx.bark(unit.bodyCenter, s);
+          if (big || Math.random() < 0.25) sfx.howl(unit.bodyCenter, s);
+          else sfx.bark(unit.bodyCenter, s);
         }
-        if (dog.t > ALERT_S) dog.state = 'run';
+        if (dog.t >= 0) {
+          glow = 1.5;
+          if (big) {
+            const k = dog.t / ALERT_REAR_S;
+            dog.rear = smooth01(k / 0.3) * (1 - smooth01((k - 0.75) / 0.25));
+          }
+        }
+        face = yawTo(dx, dz);
+        if (dog.t > (big ? ALERT_REAR_S : ALERT_S)) dog.state = 'run';
       } else {
         dog.state = 'run';
         goal = dog.speed * (dog.angry ? 1 : CALM_SPEED);
+        if (!dog.angry) prowlGoal = 0.6; // спокойный — крадётся, низко и широко
+        // рывок (rusher — ближе CHARGE_NEAR, stalker — после засады): быстрее, во весь опор
+        if (dog.charge > 0) {
+          dog.charge -= dt;
+          goal *= CHARGE_MUL;
+        } else if (dog.kind === 'rusher' && dog.angry && !dog.charged && inFront && !tp.rally && dist < CHARGE_NEAR * Math.sqrt(rs) && dist > 6 * s + tp.r) {
+          dog.charged = true;
+          dog.charge = rand(CHARGE_S[0], CHARGE_S[1]);
+          unit.kick(-5, 0);
+          if (Math.random() < 0.5) sfx.howl(unit.bodyCenter, s);
+          else sfx.bark(unit.bodyCenter, s);
+        }
+        if (dist > CHARGE_NEAR * 1.6 * Math.sqrt(rs)) dog.charged = false;
         // к игроку; сзади или сбоку — сначала обежать по кругу вперёд (точка на круге, на ~50° ближе
         // к «вперёд»), там уже бросаться
         let ox = dx / dist;
@@ -838,6 +1072,26 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
           oz = tz / td;
           goal *= 0.8;
         }
+        // флангер: заходит сбоку — на игрока по спирали к краю фронта (±FLANK_ANGLE), на пса — курсом в
+        // сторону от прямой; вблизи (6 × размер) — в лоб
+        if (dog.kind === 'flanker' && dog.angry && !strafing && !tp.rally && dist > 6 * s + tp.r) {
+          if (tp.player) {
+            const b = dog.side * FLANK_ANGLE;
+            const r = Math.max(4 * s, dist * 0.72);
+            const tx = head.x + Math.sin(b) * r - dog.x;
+            const tz = head.z - Math.cos(b) * r - dog.z;
+            const td = Math.hypot(tx, tz) || 1e-3;
+            ox = tx / td;
+            oz = tz / td;
+          } else {
+            const a = dog.side * 0.6 * clamp01((dist - 6 * s) / (10 * s));
+            const c = Math.cos(a);
+            const sn = Math.sin(a);
+            const nx = ox * c - oz * sn;
+            oz = ox * sn + oz * c;
+            ox = nx;
+          }
+        }
         if (!inFront) {
           const b = bearing - Math.sign(bearing) * 0.9;
           const ring = LEAP_RANGE * s * 1.3 + 1.5;
@@ -847,10 +1101,24 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
           ox = tx / td;
           oz = tz / td;
         }
-        // не толкаться: отталкивание от других живых псов
+        // не толкаться: отталкивание от других живых псов; труп прямо по курсу — перепрыгнуть
+        // (маленькие и средние на бегу, тем же проходом)
+        const hopper = !size.paw && dog.hopCd <= 0 && dog.v > 2 * rs;
+        const fwx = -Math.sin(dog.yaw);
+        const fwz = -Math.cos(dog.yaw);
+        let hopOver = 0;
         for (let i = 0; i < units.length; i += 1) {
           const other = units[i];
-          if (other === unit || other === tp.unit || other.mode !== 'alive') continue;
+          if (other === unit || other === tp.unit) continue;
+          if (other.mode !== 'alive') {
+            if (hopper && (other.mode === 'dead' || other.mode === 'dying') && other.scale <= 1.7 * s) {
+              const cx = other.bodyCenter.x - dog.x;
+              const cz = other.bodyCenter.z - dog.z;
+              const along = cx * fwx + cz * fwz;
+              if (along > 0.3 * s && along < 1.3 * s + 0.4 * other.scale && Math.abs(cx * fwz - cz * fwx) < 0.35 * (s + other.scale) && other.bodyCenter.y - groundHeight(other.bodyCenter.x, other.bodyCenter.z) > -0.1) hopOver = Math.max(hopOver, other.scale);
+            }
+            continue;
+          }
           const ax = dog.x - other.dog.x;
           const az = dog.z - other.dog.z;
           const room = 0.8 * (s + other.scale);
@@ -863,10 +1131,47 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
             oz += (az / ad) * push;
           }
         }
+        if (hopOver && unit.jump({ height: 0.3 + (0.22 * hopOver) / s, crouch: 0.04 })) dog.hopCd = 1.2;
         face = yawTo(ox, oz);
         // бег не по линейке: плавный зигзаг (у каждого пса свой размах и частота), у игрока гаснет
         const wv = dog.weave;
         if (wv && !striking && !strafing) face += wv[0] * (dog.angry ? 1 : 0.35) * Math.max(0, Math.min(1, (dist - 4 * s) / (8 * s))) * Math.sin(dog.age * wv[1] + wv[2]);
+        // засада (stalker): ближе STALK_R крадётся по кругу пригнувшись (круг медленно сжимается), корпус
+        // довёрнут к цели, рычит; через 2–4 с — рёв и рывок (наскок разрешён сразу)
+        if (dog.kind === 'stalker' && dog.angry && !strafing && !tp.rally && !(tp.player && (shared.playerElevation ?? 0) > 1)) {
+          if (dog.stalk === 0 && inFront && dist < STALK_R * rs && dist > 5 * s + tp.r) {
+            dog.stalk = rand(STALK_S[0], STALK_S[1]);
+            dog.stalkR = dist;
+            dog.circleDir = Math.random() < 0.5 ? -1 : 1;
+            dog.growlT = 0;
+          }
+          if (dog.stalk > 0) {
+            dog.stalk -= dt;
+            dog.stalkR = Math.max(4 * s + tp.r, dog.stalkR - 0.7 * rs * dt);
+            // у края сектора спереди — в другую сторону (на игрока нападают только спереди)
+            if (tp.player && Math.abs(bearing) > FRONT_ANGLE - 0.25 && Math.abs(bearing) > Math.abs(dog.lastBearing ?? 0)) dog.circleDir = -dog.circleDir;
+            const cd = dog.circleDir;
+            const k = (dist - dog.stalkR) / (2 * rs);
+            face = yawTo((-dz * cd + dx * k) / dist, (dx * cd + dz * k) / dist);
+            goal = dog.speed * 0.3;
+            prowlGoal = 1;
+            lookGoal = 1;
+            glow = 1.15 + 0.15 * Math.sin(dog.age * 6);
+            dog.growlT -= dt;
+            if (dog.growlT <= 0) {
+              dog.growlT = rand(1.1, 2);
+              sfx.growl(unit.bodyCenter, s);
+            }
+            if (dog.stalk <= 0) {
+              dog.stalk = -1;
+              dog.charge = rand(CHARGE_S[0], CHARGE_S[1]) * 1.2;
+              dog.pounceCd = 0;
+              unit.kick(-7, (Math.random() - 0.5) * 4);
+              sfx.howl(unit.bodyCenter, s);
+            }
+          } else if (dog.stalk < 0 && dist > STALK_R * rs * 1.6) dog.stalk = 0; // отбросило далеко — снова засада
+        }
+        dog.lastBearing = bearing;
         if (size.paw && inFront) {
           // лапой: подбегает и встаёт перед игроком (тормозит заранее), бьёт стоя, мордой к нему
           goal *= Math.max(0, Math.min(1, (dist - tp.r - PAW_STAND * s) / (1.2 * s)));
@@ -881,6 +1186,24 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
           const k = (dist - 3.5) / 2;
           face = yawTo((-dz * cd + dx * k) / dist, (dx * cd + dz * k) / dist);
           goal = dog.speed * 0.5;
+          lookGoal = 1;
+          // кидается на ногу вышки: присел, прыжок вверх-к центру на 1,2–2,2 м (× размер), у ног —
+          // отскок, срывается вниз
+          dog.climbCd = (dog.climbCd ?? 2) - dt;
+          if (dog.climbCd <= 0 && dog.angry && !dog.broken && dist > 2.6 && dist < 4.8) {
+            dog.climbCd = rand(CLIMB_GAP[0], CLIMB_GAP[1]);
+            const twp = shared.towerPos;
+            const cx = twp ? twp.x : head.x;
+            const cz = twp ? twp.z : head.z;
+            const hgt = rand(CLIMB_H[0], CLIMB_H[1]);
+            if (unit.jump({ height: hgt, crouch: 0.25 })) {
+              const dc = Math.hypot(cx - dog.x, cz - dog.z);
+              const up = Math.sqrt(2 * GRAVITY * hgt * s) / GRAVITY; // с до верхней точки
+              dog.yaw = yawTo(cx - dog.x, cz - dog.z);
+              dog.climb = { x: cx, z: cz, v: Math.max(0.6, Math.min(4, (dc - TOWER_LEG_R + 0.2) / up)), go: false, bounced: false };
+              if (Math.random() < 0.4) sfx.growl(unit.bodyCenter, s);
+            }
+          }
         }
         if (dog.broken) goal *= 0.55; // хромает
         const diff = Math.abs(wrap(yawTo(dx, dz) - dog.yaw));
@@ -897,23 +1220,61 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
             dog.yaw = yawTo(dx, dz);
           }
         }
+        // наскок издалека (rusher, stalker; маленькие и средние): присел с рыком, глаза добела — длинный
+        // прыжок высокой дугой на грудь (от него можно уйти: курс задан в момент решения)
+        dog.pounceCd = (dog.pounceCd ?? 0) - dt;
+        const pr = dist - tp.r;
+        if (!dog.jump && !size.paw && dog.kind !== 'flanker' && dog.angry && !tp.rally && !onTower && inFront && !(dog.stalk > 0) && !dog.broken
+          && dog.pounceCd <= 0 && pr > POUNCE[0] * s && pr < POUNCE[1] * s && diff < 0.3 && Math.random() < dt * 2.5) {
+          const lt = POUNCE_T * rs;
+          const chest = tp.y - CHEST_BELOW_HEAD - groundHeight(dog.x, dog.z) - BODY_Y * s;
+          const h = Math.max(0.35 * s, chest);
+          const vy = (h + 0.5 * GRAVITY * lt * lt) / lt;
+          if (unit.jump({ vy, crouch: POUNCE_CROUCH })) {
+            dog.leap = { v: Math.max(1, dist - 0.25 * s) / lt, flying: false, struck: false, pounce: true };
+            dog.yaw = yawTo(dx, dz);
+            dog.pounceCd = rand(POUNCE_CD[0], POUNCE_CD[1]);
+            sfx.growl(unit.bodyCenter, s);
+          }
+        }
       }
       const diff = wrap(face - dog.yaw);
       dog.w = Math.max(-4, Math.min(4, diff * 5));
       dog.yaw = wrap(dog.yaw + dog.w * dt);
       goal *= Math.max(0.2, Math.min(1, 1.3 - Math.abs(diff) / 1.2));
-      dog.v += Math.max(-6 * dt, Math.min(3.5 * dt, goal - dog.v));
-      // изредка — резкий уворот вбок (не великаны и не вблизи игрока): 0,4 с рывка
-      if (dog.dodgeT > 0) {
-        dog.dodgeT -= dt;
-        dog.vs = dog.dodgeSide * 3.2 * rs * Math.sin(Math.PI * Math.max(0, Math.min(1, 1 - dog.dodgeT / 0.4)));
-        if (dog.dodgeT <= 0) dog.vs = 0;
-      } else if (!size.paw && dog.angry && !dog.turret && dog.state === 'run' && dist > 6 * s && dist < 32 && Math.random() < dt * 0.18) {
+      // резко тормозит с разгона (засада, вышка, перед лапой, крутой поворот) — юзом: корпус назад,
+      // передние упираются, пыль из-под лап, скрежет
+      const decel = dog.v - goal;
+      if (dog.state === 'run' && decel > 2.2 * rs && dog.v > 2.6 * rs) brakeGoal = Math.min(1, decel / (4 * rs));
+      dog.v += Math.max(-(6 + 5 * brakeGoal) * dt, Math.min(3.5 * dt, goal - dog.v));
+      dog.skidT = (dog.skidT ?? 0) - dt;
+      if (brakeGoal > 0.45 && dog.skidT <= 0 && skidLeft > 0 && Math.abs(dog.x - head.x) + Math.abs(dog.z - head.z) < 50) {
+        skidLeft -= 1; // пыль юзом — не больше 3 облачков за кадр на всех
+        dog.skidT = 0.11;
+        unit.foot(Math.random() < 0.5 ? 0 : 1, v1);
+        v1.y = groundHeight(v1.x, v1.z);
+        footfall(v1);
+        sfx.scrape(unit.bodyCenter, brakeGoal, s);
+      }
+      // изредка — резкий уворот вбок (не великаны и не вблизи игрока): 0,4 с рывка; маленькие и
+      // средние чаще всего — прыжком вбок
+      if (dog.dodgeT > 0) dodgeTick(dog, rs, dt);
+      else if (!size.paw && dog.angry && !dog.turret && dog.state === 'run' && !(dog.stalk > 0) && dist > 6 * s && dist < 32 && Math.random() < dt * 0.3) {
         dog.dodgeT = 0.4;
         dog.dodgeSide = Math.random() < 0.5 ? -1 : 1;
+        if (s <= 1.6 && Math.random() < 0.6) unit.jump({ height: 0.28, crouch: 0.05 });
       }
+      if (lookGoal) lookGoal = wrap(yawTo(dx, dz) - dog.yaw); // корпус довёрнут к цели
     }
-    if (dog.jump) dog.vs = 0;
+    if (dog.leap || dog.climb) dog.vs = 0;
+    // сглаживание позы: крадётся, довёрнут, юзом
+    const ks = Math.min(1, dt * 5);
+    dog.prowl = (dog.prowl ?? 0) + (prowlGoal - (dog.prowl ?? 0)) * ks;
+    dog.look = (dog.look ?? 0) + (lookGoal - (dog.look ?? 0)) * ks;
+    dog.brake = (dog.brake ?? 0) + (brakeGoal - (dog.brake ?? 0)) * Math.min(1, dt * 10);
+    if (dog.paw?.phase === 1) glow = 1.3 + 0.2 * Math.random(); // замах лапой / встаёт на дыбы
+    if (forcePose) Object.assign(dog, forcePose); // отладка (debug.force): поза на всех псов
+    unit.glow(glow);
     dog.x -= Math.sin(dog.yaw) * dog.v * dt;
     dog.z -= Math.cos(dog.yaw) * dog.v * dt;
     if (dog.vs) {
@@ -1079,12 +1440,13 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
   // издалека; союзников — выше, сзади.
   const randInt = ([a, b]) => a + Math.floor(Math.random() * (b - a + 1));
   const horn = createHorn(shared);
-  // Качели (по просьбе пользователя): волна врагов — по таймеру; размер — сопоставим с живыми
-  // союзниками (×0,9–1,2, не меньше 10). Пока волна стороны идёт (от начала, пока от неё не осталась
-  // четверть или 30 с), у ДРУГОЙ стороны подкреплений нет (её «понемногу» стоит). Ответная волна
-  // союзников — когда враги прорвались ближе COUNTER_NEAR м к игроку или через COUNTER_DELAY с, размер —
-  // от живых врагов. Волна союзников гасит «понемногу» врагов; следующая волна врагов — через
-  // SURGE_EVERY после конца их прошлой. Перевес (momentumStep) усиливает качели.
+  // Качели (по просьбе пользователя), стороны наравне: волна врагов — по таймеру; размер любой волны —
+  // от живых у другой стороны (×0,9–1,2, не меньше 10). Пока волна стороны идёт (от начала, пока от неё
+  // не осталась четверть или 30 с), у ДРУГОЙ стороны подкреплений нет (её «понемногу» стоит). Ответная
+  // волна союзников — когда враги прорвались ближе COUNTER_NEAR м к игроку, через COUNTER_DELAY с или
+  // сразу, если волну врагов отбили раньше. Кончилась волна союзников — волна врагов через
+  // AFTER_ALLY_WAVE с (не позже их таймера SURGE_EVERY). Так волны чередуются: враги → союзники → враги.
+  // Перевес (momentumStep) усиливает качели. Дроны (drones.js) вылетают волной вместе с волной псов.
   let waveId = 0;
   let curWave = 0; // номер волны, которую сейчас выпускает spawnPack (placeDog метит псов)
   const aliveOf = (team, id = 0) => {
@@ -1099,8 +1461,7 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     const s = sv[team];
     const other = team === 'ally' ? 'enemy' : 'ally';
     const opp = aliveOf(other);
-    const rel = team === 'ally' ? ALLY_WAVE_REL : ENEMY_WAVE_REL;
-    s.size = Math.max(SURGE_SIZE[0], Math.round(opp * rand(rel[0], rel[1])));
+    s.size = Math.max(SURGE_SIZE[0], Math.round(opp * rand(WAVE_REL[0], WAVE_REL[1])));
     s.left = s.size;
     s.gap = 0;
     s.age = 0;
@@ -1109,7 +1470,9 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     s.delay = rand(COUNTER_DELAY[0], COUNTER_DELAY[1]);
     s.next = rand(SURGE_EVERY[0], SURGE_EVERY[1]); // таймер не перезапускает волну сразу
     sv.active = team; // у другой стороны — пауза подкреплений
-    sv[other].left = 0; // недоспавненная волна другой стороны не досыпается
+    // недоспавненная волна другой стороны досыпается (иначе ответ обрывал её на полпути — перекос)
+    // для drones.js: с волной псов вылетает и волна коптеров этой стороны (n растёт с каждой волной)
+    shared.dogWave = { team, n: (shared.dogWave?.n ?? 0) + 1 };
     v1.set(head.x, head.y + 5, head.z + (team === 'ally' ? 40 : -90));
     horn.play(v1, team === 'ally' ? 1.25 : 0.85, team === 'ally' ? 1 : 1.6);
     console.log(`[horde] волна: ${team === 'ally' ? 'союзники' : 'враги'} ×${s.size} (${why}; против живых ${opp}, своих живых ${aliveOf(team)})`);
@@ -1130,7 +1493,8 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
     }
     // ответ союзников: враги прорвались близко к игроку или прошло COUNTER_DELAY с
     const ew = sv.enemy;
-    if (alliesOn && sv.active === 'enemy' && !ew.countered && ew.age > 4) {
+    // (не раньше, чем волна врагов почти вся выпущена — стаи по SURGE_PACK раз в SURGE_GAP с)
+    if (alliesOn && sv.active === 'enemy' && !ew.countered && ew.age > 6) {
       // прорыв — только псы этой волны
       let near = Infinity;
       for (let i = 0; i < units.length; i += 1) {
@@ -1155,20 +1519,56 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
           s.left -= n;
           s.gap = n ? SURGE_GAP : 0.5;
           // сторона упёрлась в свой предел — остаток волны не ждёт (иначе волна не кончалась никогда)
-          if (!n && (team === 'ally' ? teamInUse('ally') >= ALLY_POOL : teamInUse('enemy') + teamInUse('ally') >= POOL)) s.left = 0;
+          if (!n && teamInUse(team) >= TEAM_POOL) s.left = 0;
         }
       }
       // волна кончилась: выпущена и от неё осталась четверть — или в любом случае через WAVE_MAX_S
       if (sv.active === team && (s.age > WAVE_MAX_S || (s.left <= 0 && aliveOf(team, s.id) <= s.size * 0.25))) {
         s.left = 0;
         sv.active = null;
-        // кончилась волна врагов — их следующая через паузу (у союзной таймер врагов не трогаем)
-        if (team === 'enemy') sv.enemy.next = rand(SURGE_EVERY[0], SURGE_EVERY[1]) * 0.6;
         console.log(`[horde] волна ${team === 'ally' ? 'союзников' : 'врагов'} кончилась (${s.age.toFixed(0)} с; живых: союзники ${aliveOf('ally')}, враги ${aliveOf('enemy')})`);
+        // волны чередуются: волну врагов отбили раньше ответа — союзники сразу идут в ответ;
+        // кончилась волна союзников — волна врагов скоро (AFTER_ALLY_WAVE с)
+        if (team === 'enemy') {
+          sv.enemy.next = rand(SURGE_EVERY[0], SURGE_EVERY[1]) * 0.6;
+          if (alliesOn && !s.countered) {
+            s.countered = true;
+            startWave(sv, 'ally', 'враги отбиты');
+          }
+        } else sv.enemy.next = Math.min(sv.enemy.next, rand(AFTER_ALLY_WAVE[0], AFTER_ALLY_WAVE[1]));
       }
     }
   };
   const waveActive = () => run?.surge?.active ?? null;
+  // Подкрепления вровень (по просьбе пользователя: «больше наших — больше и врагов», и наоборот):
+  // сторона добирает живых до цели = живые у другой × MATCH (0,95–1,1), но не меньше пола (растёт
+  // со временем MATCH_FLOOR) и не больше TEAM_POOL. Небольшой перебор (до 1,1) — обе стороны растут
+  // вместе, рывками. Отстала больше чем на MATCH_TOL (20 %) — стаи по SURGE_PACK раз в MATCH_FAST с,
+  // иначе — TRICKLE_PACK раз в TRICKLE_GAP. Пока идёт волна другой стороны — подкреплений нет.
+  const matchStep = () => {
+    const alliesOn = shared.allies !== false;
+    const floor = Math.min(MATCH_FLOOR[1], MATCH_FLOOR[0] + run.elapsed * MATCH_RAMP);
+    for (const team of ['enemy', 'ally']) {
+      if (team === 'ally' && !alliesOn) continue;
+      const key = team === 'ally' ? 'nextAlly' : 'nextSpawn';
+      if (run[key] > 0) continue;
+      const other = team === 'ally' ? 'enemy' : 'ally';
+      if (waveActive() === other || aliveCount() > MAX_ALIVE - PACK[0]) {
+        run[key] = 1;
+        continue;
+      }
+      const opp = team === 'enemy' && !alliesOn ? 0 : aliveOf(other);
+      const goal = Math.min(TEAM_POOL, Math.max(floor, Math.round(opp * rand(MATCH[0], MATCH[1]))));
+      const lack = goal - aliveOf(team);
+      if (lack < 2) {
+        run[key] = 1;
+        continue;
+      }
+      const behind = lack > goal * MATCH_TOL;
+      const n = spawnPack(team, Math.min(lack, behind ? SURGE_PACK : randInt(TRICKLE_PACK)));
+      run[key] = !n ? 1 : behind ? rand(MATCH_FAST[0], MATCH_FAST[1]) : rand(TRICKLE_GAP[0], TRICKLE_GAP[1]);
+    }
+  };
   // ---- перевес: живых больше у одной стороны — у другой «меньше здоровья» (урон по ней × 1/hpMul).
   // hpMul(союзники) = clamp((A/E)^k, 0,4…1,6), враги — наоборот; пересчёт раз в секунду.
   const momentum = { allies: 0, enemies: 0, hpAlly: 1, hpEnemy: 1, t: 0 };
@@ -1244,21 +1644,10 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
         // скелет дешёвый (без мешей): запас 8 свободных, до 3 новых за кадр
         for (let k = 0; k < 3 && off < 8 && units.length < POOL; k += 1, off += 1) makeUnit();
       }
-      // между волнами — понемногу (маленькие стаи редко)
-      // (пока идёт волна союзников — у врагов подкреплений нет, и наоборот)
-      if (run.nextSpawn <= 0 && aliveCount() <= MAX_ALIVE - PACK[0] && waveActive() !== 'ally') {
-        const ts = performance.now();
-        const spawned = spawnPack('enemy', randInt(TRICKLE_PACK));
-        if (globalThis.__prof) globalThis.__prof.sub.hSpawn = performance.now() - ts; // ВРЕМЕННО
-        run.nextSpawn = spawned ? rand(TRICKLE_GAP[0], TRICKLE_GAP[1]) : 1;
-      }
-      // союзники: свои стаи позади игрока; выключены — уходят
-      if (shared.allies !== false) {
-        run.nextAlly = (run.nextAlly ?? ALLY_FIRST) - dt;
-        if (run.nextAlly <= 0 && waveActive() !== 'enemy') run.nextAlly = spawnPack('ally', randInt(TRICKLE_PACK)) ? rand(TRICKLE_GAP[0], TRICKLE_GAP[1]) * ALLY_GAP : 1;
-      } else {
-        for (let i = 0; i < units.length; i += 1) if (units[i].mode !== 'off' && units[i].dog.team === 'ally') units[i].hide();
-      }
+      // подкрепления вровень с другой стороной (matchStep); союзники выключены — уходят
+      if (shared.allies !== false) run.nextAlly = (run.nextAlly ?? ALLY_FIRST) - dt;
+      else for (let i = 0; i < units.length; i += 1) if (units[i].mode !== 'off' && units[i].dog.team === 'ally') units[i].hide();
+      matchStep();
       surgeStep(dt);
       momentumStep(dt);
       const PS = globalThis.__prof?.sub; // ВРЕМЕННО: профилировщик
@@ -1266,6 +1655,7 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
       for (let i = 0; i < units.length; i += 1) if (units[i].mode !== 'off') used += 1;
       const corpseS = used > BUSY_USED ? CORPSE_BUSY_S : CORPSE_S; // псов много — трупы уходят раньше
       frameNo += 1;
+      skidLeft = 3;
       for (let i = 0; i < units.length; i += 1) {
         const unit = units[i];
         if (unit.mode === 'off') continue;
@@ -1327,6 +1717,28 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
         return { active: sv?.active ?? null, enemy: side(sv?.enemy), ally: side(sv?.ally), alive: { allies: momentum.allies, enemies: momentum.enemies }, hpMul: { allies: +momentum.hpAlly.toFixed(2), enemies: +momentum.hpEnemy.toFixed(2) } };
       },
       units: () => units,
+      // поза поверх поведения на всех псов (проверка с ПК, не в шлеме): force({ rear: 1 }), force(null)
+      force: (pose) => {
+        forcePose = pose ?? null;
+        return forcePose;
+      },
+      // роли и приёмы живых: { rusher, flanker, stalker, stalking, charging, rearing, prowling, braking, climbing, pouncing }
+      kinds: () => {
+        const r = { rusher: 0, flanker: 0, stalker: 0, stalking: 0, charging: 0, rearing: 0, prowling: 0, braking: 0, climbing: 0, pouncing: 0 };
+        for (const u of units ?? []) {
+          if (u.mode !== 'alive') continue;
+          const d = u.dog;
+          r[d.kind] = (r[d.kind] ?? 0) + 1;
+          if (d.stalk > 0) r.stalking += 1;
+          if (d.charge > 0) r.charging += 1;
+          if (d.rear > 0.05) r.rearing += 1;
+          if (d.prowl > 0.3) r.prowling += 1;
+          if (d.brake > 0.3) r.braking += 1;
+          if (d.climb) r.climbing += 1;
+          if (d.leap?.pounce) r.pouncing += 1;
+        }
+        return r;
+      },
       info: () =>
         run && {
           elapsed: +run.elapsed.toFixed(1),
@@ -1335,7 +1747,7 @@ export function createHorde({ THREE, root, camera, renderer = null, shooting, on
         },
     },
     dispose() {
-      if (run && units) run.dogs = units.filter((u) => u.mode === 'alive').map((u) => ({ dog: { ...u.dog, jump: null, leap: null, paw: null, pawPose: null }, health: u.health }));
+      if (run && units) run.dogs = units.filter((u) => u.mode === 'alive').map((u) => ({ dog: { ...u.dog, jump: null, leap: null, paw: null, pawPose: null, climb: null, rear: 0, rearReach: 0 }, health: u.health }));
       teardown();
       shadowTexture.dispose();
       vignette.removeFromParent();

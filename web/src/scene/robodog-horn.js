@@ -4,6 +4,8 @@
 // голос (усиление → панорама → master, __sceneState.dogHornVoice); на звук — только BufferSource.
 //
 // createHorn(shared) → { play(position, pitch = 1, gain = 1) }
+import { audioBudget, npcOut } from './audio-budget.js';
+
 const BAKE_KEY = 'horn-1';
 const SECONDS = 2.4;
 
@@ -67,7 +69,14 @@ export function createHorn(shared) {
   };
   const voice = (g) => {
     const v = shared.dogHornVoice;
-    if (v && v.master === g.master && v.context === g.context) return v;
+    const bus = npcOut(g); // шина мира (audio-budget.js)
+    if (v && v.master === g.master && v.bus === bus && v.context === g.context) return v;
+    try {
+      v?.input.disconnect();
+      v?.panner.disconnect();
+    } catch {
+      // уже отключён
+    }
     const c = g.context;
     const input = c.createGain();
     const panner = c.createPanner();
@@ -75,8 +84,8 @@ export function createHorn(shared) {
     panner.distanceModel = 'inverse';
     panner.refDistance = 40;
     panner.rolloffFactor = 0.6;
-    input.connect(panner).connect(g.master);
-    return (shared.dogHornVoice = { master: g.master, context: c, input, panner, source: null });
+    input.connect(panner).connect(bus);
+    return (shared.dogHornVoice = { master: g.master, bus, context: c, input, panner, source: null });
   };
   try {
     if (shared.audioGraph?.context) bake(shared.audioGraph.context.sampleRate);
@@ -91,6 +100,7 @@ export function createHorn(shared) {
         if (!c || !position || !Number.isFinite(position.x) || !Number.isFinite(position.z)) return;
         const bank = bake(c.sampleRate);
         if (!bank.buffer) return; // ещё запекается
+        if (!audioBudget(shared).admit('far', position, Math.min(2, gain), SECONDS / pitch, 40, 0.6)) return;
         const v = voice(g);
         const t = c.currentTime;
         try {

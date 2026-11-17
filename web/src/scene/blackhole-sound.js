@@ -11,6 +11,8 @@
 //
 // createBlackholeSound(shared) → { fire(p, k), collapse(p, k), tick(p), rumble(p|null, k),
 //   whine(p|null, level), stats() } — p: мировая точка, k / level: заряд 0..1.
+import { audioBudget } from './audio-budget.js';
+
 const BAKE_VERSION = 1;
 const POOL_VERSION = 1;
 const SHOTS = 4;
@@ -356,7 +358,7 @@ export function createBlackholeSound(shared) {
   }
 
   return {
-    fire: (p, k = 0) => play('fire', p, 1.1 + 0.6 * k, (1.08 - 0.22 * k) * (1 + (Math.random() - 0.5) * 0.06), 2),
+    fire: (p, k = 0) => audioBudget(shared).duck() || play('fire', p, 1.1 + 0.6 * k, (1.08 - 0.22 * k) * (1 + (Math.random() - 0.5) * 0.06), 2),
     // возвращает скорость воспроизведения: удар прозвучит через COLLAPSE_SWELL_S / она
     collapse: (p, k = 0) => {
       const rate = (1.1 - 0.25 * k) * (1 + (Math.random() - 0.5) * 0.05);

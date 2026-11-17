@@ -74,6 +74,11 @@ core+glow, 1 soft glow, 2 ring, 3 sparkle star), SoA typed arrays, cap 32 orbs �
 the bullet is). Mana shots skip tracer, muzzle flash/smoke, casing, AK flash, metal sparks/dust and
 `sound.hit`; any hit → `mana.impact` + `sound.manaHit`. Debug: `__sceneState.shooting.manaStats()`.
 
+Arena weapons (`scene/arena-weapons.js` + `scene/arena-sound.js`, owned by shooting.js, gun field
+`projectile: 'rocket' | 'rail' | 'plasma'`): rockets, rail beams, plasma bolts; rocket smoke trail via
+`effects.smokePuff` (`smoke.puff`), rocket blast via `artillerySystem.explode(x, y, z, S)`. Details:
+recipes.md «Arena projectiles».
+
 Black holes (`scene/blackhole.js`, owned by shooting.js, gun field `projectile: 'blackhole'` + `charge`):
 hole quads with a premultiplied-alpha disc/lensing shader + one additive particle batch, sound in
 `scene/blackhole-sound.js` (JS-baked buffers like drone-sound.js: fire whoomp+warble, collapse =
@@ -106,6 +111,27 @@ Lifecycle: scene/main.js does
 (`busVersion`) and the voice pools (`poolVersion`); they are reused across `SOUND_VERSION`s and
 rebuilt only when `BUS_VERSION` / `POOL_VERSION` change. `shared.soundBank` = decoded samples +
 baked synth, keyed by `GUN_FILES` + `BAKE_VERSION` + sample rate.
+
+**PRIORITY RULE (`scene/audio-budget.js`, `__sceneState.audioBudget`):** the player's own sounds always
+play clearly; world sounds share a budget.
+- **Player** (sound.js: shots, hits, mana, bolt, casings; arena-sound.js: rocket/rail/plasma + their
+  blasts; blackhole-sound.js; robodog-sound.js with `own = true` — clank/zap from the player's bullet in
+  `unit.hit`; my-drone.js — the personal drone's hum, own voice `shared.myDroneVoice` → master) never ask the budget. Their pools are reserved (world sounds never use them: dogs have 4
+  extra `own` voices → master) and never skip: sound.js pools with no free chain share the oldest
+  chain (oldest fades 60 ms, `stats().shared`); the others fade their oldest in 20 ms. Player shots
+  call `audioBudget(shared).duck()` → the world bus dips ~−4 dB for ~0.1 s and returns in ~0.3 s.
+- **World** (robodog-sound.js, drone-sound.js, artillery-sound.js, robodog-horn.js; any new NPC
+  sound) — before playing: `if (!audioBudget(shared).admit(cat, p, gain, seconds, ref, rolloff)) return;`
+  (pick the buffer first: seconds = duration / rate; ref/rolloff = the voice's panner). Audibility =
+  gain × inverse-distance attenuation to the head (head from `sound.update`); < 0.025 → culled;
+  per-category concurrency + token-bucket rate (`CATEGORIES`: step 3 / 6 s⁻¹, gun 4 / 8, hit 4 / 12,
+  zap 3 / 8, boom 3 / 5, voice 2 / 3, far 3 / 4); all world one-shots ≤ 16, over that only if 1.5×
+  more audible than the quietest playing, hard cap 20. World voices connect to `npcOut(g)`
+  (`audioGraph.npcBus` → master), never to master directly; rebuild when `pool.bus !== npcOut(g)`.
+  Loops (drone hum ×4, rocket hiss, black-hole rumble/whine) are fixed voices, not budgeted.
+- Debug: `__sceneState.audioBudget.stats()` (live, peak, culled/rated/capped/over per category);
+  also in `sound.stats().budget`. Measured in the «Сцена 3» battle on Quest: buffer sources
+  77/s → 21/s, concurrent world one-shots ≤ 20 (dogs 12 + drones 8 + 22 player before).
 
 **RULE for any new sound (weapon, enemy, effect, in any file):** never build nodes per play (no
 new oscillators/filters/WaveShapers/PannerNodes per event) — bake synth sounds once into

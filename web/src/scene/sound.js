@@ -17,7 +17,9 @@
 // 26: AWP — один голос (слои смешаны заранее); пулы больше и раздельные (выстрелы / попадания /
 // затвор / гильзы), отнимается только голос в тихом хвосте и никогда не самый новый. Псы
 // (robodog-sound.js) — свой пул на том же графе. 24: bolt(…, 'cycle'); 23: AWP и затвор
-export const SOUND_VERSION = 31; // 31: мана громче; 30: мана без запасного выстрела, lastShot в stats; 29: мана (shot kind 'mana', manaHit); 28: мягче лимитер; 27: пулы без лишнего (dog)
+import { audioBudget } from './audio-budget.js';
+
+export const SOUND_VERSION = 33; // 33: stats().budget; 32: свой звук не пропускается (нет свободного — делит голос со старейшим), голова → audioBudget, свой выстрел приглушает шину мира; 31: мана громче; 30: мана без запасного выстрела, lastShot в stats; 29: мана (shot kind 'mana', manaHit); 28: мягче лимитер; 27: пулы без лишнего (dog)
 // какие записи звучат в игре (sound-board.js помечает их «в игре»)
 export const GUN_FILES = { pistol: ['pistolB1', 'pistolB2'], ak: ['ak1', 'ak2', 'ak3'] };
 
@@ -648,7 +650,14 @@ export function createSound() {
     if (oldest && oldest !== newest && (active >= pool.max || !free) && (t - oldest.shot.startedAt >= pool.minAge || !free)) {
       steal(oldest, t);
     }
-    return free;
+    if (free) return free;
+    // Свободных цепочек нет: все пулы sound.js — звуки игрока, их не пропускаем. Новый звук делит
+    // цепочку со старейшим (тот гаснет своей огибающей за 60 мс; паннер прыгнет только у его хвоста).
+    let first = null;
+    for (const v of pool.voices) if (v.shot && (!first || v.shot.startedAt < first.shot.startedAt)) first = v;
+    if (first && !first.shot.fading) steal(first, t);
+    if (first) counters.shared = (counters.shared ?? 0) + 1;
+    return first;
   };
 
   const setPos = (panner, x, y, z) => {
@@ -814,7 +823,7 @@ export function createSound() {
     }
   };
 
-  return {
+  const api = {
     version: SOUND_VERSION,
     previewFile,
     // Отладка: sound.stats() → голоса по пулам, счётчики, состояние контекста
@@ -843,6 +852,7 @@ export function createSound() {
         liveNodes,
         bank: bank && { pistol: bank.pistol.length, ak: bank.ak.length, awp: bank.awp?.length ?? 0, fx: Object.fromEntries(Object.entries(bank.fx).map(([k, l]) => [k, l.length])) },
         ...counters,
+        budget: shared.audioBudget?.stats?.(), // звуки мира (audio-budget.js)
       };
     },
     // Слушатель = голова: вызывать каждый кадр. Позиция и ориентация — AudioParam, сглаживание 20 мс.
@@ -861,6 +871,7 @@ export function createSound() {
         head.x = lp[0]; head.y = lp[1]; head.z = lp[2];
         head.rx = e[0]; head.ry = e[1]; head.rz = e[2];
         head.ok = true;
+        audioBudget(shared).setHead(lp[0], lp[1], lp[2]); // для слышимости звуков мира (audio-budget.js)
         const l = g.context.listener;
         const t = g.context.currentTime;
         if (l.positionX) {
@@ -894,7 +905,12 @@ export function createSound() {
     },
     // Выстрел: случайная запись (±3 % высоты, ±12 % громкости); пока записи не загрузились —
     // запечённый синтез. { kind: 'ak' } — автомат; без параметров — оружие из setWeapon.
-    shot({ kind = weapon, position } = {}) {
+    shot(opts) {
+      const ok = api.shotRaw(opts);
+      if (ok) safe(() => audioBudget(shared).duck()); // свой выстрел: шина мира коротко тише (audio-budget.js)
+      return ok;
+    },
+    shotRaw({ kind = weapon, position } = {}) {
       return safe(() => {
         ensure();
         // Ускоренное время (×4…×64) даёт выстрел каждый кадр: пул выстрелов забивался молодыми звуками
@@ -951,4 +967,5 @@ export function createSound() {
       return safe(() => play('impact', pick(shared.soundBank?.fx.manaHit), { position, gain: 0.55, rate: 0.95 + Math.random() * 0.1, wet: 0.3 }));
     },
   };
+  return api;
 }

@@ -28,6 +28,9 @@
 //            reticle = 'duplex' | 'pso', tanApparent = 0.26 } — ПИКСЕЛИ card.png (реальный размер):
 //            середины торцов окуляра (к прикладу) и объектива, радиус стекла;
 //            offset: [x, y, z] — сдвиг стёкол, м, по осям пушки (x вправо, y вверх, z к прикладу)
+//   addScope — { at: [x, y], length = 0.28, zoom = 5, height, style = 'emerald' | 'black' }: на картинке
+//            прицела нет — модель прицела с настоящими стёклами (scope-addon.js); at — пиксели card.png
+//            верха коробки под серединой крепления, height — ось над ним, м
 //   trigger — { box: [x0, y0, x1, y1], maxAngle = 0.35 } — пиксели card.png: рамка вокруг лезвия
 //            спуска внутри скобы (верх рамки — ось поворота)
 //   thicknessM — толщина «картинки», м (по умолчанию 0.035)
@@ -47,11 +50,15 @@
 //            псов подкидывает, коптеры сбивает с курса, в конце схлопывается со взрывом; свой звук
 //   charge — { minS = 0.3, maxS = 3 }: курок не стреляет, а заряжает (реальное время); отпустил —
 //            выстрел силы 0..1 ((держал − minS) / (maxS − minS)); у дула растёт заряд, в руке дрожь
+//   projectile: 'rocket' | 'rail' | 'plasma' — оружие арены (arena-weapons.js, звук — arena-sound.js):
+//            ракета (speed, gravity — дуга, взрыв с уроном ~4 м), рейлган (мгновенный сквозной луч
+//            300 м, урон по shotKind), плазма (голубые шары, всплеск ~1 м); без гильз и вспышки калаша
+//   shake  — { m, cap, tau }: своя тряска вида от выстрела (формат SHAKE в shake.js)
 export const GEN_PREFIX = 'gen:';
 
 // Стрельба по умолчанию (как в main.js GUNS): auto — как калаш, иначе — как пистолет.
-export const GUN_AUTO = { gapMs: 90, auto: true, kickMs: 60, kickRad: 0.02, kickBackM: 0.005, climbRad: 0.006, buzz: 0.7, speed: 900, flash: true, sound: 'ak', shotKind: 'ak', rifleCasing: true, autoAim: 0, projectile: null, projectileColor: null, gravity: null, homing: null, charge: null };
-export const GUN_SEMI = { gapMs: 0, auto: false, kickMs: 140, kickRad: 0.2, kickBackM: 0, climbRad: 0, buzz: 0.8, speed: 360, flash: false, sound: 'pistol', shotKind: 'pistol', rifleCasing: false, autoAim: 0, projectile: null, projectileColor: null, gravity: null, homing: null, charge: null };
+export const GUN_AUTO = { gapMs: 90, auto: true, kickMs: 60, kickRad: 0.02, kickBackM: 0.005, climbRad: 0.006, buzz: 0.7, speed: 900, flash: true, sound: 'ak', shotKind: 'ak', rifleCasing: true, autoAim: 0, projectile: null, projectileColor: null, gravity: null, homing: null, charge: null, shake: null };
+export const GUN_SEMI = { gapMs: 0, auto: false, kickMs: 140, kickRad: 0.2, kickBackM: 0, climbRad: 0, buzz: 0.8, speed: 360, flash: false, sound: 'pistol', shotKind: 'pistol', rifleCasing: false, autoAim: 0, projectile: null, projectileColor: null, gravity: null, homing: null, charge: null, shake: null };
 
 export const GENERATED_GUNS = [
   {
@@ -61,7 +68,23 @@ export const GENERATED_GUNS = [
   },
   // штурмовая винтовка в духе аркадных шутеров 2000-х (по просьбе: «М-ка в стиле Serious Sam»); пока картинка, без 3D
   // снайперка «киберпанк + космос/галактика» (по просьбе из шлема)
-  { id: 'cosmo_sniper', name: 'Космо-снайперка', length: 1.25, auto: false, shape: 'sniper', card: true, glb: true, v: 4, spawnOnAdd: true, grip: [0.272, 0.585], big: 1.9, gapMs: 1800, projectile: 'blackhole', charge: { minS: 0.3, maxS: 3 }, kickRad: 0.12, buzz: 1 }, // стреляет чёрными дырами (blackhole.js): держать курок — заряд, отпустить — выстрел; grip задан вручную: сама рукоять нашлась у приклада
+  // арена-шутер, оригинальный дизайн в духе жанра: ракетница, рейлган, плазмаган (снаряды — отдельной задачей)
+  { id: 'rocket_launcher', name: 'Ракетница', length: 1.05, auto: false, shape: 'shotgun', card: true, glb: true, v: 2, gapMs: 800,
+    projectile: 'rocket', speed: 48, gravity: 7, shotKind: 'ak', kickMs: 220, kickRad: 0.1, kickBackM: 0.03, buzz: 1, shake: { m: 0.012, cap: 0.012, tau: 35 } }, // ракеты (arena-weapons.js): 48 м/с, летят дугой (gravity 7 м/с², нос по полёту), взрыв, урон по области ~4 м
+  { id: 'railgun', name: 'Рейлган', length: 1.15, auto: false, shape: 'sniper', card: true, glb: true, v: 2, gapMs: 1500,
+    projectile: 'rail', shotKind: 'awp', kickMs: 200, kickRad: 0.11, kickBackM: 0.03, buzz: 1, shake: { m: 0.016, cap: 0.016, tau: 35 }, // сквозной мгновенный луч (shooting.js railShot + arena-weapons.js)
+    // на картинке прицела нет — модель прицела (scope-addon.js) на крышке коробки над катушками (замер по
+    // альфе card.png: верх x 1215–1366 — y 508; по модели: конденсатор сзади на +3,2 см выше крышки —
+    // прицел сдвинут вперёд, чтобы окуляр в него не уходил; глаз смотрит над конденсатором; по просьбе
+    // ножки выше и крепче — ось 58 мм над крышкой)
+    addScope: { at: [1408, 508], length: 0.28, zoom: 5, height: 0.058, style: 'emerald' } },
+  { id: 'plasma_gun', name: 'Плазмаган', length: 1.0, auto: true, shape: 'smg', card: true, glb: true, v: 4, gapMs: 90,
+    projectile: 'plasma', speed: 50, shotKind: 'pistol', kickRad: 0.012, kickBackM: 0.003, climbRad: 0.003, buzz: 0.5, shake: { m: 0.002, cap: 0.003, tau: 15 } }, // плазма (arena-weapons.js): ~11 выстр./с, малый всплеск ~1 м
+  { id: 'cosmo_sniper', name: 'Космо-снайперка', length: 1.125, auto: false, shape: 'sniper', card: true, glb: true, v: 4, spawnOnAdd: true, grip: [0.272, 0.585], big: 1.9,
+    // настоящий прицел на нарисованной трубе (пиксели card.png 2752×1536, замерено по альфе: окуляр x 723,
+    // y 465–580; объектив x 1702, y 440–606) и спуск; на модели стёкла ставит fitScope по торцам трубы
+    scope: { eyepiece: [724, 522], objective: [1701, 523], radiusPx: 57, objectiveRadiusPx: 83, zoom: 6 }, // замер 48 / 70, по просьбе ×1,1 ×1,08
+    trigger: { box: [900, 826, 934, 890] }, gapMs: 1800, projectile: 'blackhole', charge: { minS: 0.3, maxS: 3 }, kickRad: 0.12, buzz: 1 }, // стреляет чёрными дырами (blackhole.js): держать курок — заряд, отпустить — выстрел; grip задан вручную: сама рукоять нашлась у приклада
   { id: 'sam_rifle', name: 'Сэм-винтовка', length: 0.775, auto: true, modes: ['semi', 'auto'], shape: 'rifle', card: true, glb: true, v: 4, autoAim: 15, projectile: 'mana', sound: 'mana', speed: 100, homing: { delayS: 0.04, turnDegS: 240 } }, // мана: сгусток виден в полёте (100 м/с) и доворачивает к цели дугой; v2 — «в стиле природы», v3 — + синяя мана, v4 — 3D (Tripo medium)
 ];
 

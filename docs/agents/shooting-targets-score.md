@@ -35,6 +35,7 @@ shooting.aim(muzzle|null, dir, range = 60, speed = 360) -> Vector3|null   // per
 shooting.autoAim(muzzle, dir, deg, speed, gravity?, projectile?) -> Vector3|null   // auto-aim shot direction (shared vector) into the best target of the deg° cone, ballistic + lead; null = nobody (recipes.md «Сгенерированная пушка», autoAim)
 // shoot() also takes { projectile: 'mana', color, gravity } — mana bolt (mana.js) instead of a bullet,
 //   and { homing: { delayS, turnDegS, gravity }, autoAimDeg } — homing projectile (recipes.md «Homing»)
+//   projectile 'rocket' | 'plasma' (pool bullet + arena-weapons.js FX/splash) | 'rail' (instant piercing railShot) — recipes.md «Arena projectiles»
 // aimTargets(visit): visit(centre, vx, vy, vz, key) — key = stable target object (homing re-finds it each step)
 shooting.autoAimLock() -> { x, y, z, plate, deg, dist, ring } | null       // debug: last lock
 shooting.bullets() -> [{ age, speed, kind, x, y, z }]; shooting.aimedIndex()   // debug for vr:eval
@@ -102,7 +103,8 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   sounds `robodog-sound.js` (own module on `__sceneState.audioGraph`: recipes baked once with
   OfflineAudioContext into `__sceneState.dogSoundBank`, 8 permanent HRTF voices in
   `__sceneState.dogVoices`, oldest stolen; zap, crackle, powerDown, clank, clankHeavy, thud, servo,
-  groundThud, scrape). Metal look: one material per dog with an atlas (`makeDogTextures`: paint
+  groundThud, scrape, whoosh, bark, growl, howl, mg, turretWind; growl/howl are budget category `voice`;
+  a recipe added without a `BAKE_VERSION` bump is baked incrementally on the next swap). Metal look: one material per dog with an atlas (`makeDogTextures`: paint
   panels/bolts/wear, bare steel, rubber; roughness+metalness maps) + `weapon-env.js` env map.
   Controllers: `robodog.js` (feature `robodog`, wanderer, brain `robodog-ai.js`, 5 HP) and
   `robodog-horde.js` (feature `robodogHorde`, «Сцена 3», two-team battle). Horde dogs are joint
@@ -114,7 +116,43 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   until the player's first shot, then enraged (red eyes). Allies (`dog.team = 'ally'`, green paint
   6 + green eyes, menu «Собаки ▸ Союзники», `shared.allies`, localStorage `scene.allies`) spawn
   behind and fight enemies; targets = nearest hostile with stickiness (`pickTarget`, `tp`).
-  Large+ dogs strike with a front paw (`pawStep`, gait `cmd.paw`), small/medium leap. Every 5th
+  Teams are EQUAL (user request): each side ≤ `TEAM_POOL` = POOL/2 = 40 rigs (alive + corpses),
+  same size odds. Top-ups track the other side (`matchStep`, «больше наших — больше и врагов»):
+  goal = other side alive × `MATCH` 0.95–1.1, at least a floor growing 6 → 30 (+0.1/s,
+  `MATCH_FLOOR`/`MATCH_RAMP`), at most 40; behind by > 20 % (`MATCH_TOL`) → packs of 6 every
+  2–3.5 s (`MATCH_FAST`), else `TRICKLE_PACK` 2–4 every `TRICKLE_GAP` 9–13 s. Waves
+  (`surgeStep`): enemy wave on a timer (`FIRST_SURGE` 15 s, then `SURGE_EVERY` 25–40 s); ally
+  counter-wave when the enemy wave's dogs come within `COUNTER_NEAR` 25 m, after `COUNTER_DELAY`
+  12–18 s, or at once if the enemy wave was beaten first; after an ally wave ends the next enemy
+  wave comes in `AFTER_ALLY_WAVE` 5–10 s → waves alternate E → A → E. Any wave = `WAVE_REL`
+  0.9–1.2 × the other side alive (min 10), released in packs of 6 every 1.6 s (a counter-wave
+  doesn't cut the other wave's unreleased rest; counter not before the enemy wave is 6 s old);
+  while a side's wave runs the other side's top-ups pause; a wave ends at ≤ 25 % left or `WAVE_MAX_S` 30 s; no
+  enemies for 8 s → enemy wave. Momentum: damage to a side × 1/hpMul, hpMul = clamp(((A+1)/(E+1))^0.7,
+  0.4…1.6). Each wave start sets `shared.dogWave = { team, n }` (drones launch with it).
+  Large+ dogs strike with a front paw (`pawStep`, gait `cmd.paw`), small/medium leap.
+  Variety / intimidation (2026-11-17): each dog has a role `dog.kind` (`initTraits`, `KINDS`): `rusher`
+  (≤ `CHARGE_NEAR` 24 m → charge ×1.3 for 1.6–2.6 s with howl/bark), `flanker` (spirals to the edge of the
+  front sector ±`FLANK_ANGLE` 49°, sides alternate per spawn; vs dogs: heading offset), `stalker` (≤ `STALK_R`
+  13 m×√s: prowls sideways on a shrinking circle, body turned to the target, growls, then howl + charge).
+  Small/medium rusher/stalker pounce from `POUNCE` 4.2–7 m×s (crouch 0.42 s, eyes white-hot, growl, long
+  leap = same `dog.leap` contact code, `leap.pounce`). Dodges are often a side hop (`dodgeTick` runs during
+  the hop), corpses ahead are hopped over (checked inside the separation loop), hard deceleration in `run`
+  = skid (`dog.brake`, dust ≤ 3 puffs/frame `skidLeft`, scrape). Paw dogs pick `p.kind`: `rear` (first
+  attack, then 30 %: rears up with howl, both paws slam — `rearStep`, hit test at the front-feet midpoint,
+  a miss shakes the player lightly if near/on the tower in front), `combo` (left-right, 2nd swing ×0.45
+  windup), `swipe`. Calm big dogs alerted by a shot rear up for `ALERT_REAR_S` 1.5 s. Tower: small/medium
+  circling at its base jump at the legs (`CLIMB_H` 1.2–2.2 m×s every 2.5–6 s, `climbStep` bounces at
+  `TOWER_LEG_R` 2.3 m or the apex). Eyes: `unit.glow(k)` per frame (0.72 far, ~1 + pulse near the target,
+  1.3–1.5 = white-hot during crouch/windup/rear/alert). Gait inputs (all 0..1 except `look`, rad): `cmd.prowl`
+  (low, wide, slow high steps), `cmd.rear` (pitch up to 0.85 rad around the hind hips, front legs paw the air
+  in body space), `cmd.rearReach` (paws forward-down), `cmd.brake`, `cmd.look` (body twist ≤ 0.3); full
+  gallop (`sprint`, v 3–5.2 model m/s): duty 0.3, bigger bob/pitch. Horde writes `dog.prowl/rear/rearReach/
+  brake/look`, unit.animate passes them. Debug (desktop page only — guard with
+  `/Quest|OculusBrowser/.test(navigator.userAgent)`, `session` alone is not enough when the user is out of
+  VR): `horde.debug.kinds()` (roles + how many stalking/charging/rearing/prowling/braking/climbing/pouncing),
+  `horde.debug.force({ rear, rearReach, prowl, brake, look } | null)` (pose on all dogs), `dog.frozen = true`
+  (stands still, takes the forced pose). Every 5th
   dog has a back turret (tracers = `fx.bolt`). Legs break (`legHit`, gait `cmd.broken`), 2nd
   broken leg kills. Budgets: ≤ `RAGDOLL_MAX` simulating corpses (others `settle()` flat), update
   LOD by distance (`LOD_NEAR`/`LOD_FAR`: pose every 2/4 frames), corpses sink sooner when busy.
@@ -129,7 +167,7 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   (`shared.drones`, localStorage `scene.drones`, default on; main.js `onMenu` checks the label before the
   allies toggle). `SIZES` small 0.4 m / medium 0.9 / large 2 / huge 5 (hp 1–2/3–4/8–9/20, altitude
   3–9…22–40 m, orbit radius, range, burst 3–5, spread, dmg to dogs/drones). Pool `MAX` 44 plain objects
-  in `shared.droneRun` (survives swaps, grows on MAX change; enemy ≤ 26 with large/huge weighted ×2, ally ≤ 14 with half the large/huge caps — enemies dominate the air too), enemy waves 4–6 every 0.8×gap, ally waves 2–4 every 1.2×gap, gap 10→6 s, first waves at 3/5 s (enemies
+  in `shared.droneRun` (survives swaps, grows on MAX change; teams equal: each ≤ `TEAM_MAX` 20 alive, same size weights and large/huge caps 4/2), both sides waves `WAVE_N` 3–5 (+ the gap to the other side, ≤ `CATCH_UP` 4) every gap×0.85–1.15 (×0.5 when > 20 % behind), gap 10→6 s, first waves at 3/5 s; a dog wave (`shared.dogWave`) launches `SURGE_N` 6–8 drones of that side at once and resets its timer (enemies
   in front 95–130 m, allies behind). Flight: PD steering to an orbit point around the target (enemy
   vs player — only in the ±60° front sector), tilt from acceleration, wobble; steering LOD > 70/120 m.
   Target = nearest hostile (player ×0.8, dogs via `horde.debug.units()` read-only, drones), sticky.
@@ -141,9 +179,27 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   splash on dogs) → wreck → sinks. Draw calls: light body, heavy body, gun, rotor discs, lights, fire,
   smoke (+1 fx); per-instance `aPaintA/aPaintB/aFx` (program `drone-inst-1`). Exposed for the horde:
   `shared.droneTargets` (drone objects `{ isDrone, state, team, x, y, z, span }`) and
-  `shared.droneStrike(drone, point, dir, dmg)` — dogs don't target drones yet. Telemetry `[drones]`
-  every 10 s. Debug: `__sceneState.droneSystem.debug.{info, list, spawn(team, n), kill(id), sound,
+  `shared.droneStrike(drone, point, dir, dmg)` — dogs don't target drones yet.
+  Squad escorts (2026-11-17, «псы и коптеры заодно»): every `spawnPack` in robodog-horde.js gets a squad
+  id (`shared.squadSeq`, never reset; `dog.squad`, survives swaps) and pushes `{ id, team, n, x, z }` to
+  `shared.squadQueue` (≤ 8); drones.js drains it each frame (`addEscorts`): 1 / 2 / 3 escorts for packs
+  ≤ 3 / ≤ 6 / more, small/medium only, `d.squad = id`; new ones appear 18–26 m behind the pack (away from
+  the player) 10–16 m up, or — if the side is at `TEAM_MAX` — the nearest free small/medium drone is
+  recruited. Caps: escorts per side ≤ `ESCORT_MAX` 12; free waves ≤ `TEAM_MAX − max(escorts, ESCORT_KEEP 6)`.
+  Escort flight (`escortGoal` in `steer`): every `ESCORT_EVERY` 0.3 s `escortScan` = centroid of the
+  pack's alive dogs (+ smoothed centroid velocity, used as lead and feed-forward) and `escortTarget` =
+  nearest enemy within `ESCORT_SEEK` 23 m of the CENTROID (enemy dogs, enemy drones the gimbal can reach
+  — not > 0.36·horizontal above, the player for enemy escorts ×0.6 if the pack's dogs target him; sticky);
+  orbit `ESCORT_R` 4–8 + √n m around the centroid at `ESCORT_ALT` 3–8 m above ground, equal angles,
+  `ESCORT_SPIN` 0.35 rad/s, leaning ≤ 6 m toward the target. Fire = the normal `fly` code (front-only rule
+  for the player intact). Pack gone (0 alive dogs, drone age > 4 s) → `freeEscort` (own size's alt/R).
+  Marks: `shared.squadMarks[id]` = the escort's target; horde `pickTarget` takes it for that pack's dogs
+  if it is an enemy dog ≤ 1.5 × nearest + 4 m (deleted on escort death / pack end, cleared on swap).
+  Debug: `debug.info().escorts`, `debug.list()` rows with `squad, packN, fromPack, aboveGround`.
+  Telemetry `[drones]` every 10 s (`enemy=N(esc k)`). Debug: `__sceneState.droneSystem.debug.{info, list, spawn(team, n), kill(id), sound,
   showcase(on, team)}` (showcase freezes the sim — desktop page only).
+  The player's own drone (`my-drone.js`, see [items-and-grabbing.md](items-and-grabbing.md#personal-drone--remote-my-dronejs))
+  is a separate object, deliberately NOT in `droneTargets`/`addShootable`: nothing targets or damages it.
 - Artillery: `artillery.js` (system + all explosion FX) + `artillery-sound.js`. Same battle (feature
   `robodogHorde`), menu «Собаки ▸ Артиллерия: вкл/выкл» (`shared.artillery`, localStorage
   `scene.artillery`, default on). Off-map batteries (not drawn): enemy 1400 m ahead (−Z), allies 1400 m

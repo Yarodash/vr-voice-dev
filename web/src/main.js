@@ -531,6 +531,7 @@ const pointer = createPointer({ scene, panels: messagePanels, aim: pointerAim })
 // "Send" may be pressed while the last words are still being recognised. The text is sent only
 // once the trigger is up, the bridge has finished the dictation and the text has stopped changing.
 const SETTLE_MS = 500;
+const AUTO_SEND_MS = 10000; // an unsent draft that has not changed this long goes out by itself
 function sendWhenReady(time) {
   if (!sendRequested || triggerPressed || releaseTimer !== null || voiceState !== 'idle' || transcribing) return;
   if (time - draftChangedAt < SETTLE_MS) return;
@@ -583,6 +584,12 @@ renderer.setAnimationLoop((time) => {
     }
   }
   sendWhenReady(time);
+  // Forgotten draft: a recognised phrase that has not changed for AUTO_SEND_MS is sent by itself
+  // (the user sometimes does not notice it was not sent).
+  if (draftText && !sendRequested && !triggerPressed && releaseTimer === null && voiceState === 'idle' && !transcribing
+      && time - draftChangedAt >= AUTO_SEND_MS) {
+    sendRequested = true;
+  }
   paintDot(time);
   // at most one window repainted per frame: each repaint uploads a 1600×640 texture (~10 ms on
   // Quest), and repainting all of them in one frame used to stall it for ~100 ms

@@ -438,6 +438,67 @@ export function createArtillery({ THREE, root, camera, horde = null }) {
     }
     addScorch(x, gy + 0.05, z, N, rand(6, 8));
   };
+  // РАЗРЫВ поменьше (ракета, arena-weapons.js): тот же вид в масштабе S (0,3 — шар ~3 м, дым ~6 м),
+  // частиц меньше; y — точка взрыва: выше 1,2 м над землёй — в воздухе (без воронки, пятна, земли)
+  const smallBlast = (x, y, z, S) => {
+    const gy = groundHeight(x, z);
+    const ground = y - gy < 1.2;
+    const cy = ground ? gy : y;
+    const lift = ground ? 1 : 0; // у земли огонь чуть выше точки, в воздухе — вокруг неё
+    let L = heat > 6 ? 0.6 : 1;
+    if (P.n > CAP - 160) L *= 0.4; // heat не копим: вне битвы update() не гасит его
+    const rs = Math.sqrt(S);
+    groundNormal(x, z, N);
+    add(T_FLASH, 7, 0, x, cy + 1.6 * S * lift, z, 0, 0, 0, 0.13, 10 * S, 17 * S, 1, 1, 0, 0, 0, 0, gy);
+    add(T_GLOW, 2, 0, x, cy + 2 * S * lift, z, 0, 0.5 * S, 0, 0.45, 14 * S, 26 * S, 0.9, 1, 0, 0, 0, 0, gy);
+    add(T_RINGFX, 4, 0, x, cy + 1.2 * S * lift, z, 0, 0, 0, 0.22, 3 * S, 24 * S, 0.5, 1, 0, 0, 0, 0, gy);
+    add(T_FIRE, 0, 0, x, cy + 2.2 * S * lift, z, 0, 3 * S, 0, 1.1, 5 * S, 12 * S, 1, 1, 1.5, -0.15 * S, rand(-0.6, 0.6), 0, gy);
+    const nf = Math.round(9 * L) + 2;
+    for (let k = 0; k < nf; k += 1) {
+      const a = Math.random() * Math.PI * 2;
+      V.set(Math.cos(a), ground ? rand(0.3, 1.3) : rand(-1, 1), Math.sin(a)).normalize().multiplyScalar(rand(7, 17) * S);
+      add(T_FIRE, k & 1, 0, x + V.x * 0.08, cy + rand(0.8, 2.2) * S * lift, z + V.z * 0.08, V.x, V.y, V.z, rand(1, 1.7), rand(2.5, 4) * S, rand(7, 11) * S, 1, rand(0.7, 1), 2.4, -0.2 * S, rand(-1, 1), 0, gy);
+    }
+    const ns = Math.round(6 * L) + 2;
+    for (let k = 0; k < ns; k += 1) {
+      const h = k / Math.max(1, ns - 1);
+      add(T_SMOKE, k & 1, 0, x + rand(-1, 1) * S, cy + rand(1, 2.5) * S, z + rand(-1, 1) * S, rand(-1.5, 1.5) * S, (0.6 + 9.5 * h + rand(-0.4, 0.4)) * S, rand(-1.5, 1.5) * S, rand(5, 7.5), rand(3, 5) * S, (rand(7, 11) + 7 * h) * S, rand(0.8, 0.95), rand(0.05, 0.1), 0.5, -0.015 * S, rand(-0.25, 0.25), 0, gy);
+    }
+    const nk = Math.round(16 * L);
+    for (let k = 0; k < nk; k += 1) {
+      V.set(rand(-1, 1), ground ? rand(0.2, 1.5) : rand(-1, 1.5), rand(-1, 1)).normalize().multiplyScalar(rand(10, 30) * rs);
+      add(T_SPARK, 3, 2, x, cy + S * lift, z, V.x, V.y, V.z, rand(0.5, 1.3), 0.3 * S, 0.3 * S, 1, 1, 0.5, 1, 0, rand(0.04, 0.08), gy);
+    }
+    const ne = Math.round(5 * L);
+    for (let k = 0; k < ne; k += 1) {
+      V.set(rand(-1, 1), rand(0.5, 1.5), rand(-1, 1)).normalize().multiplyScalar(rand(2, 7) * S);
+      const s = rand(0.2, 0.38) * rs;
+      add(T_EMBER, 2, 0, x, cy + 1.5 * S, z, V.x, V.y, V.z, rand(1.5, 3), s, s, 1, 1, 1.3, -0.06 * S, 0, 0, gy);
+    }
+    if (!ground) return;
+    add(T_POOL, 2, 1, x, gy + 0.12, z, N.x, N.y, N.z, 0.55, 30 * S, 34 * S, 0.9, 1, 0, 0, 0, 0, gy);
+    add(T_RING, 4, 1, x, gy + 0.1, z, N.x, N.y, N.z, 0.5, 2 * S, 38 * S, 0.6, 1, 0, 0, 0, 0, gy);
+    const nd = Math.round(4 * L);
+    for (let k = 0; k < nd; k += 1) {
+      V.set(rand(-0.35, 0.35), 1, rand(-0.35, 0.35)).normalize().multiplyScalar(rand(12, 24) * rs);
+      add(T_DIRT, k & 1, 0, x, gy + 0.8 * S, z, V.x, V.y, V.z, rand(1.4, 2.4), 1.2 * S, rand(3.5, 5.5) * S, 0.9, rand(0.8, 1.2), 0.9, 0.55, rand(-1, 1), 0, gy);
+    }
+    const nb = Math.round(8 * L);
+    for (let k = 0; k < nb; k += 1) {
+      V.set(rand(-0.9, 0.9), rand(0.6, 1.4), rand(-0.9, 0.9)).normalize().multiplyScalar(rand(8, 22) * rs);
+      const s = rand(0.22, 0.75) * rs * 0.7;
+      add(T_DEBRIS, 6, 0, x, gy + 0.8 * S, z, V.x, V.y, V.z, 5, s, s, 1, rand(0.7, 1.3), 0.08, 1, rand(-12, 12), 0, gy);
+    }
+    const nu = Math.round(7 * L);
+    for (let k = 0; k < nu; k += 1) {
+      const a = (k / Math.max(1, nu)) * Math.PI * 2 + rand(-0.3, 0.3);
+      const r0 = rand(1, 3) * S;
+      const v = rand(10, 17) * S;
+      add(T_DUST, k & 1, 0, x + Math.cos(a) * r0, gy + rand(0.6, 1.4) * S, z + Math.sin(a) * r0, Math.cos(a) * v, rand(0.3, 1.3) * S, Math.sin(a) * v, rand(2, 3), rand(2.2, 3.2) * S, rand(7, 11) * S, 0.8, rand(0.85, 1.15), 1.5, -0.02 * S, rand(-0.4, 0.4), 0, gy);
+    }
+    add(T_CRATER, 2, 1, x, gy + 0.1, z, N.x, N.y, N.z, rand(3, 4.5), 4.5 * S, 5 * S, 0.85, 1, 0, 0, 0, 0, gy);
+    addScorch(x, gy + 0.05, z, N, rand(6, 8) * S);
+  };
   // вспышка выстрела на горизонте (в стороне батареи)
   const launchFx = (bx, bz) => {
     V.set(bx - head.x, 0, bz - head.z).normalize();
@@ -968,6 +1029,13 @@ export function createArtillery({ THREE, root, camera, horde = null }) {
         cpuSum = cpuWorst = frames = maxN = 0;
         since = t1;
       }
+    },
+    // небольшой разрыв без урона и звука (ракета, arena-weapons.js): S — масштаб (0,3 ≈ ракета);
+    // частицы рисует frame() (работает в любой сцене). true — сделан
+    explode(x, y, z, S = 0.3) {
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
+      smallBlast(x, y, z, S);
+      return true;
     },
     debug: {
       info: () => ({

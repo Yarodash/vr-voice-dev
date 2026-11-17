@@ -127,10 +127,22 @@ export function createGait() {
       const sniff = cmd.sniff ?? 0;
       const crouch = cmd.crouch ?? 0;
       const air = cmd.air ?? null;
-      const duty = lerp(0.62, 0.4, smoothstep(0.3, 3.0, v));
+      // Характер движения (стая, robodog-horde.js): prowl 0..1 — крадётся (низко, широко, медленный
+      // высокий шаг); rear 0..1 — встал на дыбы (передние лапы молотят воздух), rearReach 0..1 — удар
+      // обеими лапами вперёд-вниз из стойки; brake 0..1 — тормозит юзом (корпус назад, передние
+      // упираются); look — рад, корпус довёрнут к цели (кружит боком, а смотрит на игрока)
+      const prowl = cmd.prowl ?? 0;
+      const rear = cmd.rear ?? 0;
+      const reach = cmd.rearReach ?? 0;
+      const brake = cmd.brake ?? 0;
+      const look = cmd.look ?? 0;
+      // во весь опор: галоп с фазой полёта — опора короче, корпус сильнее качается и «гнётся»
+      const sprint = smoothstep(3.0, 5.2, v);
+      let duty = lerp(0.62, 0.4, smoothstep(0.3, 3.0, v));
+      duty = lerp(lerp(duty, 0.3, sprint), 0.72, prowl);
       // шагов в секунду (полных циклов); на большой скорости — не реже, чем нужно, чтобы шаг
       // (v·duty/f) не упёрся в предел 0,55 м: иначе стопы скользят по земле
-      const f = Math.max(Math.min(4.4, 1.7 + 0.75 * v), (v * duty) / 0.53);
+      const f = Math.max(Math.min(4.4, 1.7 + 0.75 * v) * (1 - 0.35 * prowl), (v * duty) / 0.53);
       phase = frac(phase + f * dt);
       const run = smoothstep(1.6, 3.0, v);
       const activity = clamp(Math.max(v, Math.abs(w) * 0.35, Math.abs(vs)) / 0.12, 0, 1);
@@ -145,7 +157,7 @@ export function createGait() {
       const idle = 1 - activity;
       const breathe = Math.sin(time * Math.PI * 2 * 0.25);
       const trotBob = 0.012 * activity * (1 - run) * Math.cos(phase * Math.PI * 4);
-      const gallopBob = 0.022 * run * Math.sin(phase * Math.PI * 2);
+      const gallopBob = (0.022 + 0.04 * sprint) * run * Math.sin(phase * Math.PI * 2);
       const gF = ground(0, HIPS[0][2]);
       const gR = ground(0, HIPS[2][2]);
       const gL = ground(HIPS[0][0], 0);
@@ -153,15 +165,20 @@ export function createGait() {
       const slopePitch = Math.atan2(gF - gR, HIPS[2][2] - HIPS[0][2]);
       const slopeRoll = Math.atan2(gL - gRi, HIPS[1][0] - HIPS[0][0]) * 0.6;
       const groundMid = (gF + gR) / 2;
-      let y = BODY_Y + groundMid - 0.025 * run - trotBob - gallopBob + 0.004 * breathe * idle - 0.045 * sniff - 0.13 * crouch;
-      let pitch = slopePitch + 0.07 * run * Math.sin(phase * Math.PI * 2 - 0.6) - 0.24 * sniff + jolt.p + 0.02 * Math.sin(time * 5.3) * sniff;
+      // на дыбы: поворот вокруг задних тазовых узлов — центр поднимается на 0,28·sin θ (задние ноги
+      // чуть присели)
+      const rearA = 0.85 * rear;
+      let y = BODY_Y + groundMid - 0.025 * run - 0.02 * sprint - trotBob - gallopBob + 0.004 * breathe * idle - 0.045 * sniff - 0.13 * crouch
+        - 0.1 * prowl - 0.035 * brake + 0.28 * Math.sin(rearA) - 0.06 * rear;
+      let pitch = slopePitch + (0.07 + 0.09 * sprint) * run * Math.sin(phase * Math.PI * 2 - 0.6) - 0.24 * sniff + jolt.p + 0.02 * Math.sin(time * 5.3) * sniff
+        - 0.07 * prowl + 0.13 * brake + rearA;
       // живость: корпус в такт шагу поворачивается и покачивается (рысью — с каждым шагом пары, на
       // галопе — волной), в поворот закладывается, при увороте наклоняется в сторону рывка
       // (Корпус — одно твёрдое тело: заметный поворот в такт шагу выглядел как «виляние задом».
       // Поэтому покачивание — около градуса и только на бегу; живость — от поворотов, крена в
       // поворот и уворотов.)
       const sway = style * activity * smoothstep(1.2, 3.0, v);
-      let yaw = sway * 0.012 * Math.sin(phase * Math.PI * 4 + 0.4) + clamp(0.04 * w, -0.08, 0.08);
+      let yaw = sway * 0.012 * Math.sin(phase * Math.PI * 4 + 0.4) + clamp(0.04 * w, -0.08, 0.08) + clamp(0.7 * look, -0.3, 0.3);
       let roll = slopeRoll + clamp(-0.14 * w * v, -0.22, 0.22) + 0.018 * Math.sin(time * Math.PI * 2 * 0.13) * idle + jolt.r
         + sway * 0.03 * Math.sin(phase * Math.PI * 4 + 1.2) * (1 - run) + clamp(-0.1 * vs, -0.15, 0.15);
       let x = 0.012 * Math.sin(time * Math.PI * 2 * 0.13) * idle;
@@ -180,17 +197,19 @@ export function createGait() {
         y = BODY_Y; // высоту в полёте задаёт robodog.js (вся группа летит)
       }
       pose.y += (Math.max(y, groundMid + MIN_Y) - pose.y) * k;
-      pose.pitch += (clamp(pitch, -0.6, 0.6) - pose.pitch) * k;
+      pose.pitch += (clamp(pitch, -0.6, 0.6 + 0.45 * rear) - pose.pitch) * k;
       pose.roll += (roll - pose.roll) * k;
       pose.yaw += (yaw - pose.yaw) * k;
       pose.x += (x - pose.x) * k;
 
       // ноги
-      const lift = (0.06 + 0.05 * run) * activity;
+      const lift = Math.max(0.06 + 0.05 * run + 0.04 * sprint, 0.09 * prowl) * activity;
       for (let i = 0; i < 4; i += 1) {
         const hip = HIPS[i];
-        const nx = hip[0] * NEUTRAL_X;
-        const nz = hip[2] + (i >= 2 ? 0.02 : 0);
+        const nx = hip[0] * (NEUTRAL_X + 0.18 * prowl);
+        // юзом — передние упираются впереди; на дыбах задние подходят под корпус; удар с дыб — передние
+        // опускаются далеко впереди
+        const nz = hip[2] + (i >= 2 ? 0.02 - 0.07 * rear - 0.03 * brake : -0.09 * brake - 0.22 * reach);
         let fx;
         let fy;
         let fz;
@@ -244,6 +263,16 @@ export function createGait() {
         feet[i][1] = fy;
         feet[i][2] = fz;
         toBody(fx, fy, fz, local);
+        const pawing = i < 2 && rear > 0.01 && air === null && !(paw && paw.leg === i && paw.k > 0);
+        if (pawing) {
+          // на дыбах: передние лапы в системе корпуса, по очереди молотят воздух (≈1,6 раза в секунду);
+          // удар (reach) вытягивает их вперёд
+          const pw = time * Math.PI * 2 * 1.6 + i * Math.PI;
+          const kr = smoothstep(0, 0.6, rear);
+          local[0] = lerp(local[0], hip[0] * 1.05, kr);
+          local[1] = lerp(local[1], hip[1] - 0.27 + 0.07 * Math.sin(pw) * (1 - reach), kr);
+          local[2] = lerp(local[2], hip[2] - 0.1 - 0.06 * Math.cos(pw) * (1 - reach) - 0.2 * reach, kr);
+        }
         // стопа всегда ниже таза (кроме замаха лапой): иначе решение IK переворачивает колено
         let ly = local[1] - hip[1];
         if (!(paw && paw.leg === i && paw.k > 0) && ly > -0.12) ly = -0.12;

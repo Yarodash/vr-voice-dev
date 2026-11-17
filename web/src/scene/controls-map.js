@@ -19,13 +19,19 @@ const TAP_MS = 300; // a press of Y shorter than this is a tap: the menu, not a 
 const TRIPLE_PRESS_MS = 1000; // the three presses of Y must fit into this time (from the first)
 const GRIP = 1;
 const Y = 5;
+const MENU_BTN = 12; // «≡»
 
 export class ControlMap {
   // menuOpen(): открыто ли радиальное меню сейчас. Перезагрузка — только на жест «закрыто → открыто →
   // закрыто» (первые два нажатия открыли и закрыли меню). Иначе пункты-переключатели (keepOpen, например
   // «Время»), которые жмут Y несколько раз подряд при открытом меню, перезагружали страницу.
-  constructor(menuOpen = () => false) {
+  // yBlocked(): Y сейчас ничего не делает (пульт «Моего дрона» в руке): нажатие, начатое при этом,
+  // и его отпускание проглатываются целиком (даже если пульт отпустили, не отпуская Y)
+  constructor(menuOpen = () => false, yBlocked = () => false, remoteHeld = () => false) {
     this.menuOpen = menuOpen;
+    this.yBlocked = yBlocked;
+    this.remoteHeld = remoteHeld;
+    this.ySwallow = false;
     this.previous = [];
     this.yPressedAt = null;
     this.yPresses = [];
@@ -39,7 +45,10 @@ export class ControlMap {
     const rising = (index) => pressed(index) && !this.previous[index];
     const falling = (index) => !pressed(index) && Boolean(this.previous[index]);
 
-    if (rising(Y)) {
+    if (rising(Y) && this.yBlocked()) this.ySwallow = true;
+    if (this.ySwallow) {
+      if (falling(Y)) this.ySwallow = false;
+    } else if (rising(Y)) {
       const keep = this.yPresses.map((at) => nowMs - at <= TRIPLE_PRESS_MS);
       this.yPresses = this.yPresses.filter((_, i) => keep[i]);
       this.yMenuAt = this.yMenuAt.filter((_, i) => keep[i]);
@@ -57,7 +66,7 @@ export class ControlMap {
         actions.push('record-start');
       }
     }
-    if (falling(Y)) {
+    if (falling(Y) && !this.ySwallow && this.yPressedAt !== null || falling(Y) && this.yIsReload) {
       if (this.yIsReload) {
         this.yIsReload = false;
       } else {
@@ -69,6 +78,8 @@ export class ControlMap {
     }
 
     if (rising(GRIP)) actions.push('grip');
+    // «≡» (buttons[12]) с пультом дрона в руке — открыть/закрыть меню пульта (Y в это время занят дроном)
+    if (rising(MENU_BTN) && this.remoteHeld()) actions.push('wheel-toggle');
 
     this.previous = [...buttons];
     return actions;

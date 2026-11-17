@@ -42,14 +42,23 @@ export const SCENES_MENU = 'Сцены', SAVE_NEW = 'Сохранить как �
 Current tree:
 - `heldKind === 'pistol' | 'ak'` (title Пистолет/Калаш): `Перенастроить оси`, `Удалить оружие`,
   `Лазерный прицел: вкл/выкл` (keepOpen), `Цвет прицела`. (Only weapon items.)
+  `Перенастроить оси` also starts `gunResize` (`scene/gun-resize.js`): while the gun is frozen,
+  stick X scales it around the grip (×1.6/s at full deflection, 0.3…3, deadzone 0.2; the stick must
+  first return to centre), label «Размер ×1,25» above the grip; the re-grab commits seat + size.
 - `heldKind === 'plate'` (title Тарелка): `Удалить тарелку`, + common.
 - empty hand (title Меню): if `features.spawn`: `Заспавнить ▸ {Заспавнить пистолет, Заспавнить
-  калаш, Заспавнить тарелку}`, `Хват: нажать|держать`; + common.
+  калаш, Заспавнить тарелку, Мой дрон ▸ {маленький, средний, большой, огромный}, …}`,
+  `Хват: нажать|держать`; + common. Drone sizes: `MY_DRONE_SIZES` (index = size), onMenu checks
+  `picked.path.includes(MY_DRONE_SPAWN)`.
+- `heldKind === 'remote'` (pult of the personal drone, `scene/my-drone.js`; main.js passes it when
+  `myDrone.held`; title Пульт): `Дрон ко мне` (`MY_DRONE_RECALL`), `Удалить` (`MY_DRONE_REMOVE`: remote + drone together),
+  + common. Labels are exported constants (`MY_DRONE_SPAWN = 'Мой дрон'` too).
 - common: if `features.targets`: `Мишени ▸ {Физика мишеней: вкл/выкл (keepOpen), Обводка
   прицела: вкл/выкл (keepOpen), [Сбросить счёт if features.score]}`; `Сцены ▸ {<name> ▸
   {Продолжить, Рестарт}…, Сохранить как новую, Очистить всё}`; `Настройки ▸ {Отцентрировать,
   Расстояние между глазами, Время: ×N (keepOpen), Инерция: вкл/выкл (keepOpen, inertia.js), …,
-  Тряска: вкл/сильно/выкл (keepOpen, cycles; shake.js, `scene.shake`)}`.
+  Тряска: вкл/сильно/выкл (keepOpen, cycles; shake.js, `scene.shake`), Сбросить размеры оружия
+  (`RESET_GUN_SIZES`: all `scene.scale.*` → 1, `resetGunScales` in gun-resize.js)}`.
 
 ## onMenu dispatch (scene/main.js)
 

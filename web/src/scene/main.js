@@ -14,8 +14,9 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ControlMap } from './controls-map.js';
 import { HUD_CONFIG } from './hud.js';
-import { FIRE_MODE_PREFIX, DOGS_MENU } from './menu.js';
+import { FIRE_MODE_PREFIX, DOGS_MENU, RESET_GUN_SIZES } from './menu.js';
 import { buildMenu, SCENES_MENU, SAVE_NEW, CLEAR_ALL, SCENE_CONTINUE, SCENE_RESTART, RESET_SCORE, CAR_ENTER, CAR_EXIT } from './menu.js';
+import { MY_DRONE_SPAWN, MY_DRONE_RECALL, MY_DRONE_REMOVE, MY_DRONE_SIZES, MY_DRONE_REGRIP, MY_DRONE_RELEASE, MY_DRONE_AUTOPILOT_ON, MY_DRONE_AUTOPILOT_OFF } from './menu.js';
 import { EMPTY_FEATURES, freshOf, loadCompositions, migrateCarScene, migrateHordeScenes, nextName, readActive, saveCompositions, snapshot, storeCarPose, storeLive, writeActive } from './compositions.js';
 import { createCar } from './car.js';
 import { createRobodog } from './robodog.js';
@@ -45,6 +46,9 @@ import { createScopeDebug, SCOPE_DEBUG_REACH_M } from './scope-debug.js';
 import { createInertia } from './inertia.js';
 import { createTower } from './tower.js';
 import { createWorldClock } from './world-clock.js';
+import { createGunResize, resetGunScales } from './gun-resize.js';
+import { createRayGrab } from './ray-grab.js';
+import { createMyDrone } from './my-drone.js';
 
 const GRIP_BUTTON = 1; // xr-standard gamepad: хват
 const TRIGGER_BUTTON = 0; // курок
@@ -149,7 +153,8 @@ export function setup(ctx) {
     inertia: Boolean(shared.inertia), // «Инерция: вкл/выкл» (Настройки)
     prone: Boolean(shared.prone), // «Режим лёжа: вкл/выкл» (Настройки)
     fireMode: heldKind && GUNS[heldKind]?.auto ? 'auto' : 'semi', // «Режим: авто / полуавтомат» (generated-guns.js modes)
-    tracersOff: Boolean(shared.tracersOff), // «Трассеры: вкл/выкл» (Настройки; effects.js)
+    tracersOff: Boolean(shared.tracersOff),
+    droneAutopilot: Boolean(shared.myDrone?.autopilot), // «Автопилот: вкл/выкл» (меню пульта) // «Трассеры: вкл/выкл» (Настройки; effects.js)
     shake: shared.shakeLevel ?? 1, // «Тряска: вкл / сильно / выкл» (Настройки; shake.js)
     allies: active.features.robodogHorde ? shared.allies !== false : null, // «Собаки ▸ Союзники» (robodog-horde.js)
     drones: active.features.robodogHorde ? shared.drones !== false : null, // «Собаки ▸ Квадрокоптеры» (drones.js)
@@ -157,7 +162,7 @@ export function setup(ctx) {
     tower: Boolean(shared.towerOn), // «Вышка: вкл/выкл» (tower.js)
   });
   ctx.setMenu?.(buildMenu(menuState())); // меню (menu.js): меняется на лету
-  ctx.setMapper?.(new ControlMap(() => ctx.menuOpen?.())); // какая кнопка что делает (controls-map.js): тоже на лету
+  ctx.setMapper?.(new ControlMap(() => ctx.menuOpen?.(), () => Boolean(shared.myDrone?.exists && shared.myDrone?.held && !ctx.menuOpen?.()), () => Boolean(shared.myDrone?.exists && shared.myDrone?.held))); // какая кнопка что делает (controls-map.js): тоже на лету
   ctx.setHud?.(HUD_CONFIG); // окна сообщений и кружок-индикатор (hud.js): тоже на лету
 
   const world = createWorld({ THREE, scene, root, camera, renderer });
@@ -228,7 +233,7 @@ export function setup(ctx) {
   // сгенерированные пушки с прицелом (generated-guns.js scope): свой наклон scene.gen.<id>.scopeTilt
   const genTilts = []; // [[kind, prop]]
   for (const g of GENERATED_GUNS) {
-    if (!g.scope) continue;
+    if (!g.scope && !g.addScope) continue;
     const kind = genKind(g.id);
     const prop = `genScopeTilt:${g.id}`;
     SCOPE_TILT[kind] = [prop, `scene.gen.${g.id}.scopeTilt`];
@@ -246,6 +251,9 @@ export function setup(ctx) {
   try { localStorage.removeItem('scene.awp.scopeY'); } catch { /* нет хранилища */ }
   let scopeSliding = false;
   const pistols = createPistols({ THREE, root, makeLens: makeAwpLens });
+  // «Относительно схватить» издали: луч на оружие + хват (ray-grab.js)
+  const rayGrab = createRayGrab({ THREE, root, camera });
+  shared.rayGrab = rayGrab; // ручка для npm run vr:eval
   // панель отладки прицела (scope-debug.js): текстуры прицела АВП в руке (или первого с прицелом)
   const scopeDebug = createScopeDebug({
     THREE, root, camera, shared,
@@ -278,6 +286,8 @@ export function setup(ctx) {
 
   // ---- Посадка пистолета в руку
   const HANDLE = new THREE.Vector3(0, -0.04, 0.045); // середина рукоятки (ладонь) в системе пистолета
+  // «Размер» (меню оружия в руке): стик влево/вправо масштабирует оружие вокруг HANDLE (gun-resize.js)
+  const gunResize = createGunResize({ THREE, root, handle: HANDLE });
   // Смещение пистолета в руке относительно осей джойстика: x — по красной, y — по синей, z — против
   // зелёной. Сейчас пистолет на 5 см ниже осей (против синей стрелки).
   const PISTOL_SHIFT = new THREE.Vector3(0, -0.05, 0);
@@ -310,6 +320,7 @@ export function setup(ctx) {
   const unusedQuaternion = new THREE.Quaternion();
   const handPosition = new THREE.Vector3();
   const palm = new THREE.Vector3();
+  const seatM = new THREE.Matrix4(); // посадка вида в руке (поиск оружия рядом)
 
   let heldItem = null; // пистолет в руке
   let recalibratingItem = null; // пистолет, который замер для перенастройки
@@ -456,6 +467,7 @@ export function setup(ctx) {
     if (hand && axes) {
       hand.updateWorldMatrix(true, false);
       heldOffset(pistolWorld, kind);
+      gunResize.apply(pistolWorld, kind); // свой «Размер» вида, рукоятка на месте
       pistolWorld.premultiply(hand.matrixWorld).decompose(item.group.position, item.group.quaternion, item.group.scale);
     } else {
       putInFrontOfPlayer(item);
@@ -676,6 +688,7 @@ export function setup(ctx) {
       flash.until = now + 45 * (big > 1 ? 1.6 : 1);
       flash.mesh.userData.item = heldItem;
       flash.mesh.scale.set((0.8 + Math.random() * 0.5) * big, (0.8 + Math.random() * 0.5) * big, (0.75 + Math.random() * 0.6) * big);
+      flash.mesh.scale.multiplyScalar(group.scale.x); // «Размер» оружия (gun-resize.js)
       flash.mesh.userData.spin = Math.random() * Math.PI;
     }
   };
@@ -732,6 +745,8 @@ export function setup(ctx) {
   shared.horde = horde; // ручка для npm run vr:eval (horde.debug.info())
   // квадрокоптеры с пулемётами (drones.js) — в той же битве («robodogHorde»), «Собаки ▸ Квадрокоптеры»
   const drones = createDrones({ THREE, root, camera, renderer, shooting, horde });
+  // «Мой дрон» + пульт с экраном камеры (my-drone.js): никто в него не стреляет, бессмертный
+  const myDrone = createMyDrone({ THREE, root, scene: ctx.scene, camera, renderer, shooting });
   shared.droneSystem = drones; // ручка для npm run vr:eval (droneSystem.debug.info())
   // артиллерия (artillery.js) — в той же битве («robodogHorde»), «Собаки ▸ Артиллерия»; ручка shared.artillerySystem
   const artillery = createArtillery({ THREE, root, camera, horde });
@@ -847,10 +862,14 @@ export function setup(ctx) {
   const paintPistols = () => {
     const now = performance.now();
     for (const item of pistols.items) {
-      const active = item === heldItem || item === nearItem || item === recalibratingItem;
+      const active = item === heldItem || item === nearItem || item === recalibratingItem || item === rayGrab.target || item === rayGrab.item;
       item.accent.emissive.set(active ? 0x14161a : 0x000000); // спуск тёмный: свечение еле заметное
       item.outline.visible =
-        (item === nearItem && !heldItem) || item === recalibratingItem || (item === releasedItem && now < releaseFlashUntil);
+        // замершее для перенастройки — без обводки: оно полупрозрачное (gun-resize.js), белая кайма просвечивала бы
+        (item === nearItem && !heldItem && item !== recalibratingItem) || (item === releasedItem && now < releaseFlashUntil) ||
+        item === rayGrab.target || item === rayGrab.item; // луч на оружии / держим лучом
+      // голубая — в досягаемости руки (хват возьмёт сейчас; главнее луча), белая — луч и остальное
+      if (item.outline.visible) pistols.tintOutline(item, item === nearItem && !heldItem);
     }
   };
 
@@ -919,6 +938,19 @@ export function setup(ctx) {
         spawnWeapon('awp');
       } else if (genKindByLabel(picked.label)) {
         spawnWeapon(genKindByLabel(picked.label)); // «Заспавнить <name>» (generated-guns.js)
+      } else if (picked.path?.includes(MY_DRONE_SPAWN) && MY_DRONE_SIZES.includes(picked.label)) {
+        myDrone.spawn(MY_DRONE_SIZES.indexOf(picked.label)); // «Мой дрон ▸ <размер>»: заменяет прежний; пульт — перед игроком (my-drone.js)
+      } else if (picked.label === MY_DRONE_RECALL) {
+        myDrone.recall();
+      } else if (picked.label === MY_DRONE_AUTOPILOT_ON || picked.label === MY_DRONE_AUTOPILOT_OFF) {
+        myDrone.toggleAutopilot(); // дрон сам воюет в рою союзников (my-drone.js)
+        menuKey = null;
+      } else if (picked.label === MY_DRONE_REGRIP) {
+        myDrone.regrip(); // пульт замер; следующий хват рядом — новая посадка (my-drone.js)
+      } else if (picked.label === MY_DRONE_RELEASE) {
+        myDrone.release();
+      } else if (picked.label === MY_DRONE_REMOVE) {
+        myDrone.remove();
       } else if (picked.label === 'Заспавнить тарелку') {
         spawnClay();
 
@@ -1005,11 +1037,14 @@ export function setup(ctx) {
         }
         recenterPlayer();
         menuKey = null;
+      } else if (picked.label === RESET_GUN_SIZES) {
+        resetGunScales(pistols.items); // всё оружие снова в свой размер (в руке — со следующего кадра)
       } else if (picked.label === 'Расстояние между глазами') {
         ipd.open();
       } else if (picked.label === 'Перенастроить оси' && heldItem) {
         recalibratingItem = heldItem; // замирает там, где он сейчас; рука его больше не ведёт
         heldItem = null;
+        gunResize.start(recalibratingItem); // заодно стик влево/вправо — размер (gun-resize.js)
       } else if (picked.label === 'Удалить оружие' || picked.label === 'Удалить пистолет') {
         deleteHeld();
       }
@@ -1023,7 +1058,7 @@ export function setup(ctx) {
       world.update(dt);
       shared.sound?.update?.(camera); // слушатель 3D-звука = голова
       fps.update();
-      if (ctx.pointerAim) ctx.pointerAim.hideBeam = Boolean(heldItem || heldClay || scopeDebug.held || carDrive.seated); // луч не рисуется, пока что-то в руке
+      if (ctx.pointerAim) ctx.pointerAim.hideBeam = Boolean(heldItem || heldClay || scopeDebug.held || carDrive.seated || rayGrab.showing || myDrone.held); // луч не рисуется, пока что-то в руке (rayGrab рисует свой — до оружия)
 
       const session = renderer.xr.getSession();
       let source;
@@ -1054,7 +1089,7 @@ export function setup(ctx) {
       if (hand) {
         showController(hand, source);
         // пока пистолет в руке, джойстика не видно; при перенастройке (пистолет замер) он снова виден
-        if (realModel) realModel.visible = !heldItem;
+        if (realModel) realModel.visible = !heldItem && !myDrone.held; // пульт дрона в руке — тоже вместо джойстика
         if (axes) axes.visible = SHOW_AXES;
         hand.updateWorldMatrix(true, false);
         gripWorld.copy(hand.matrixWorld);
@@ -1068,10 +1103,17 @@ export function setup(ctx) {
         nearItem = null;
         nearClay = null;
         let best = REACH;
-        if (!heldItem && !heldClay && !recalibratingItem && !textTest.held && !scopeDebug.held) {
+        if (!heldItem && !heldClay && !recalibratingItem && !textTest.held && !scopeDebug.held && !rayGrab.item && !myDrone.held) {
           for (const item of pistols.items) {
             item.group.updateWorldMatrix(true, false);
-            const distance = palm.copy(HANDLE).applyMatrix4(item.group.matrixWorld).distanceTo(handPosition);
+            // расстояние до места РУКИ, в котором это оружие держат (посадка вида: calib), а не до HANDLE:
+            // у перенастроенных (гранатомёт: рука в 17 см от HANDLE) рука на рукоятке иначе «не дотягивалась».
+            // С «Размером» s рука сидит в H + (q − H) / s системы оружия (масштаб вокруг HANDLE);
+            // у увеличенного досягаемость растёт с ним (меньше 1 — как есть)
+            heldOffset(seatM, item.kind);
+            const s = item.group.scale.x;
+            palm.setFromMatrixPosition(seatM.invert()).sub(HANDLE).divideScalar(s).add(HANDLE).applyMatrix4(item.group.matrixWorld);
+            const distance = palm.distanceTo(handPosition) / Math.max(1, s);
             if (distance < best) {
               best = distance;
               nearItem = item;
@@ -1083,7 +1125,7 @@ export function setup(ctx) {
         }
         // панель отладки прицела (scope-debug.js): «Относительно схватить», если она ближе оружия
         const debugDistance = scopeDebug.distance(handPosition);
-        const debugNearest = !heldItem && !heldClay && !recalibratingItem && !textTest.held &&
+        const debugNearest = !heldItem && !heldClay && !recalibratingItem && !textTest.held && !rayGrab.item &&
           debugDistance < SCOPE_DEBUG_REACH_M && debugDistance < best;
         if (debugNearest) nearItem = nearClay = null;
         scopeDebug.update({ hand, gripWorld, gripDown, gripWasDown, gripMode, menuIsOpen, nearest: debugNearest, source });
@@ -1092,6 +1134,27 @@ export function setup(ctx) {
           hand, gripWorld, handPosition, gripDown, gripWasDown, gripMode, menuIsOpen, source,
           handBusy: Boolean(heldItem || heldClay || recalibratingItem || nearItem || nearClay),
         });
+        // пульт «Моего дрона» (my-drone.js): «Абсолютно схватить» хватом, только пустой рукой
+        const droneEvent = myDrone.hand({
+          gripWorld, handPosition, seat: axes, gripDown, gripPressed: gripDown && !gripWasDown, gripMode, menuIsOpen,
+          handBusy: Boolean(heldItem || heldClay || recalibratingItem || nearItem || nearClay || debugNearest || textTest.held || scopeDebug.held || rayGrab.item),
+        });
+        if (droneEvent === 'grab') buzz(source);
+        else if (droneEvent === 'release') buzz(source, 0.2, 90);
+        // луч на оружие издали (ray-grab.js): берёт и держит КУРОК; только пустой рукой и когда рядом
+        // взять нечего (ближний хват и тарелка под курком главнее; окно HUD на луче — тоже)
+        const rayTrigger = Boolean(source?.gamepad.buttons[TRIGGER_BUTTON]?.pressed);
+        const rayEvent = rayGrab.update({
+          rayObj: rayOf(hand), gripWorld, items: pistols.items, menuIsOpen,
+          triggerDown: rayTrigger, triggerPressed: rayTrigger && !triggerWasDown, stickX: source?.gamepad.axes?.[2] ?? 0, stickY: source?.gamepad.axes?.[3] ?? 0, dt: realDt,
+          canPoint: !heldItem && !heldClay && !recalibratingItem && !textTest.held && !scopeDebug.held &&
+            !nearItem && !nearClay && !debugNearest && !carDrive.seated && !myDrone.held && !myDrone.near,
+        });
+        if (rayEvent === 'grab') buzz(source);
+        else if (rayEvent === 'release') {
+          buzz(source, 0.2, 90);
+          pistols.save(heldItem, held.toArray(), true);
+        } else if (rayEvent === 'hover') buzz(source, 0.1, 15);
 
         const gripPressed = gripDown && !gripWasDown;
         if (gripPressed && recalibratingItem) {
@@ -1100,6 +1163,8 @@ export function setup(ctx) {
           recalibratingItem.group.updateWorldMatrix(true, false);
           const kind = CALIB_KEYS[recalibratingItem.kind] ? recalibratingItem.kind : 'pistol';
           const calib = new THREE.Matrix4().copy(gripWorld).invert().multiply(recalibratingItem.group.matrixWorld);
+          gunResize.apply(calib, recalibratingItem.kind, true); // посадка — без размера (он накладывается сверху)
+          gunResize.stop(); // размер, выбранный стиком, записан
           calibs[kind] = calib;
           held.copy(calib);
           try {
@@ -1135,10 +1200,11 @@ export function setup(ctx) {
         heldClay = null;
       }
       gripWasDown = gripDown;
+      gunResize.update({ recalibrating: recalibratingItem, items: pistols.items, source, menuOpen: menuIsOpen, dt: realDt }); // перенастройка: стик X — размер
 
       // АВП в руке, меню и панели закрыты: стик вверх/вниз слегка наклоняет прицел (меняет угол)
       {
-        const stickY = heldItem?.scope && !menuIsOpen ? (source?.gamepad.axes?.[3] ?? 0) : 0;
+        const stickY = heldItem?.scope && !menuIsOpen ?(source?.gamepad.axes?.[3] ?? 0) : 0;
         const DEAD = 0.18;
         const [tiltProp, tiltKey] = SCOPE_TILT[heldItem?.kind] ?? SCOPE_TILT.awp; // у каждого вида свой наклон
         if (Math.abs(stickY) > DEAD) {
@@ -1181,7 +1247,7 @@ export function setup(ctx) {
       clays.setNear(heldItem || heldClay ? null : nearClay);
       // X: новая тарелка в руку (как пункт меню), если рука свободна и меню закрыто
       const xDown = Boolean(source?.gamepad.buttons[X_BUTTON]?.pressed);
-      if (xDown && !xWasDown && active.features.xPlate && !heldItem && !heldClay && !recalibratingItem && !menuIsOpen) {
+      if (xDown && !xWasDown && active.features.xPlate && !heldItem && !heldClay && !recalibratingItem && !rayGrab.item && !myDrone.held && !menuIsOpen) { // с пультом дрона X — вниз (my-drone.js)
         spawnClay();
         buzz(source, 0.3, 40);
       }
@@ -1218,6 +1284,7 @@ export function setup(ctx) {
           kick.makeRotationFromEuler(kickEuler.set(pitch, climbYaw, 0, 'YXZ'));
           pistolWorld.multiply(kickPivot).multiply(kick).multiply(kickPivot.invert());
         }
+        gunResize.apply(pistolWorld, heldItem.kind); // «Размер» вида вокруг рукоятки (gun-resize.js)
         pistolWorld.decompose(heldItem.group.position, heldItem.group.quaternion, heldItem.group.scale);
       }
       pistols.updateTriggers(heldItem && hand ? heldItem : null, source?.gamepad.buttons[TRIGGER_BUTTON]?.value ?? 0, realDt, ejectCasing);
@@ -1261,7 +1328,9 @@ export function setup(ctx) {
       scopeTilts.ak2 = shared.ak2ScopeTilt;
       for (let i = 0; i < genTilts.length; i += 1) scopeTilts[genTilts[i][0]] = shared[genTilts[i][1]];
       pistols.updateLenses(shared.awpScopeZ, scopeTilts); // прицелы (АВП, «Калаш 2.0»): сдвиг, наклон и изображение (только когда в окуляр смотрят)
+      myDrone.update(realDt, source, menuIsOpen); // «Мой дрон»: полёт с пульта, гул, экран камеры (my-drone.js)
       if (!hand) scopeDebug.update({ hand: null, gripDown: false, gripWasDown: false, gripMode, menuIsOpen: true }); // без руки — только видна
+      if (!hand) rayGrab.hide();
       liveLeft -= realDt;
       if (liveLeft <= 0) {
         liveLeft = LIVE_EVERY_S;
@@ -1269,7 +1338,7 @@ export function setup(ctx) {
       }
 
       // меню зависит от того, что игрок держит, и от режима хвата
-      const heldKind = heldItem?.kind ?? (heldClay ? 'plate' : null);
+      const heldKind = heldItem?.kind ?? (heldClay ? 'plate' : myDrone.held ? 'remote' : null); // 'remote' — пульт дрона (menu.js)
       const key = `${heldKind}|${gripMode}|${shared.targetPhysics}|${shared.aimOutline}|${shared.laser}|${carDrive.seated}|${shared.timeScale ?? 1}|${Boolean(shared.scopeDebug)}|${Boolean(shared.inertia)}|${GUNS[heldKind]?.auto}|${shared.allies !== false}|${shared.drones !== false}|${shared.artillery !== false}`; // сцены сбрасывают menuKey сами
       if (key !== menuKey) {
         menuKey = key;
@@ -1277,7 +1346,7 @@ export function setup(ctx) {
       }
       // положение запоминается, пока пистолет в руке (он движется), и сразу, когда его взяли/отпустили;
       // без пистолета в руке ничего не меняется — и не сохраняется каждый кадр (меньше мусора для GC)
-      if (heldItem || heldItem !== savedHeld) {
+      if (heldItem || heldItem !== savedHeld || rayGrab.item) { // rayGrab.item — оружие, которое двигают лучом
         pistols.save(heldItem, heldToArray, heldItem !== savedHeld); // массив — только когда пишется
         savedHeld = heldItem;
       }
@@ -1291,6 +1360,7 @@ export function setup(ctx) {
       clays.dispose();
       casings.dispose();
       laser.dispose();
+      myDrone.dispose();
       laserPanel.dispose();
       saveLive(); // до shooting.dispose: снимок читает мишени
       window.removeEventListener('pagehide', saveLive);
@@ -1313,7 +1383,9 @@ export function setup(ctx) {
       fps.dispose();
       textTest.dispose();
       pistols.disposeLenses();
+      gunResize.dispose();
       scopeDebug.dispose();
+      rayGrab.dispose();
       if (ctx.pointerAim?.object === axes) ctx.pointerAim.object = null;
       if (ctx.pointerAim) ctx.pointerAim.hideBeam = false;
       axes?.parent?.remove(axes);

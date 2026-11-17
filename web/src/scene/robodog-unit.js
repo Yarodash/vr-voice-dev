@@ -44,17 +44,19 @@ const POWER = { pistol: 0.45, ak: 0.7, awp: 1 };
 export function createDogSfx(shared) {
   const sound = createDogSound(shared);
   const last = {};
-  const play = (name, gapMs, a, b, size) => {
+  // own — звук от своей пули (unit.hit): свой счётчик частоты и свои голоса (robodog-sound.js, audio-budget.js)
+  const play = (name, gapMs, a, b, size, own = false) => {
+    const key = own ? `${name}!` : name;
     const now = performance.now();
-    if (now - (last[name] ?? -1e9) < gapMs) return;
-    last[name] = now;
-    sound[name](a, b, size);
+    if (now - (last[key] ?? -1e9) < gapMs) return;
+    last[key] = now;
+    sound[name](a, b, size, own);
   };
   // size — размер пса (стая: 1 … 4): звук ниже и громче (robodog-sound.js)
   return {
-    zap: (p, strength = 1, size = 1) => play('zap', 55, p, strength, size),
-    clank: (p, size = 1) => play('clank', 40, p, undefined, size),
-    clankHeavy: (p, k, size = 1) => play('clankHeavy', 45, p, k, size),
+    zap: (p, strength = 1, size = 1, own = false) => play('zap', 55, p, strength, size, own),
+    clank: (p, size = 1, own = false) => play('clank', 40, p, undefined, size, own),
+    clankHeavy: (p, k, size = 1, own = false) => play('clankHeavy', 45, p, k, size, own),
     crackle: (p, size = 1) => play('crackle', 90, p, undefined, size),
     powerDown: (p, size = 1) => play('powerDown', 150, p, undefined, size),
     thud: (p, size = 1) => play('thud', 120, p, undefined, size),
@@ -63,6 +65,8 @@ export function createDogSfx(shared) {
     scrape: (p, k, size = 1) => play('scrape', 280, p, k, size),
     whoosh: (p, size = 1) => play('whoosh', 200, p, undefined, size),
     bark: (p, size = 1) => play('bark', 120, p, undefined, size),
+    growl: (p, size = 1) => play('growl', 350, p, undefined, size),
+    howl: (p, size = 1) => play('howl', 700, p, undefined, size),
     mg: (p, size = 1) => play('mg', 50, p, undefined, size),
     turretWind: (p, size = 1) => play('turretWind', 150, p, undefined, size), // мотор башенки перед очередью
   };
@@ -110,7 +114,7 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
   const frame = { c: [0, 0, 0], x: [0, 0, 0], y: [0, 0, 0], z: [0, 0, 0] };
   const eyeOn = new THREE.Color(EYE_ON);
   const eyeOff = new THREE.Color(EYE_OFF);
-  const cmd = { v: 0, w: 0, sniff: 0, crouch: 0, air: null, vs: 0, style: 1, paw: null };
+  const cmd = { v: 0, w: 0, sniff: 0, crouch: 0, air: null, vs: 0, style: 1, paw: null, prowl: 0, rear: 0, rearReach: 0, brake: 0, look: 0 };
   // подъём: поза куклы в момент начала (корпус в мире, суставы относительно родителей)
   const capPos = new THREE.Vector3();
   const capQ = new THREE.Quaternion();
@@ -136,6 +140,7 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
   let lastPuff = 0;
   let lastHalf = 0; // половина цикла походки — для шагов сервоприводов
   let modeT = 0; // секунд в режиме down / getup
+  let glowK = -1; // накал глаз, выставленный unit.glow (−1 — ещё не выставлялся)
   // Размер (стая: 1 маленький … 4 огромный; берётся из dog.scale при spawn). Вся модель — масштаб
   // группы; походка и кукла считаются «как у маленького» в своих единицах: длины ×S, время ×RT
   // (=√S, подобие по Фруду: большой шагает реже и шире), толчки пуль слабее (PK = S^−0.6).
@@ -389,22 +394,22 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
         ragdoll.push(hx * (2 + 3 * power) * k, 0, hz * (2 + 3 * power) * k);
         ragdoll.impulse(hitPoint.x, hitPoint.y, hitPoint.z, hx, 0, hz, (4 + 6 * power) * k * RT, 0.45 * S);
       }
-      sfx.clankHeavy(hitPoint, power, S);
+      sfx.clankHeavy(hitPoint, power, S, true); // своя пуля — свои голоса
       fx.sparks(hitPoint, hitNormal, 8, { speed: [1.5 * RT, 4 * RT], hot: Math.random() < 0.5, size: RT });
       if (Math.random() < 0.4) {
         arcsFrom(hitPart, hitPoint, 0, 1);
-        sfx.zap(hitPoint, 0.4, S);
+        sfx.zap(hitPoint, 0.4, S, true);
       }
       return 'corpse';
     }
-    sfx.clank(hitPoint, S);
+    sfx.clank(hitPoint, S, true);
     unit.health -= damage;
     flash = 1;
     fx.flash(hitPoint, 0.12 * S);
     fx.sparks(hitPoint, hitNormal, 16, { speed: [1.5 * RT, 4.5 * RT], size: RT });
     fx.sparks(hitPoint, hitNormal, 6, { speed: [RT, 3 * RT], hot: true, size: RT });
     arcsFrom(hitPart, hitPoint, 3, 2);
-    sfx.zap(hitPoint, 1, S);
+    sfx.zap(hitPoint, 1, S, true);
     if (unit.health <= 0) {
       unit.kill(dir, power);
       return 'kill';
@@ -505,6 +510,8 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     }
     placeAlive();
     cmd.v = cmd.w = cmd.sniff = cmd.crouch = cmd.vs = 0;
+    cmd.prowl = cmd.rear = cmd.rearReach = cmd.brake = cmd.look = 0;
+    glowK = -1;
     if (emergeT >= 0) cmd.crouch = 1;
     cmd.air = null;
     cmd.paw = null;
@@ -576,6 +583,13 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
     cmd.style = dog.style ?? 1;
     cmd.broken = dog.broken | 0; // перебитые ноги волочатся (стая)
     cmd.paw = unit.mode === 'alive' ? (dog.pawPose ?? null) : null; // удар лапой (стая)
+    // характер движения (стая): крадётся, на дыбах, удар с дыб, юзом, довёрнут к цели
+    const live = unit.mode === 'alive';
+    cmd.prowl = live ? dog.prowl ?? 0 : 0;
+    cmd.rear = live ? dog.rear ?? 0 : 0;
+    cmd.rearReach = live ? dog.rearReach ?? 0 : 0;
+    cmd.brake = live ? dog.brake ?? 0 : 0;
+    cmd.look = live ? dog.look ?? 0 : 0;
     gait.update(dt / RT, cmd, groundLocal);
     model.setPose(gait.pose);
   };
@@ -802,7 +816,22 @@ export function createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, ca
   // ярость: глаза красные (свой материал глаз у каждого пса — дёшево)
   unit.setAngry = (on) => {
     eyeOn.set(unit.dog.team === 'ally' ? EYE_ALLY : on ? EYE_RAGE : EYE_ON);
+    glowK = -1;
     if (unit.mode === 'alive' || unit.knocked) model.eyeMaterial.color.copy(eyeOn);
+  };
+  // накал глаз (стая, каждый кадр): k < 1 — тусклее (eyeOn × (0,45 + 0,55k)), 1 — как есть, до 1,5 —
+  // добела (замах, присед перед броском, на дыбах). Только живой: умирающий мигает сам.
+  unit.glow = (k) => {
+    if (unit.mode !== 'alive') return;
+    k = Math.round(k * 40) / 40; // не трогать цвет из-за мелочей
+    if (k === glowK) return;
+    glowK = k;
+    const c = model.eyeMaterial.color;
+    if (k <= 1) c.copy(eyeOn).multiplyScalar(0.45 + 0.55 * k);
+    else {
+      const h = Math.min(1, (k - 1) * 2) * 0.6;
+      c.setRGB(eyeOn.r + (1 - eyeOn.r) * h, eyeOn.g + (1 - eyeOn.g) * h, eyeOn.b + (1 - eyeOn.b) * h);
+    }
   };
   // LOD (стая, далёкий пёс): в кадре без походки — только переехать (группа и её матрицы)
   unit.follow = () => {

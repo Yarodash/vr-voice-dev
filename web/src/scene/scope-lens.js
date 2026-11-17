@@ -53,7 +53,7 @@ export const FAR_EVERY = [[0.25, 1], [0.6, 2], [1.5, 3], [Infinity, 4]];
 export const FIELD_FILL = 1.12; // видимый круг поля шире, чем tanApparent (1 — строгий)
 export const VIGNETTE_START = 0.62; // с какой доли радиуса поля начинается затемнение
 export const VIGNETTE_DARK = 0.5; // яркость на самом краю поля
-export const CHROMA = 0.012; // хроматическая аберрация на краю поля (доля радиуса), 0 — выключить
+export const CHROMA = 0.04; // хроматическая аберрация на краю поля (доля радиуса), 0 — выключить (было 0.012; пользователь: «в прицеле — сильная»)
 export const SIZE = 512; // текстура изображения (на глаз), пикселей по стороне
 export const SAMPLES = 4; // MSAA текстуры
 export const EYES = 2; // текстур (глаз) на прицел
@@ -90,6 +90,7 @@ const fragmentShader = /* glsl */ `
   uniform float eyeRelief;
   uniform float reticle;   // 1 — сетка видна
   uniform float lensR;
+  uniform float worldScale; // масштаб прибора в мире (gun-resize.js): поле и вынос — по настоящему расстоянию глаза
   varying vec2 vPos;
   varying vec3 vEye;
   varying vec3 vWP;
@@ -121,7 +122,7 @@ const fragmentShader = /* glsl */ `
     vec3 E = vec3(vEye.xy * EYE_SHIFT, vEye.z); // смещение глаза вбок — с множителем EYE_SHIFT
     float ez = max(E.z, 1e-3);
     vec2 tanD = (vPos - E.xy) / ez;               // направление глаз → точка стекла
-    vec2 q = tanD / tanA;                         // в долях поля; сетка — в q = 0 (ось прицела)
+    vec2 q = tanD / (tanA * worldScale);          // в долях поля; сетка — в q = 0 (ось прицела)
     float r = length(q);
     vec2 tv = E.xy / ez;                          // угол глаза от оси
     float tilt = length(tv);
@@ -160,7 +161,7 @@ const fragmentShader = /* glsl */ `
     }
 
     // выходной зрачок: яркий круг, уезжает от стороны смещения глаза, к TILT_END — со стекла
-    float rp = mix(1.05, PUPIL_FAR_FRAC, smoothstep(eyeRelief + 0.03, PUPIL_FAR_M, ez));
+    float rp = mix(1.05, PUPIL_FAR_FRAC, smoothstep(eyeRelief + 0.03, PUPIL_FAR_M, ez * worldScale));
     vec2 side = tilt > 1e-5 ? tv / tilt : vec2(0.0);
     float tt = clamp(tilt / TILT_END, 0.0, 1.0);
     vec2 pc = -side * (1.0 + rp) * tt * sqrt(tt);
@@ -221,6 +222,7 @@ export function createScopeLens({
       eyeRelief: { value: eyeRelief },
       reticle: { value: 1 },
       lensR: { value: lensR },
+      worldScale: { value: 1 },
     },
     vertexShader,
     fragmentShader,
@@ -259,6 +261,11 @@ export function createScopeLens({
   let wasLive = false;
   let wasBoth = false;
   let lastDist = Infinity;
+  // Масштаб прибора в мире (размер оружия, gun-resize.js; у ×1 всё как раньше): глаз считается в системе
+  // окуляра (там стекло всегда lensR), а поле (tanA × s), вынос/зрачок и дальность — по настоящему
+  // расстоянию глаза. Так увеличенный прицел заполняет своё стекло с того же расстояния, что ×1, а не
+  // только с отодвинутого в s раз; каждый кадр из matrixWorld окуляра (collectEyes).
+  let worldScale = 1;
   let statN = 0, statSum = 0, statMax = 0, statCalls = 0, statTris = 0, statAt = performance.now();
   const tiltEnd = Math.tan((TILT_END_DEG * Math.PI) / 180);
   const smooth = (a, b, x) => {
@@ -273,7 +280,7 @@ export function createScopeLens({
     eyepiece.worldToLocal(out);
     const ez = out.z;
     if (ez < 0.005) return 0;
-    const dist = out.length();
+    const dist = out.length() * worldScale; // м в мире
     if (dist > MAX_VIEW_M) return 0;
     if ((Math.hypot(out.x, out.y) * EYE_SHIFT) / ez >= tiltEnd) return 0;
     lastDist = Math.min(lastDist, dist);
@@ -293,7 +300,7 @@ export function createScopeLens({
   const aimOf = (eyeL, out) => {
     const ez = Math.max(eyeL.z, 0.01);
     return out.set((-eyeL.x * EYE_SHIFT) / ez / mag, (-eyeL.y * EYE_SHIFT) / ez / mag,
-      Math.max(1e-4, Math.min((COVER * lensR) / ez / mag, (2 * tanApparent) / mag)));
+      Math.max(1e-4, Math.min((COVER * lensR) / ez / mag, (2 * tanApparent * worldScale) / mag)));
   };
   const aimA = new THREE.Vector3();
   const aimB = new THREE.Vector3();
@@ -363,7 +370,9 @@ export function createScopeLens({
   const collectEyes = () => {
     eyepiece.updateWorldMatrix(true, false);
     eyepiece.getWorldPosition(lensSphere.center);
-    lensSphere.radius = lensR * 1.5;
+    const me = eyepiece.matrixWorld.elements;
+    worldScale = Math.hypot(me[0], me[1], me[2]) || 1;    lensMaterial.uniforms.worldScale.value = worldScale;
+    lensSphere.radius = lensR * 1.5 * worldScale;
     lastDist = Infinity;
     seen[0].fade = seen[1].fade = 0;
     if (renderer.xr.isPresenting) {

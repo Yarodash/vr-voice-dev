@@ -11,7 +11,7 @@ Only the **left** Touch controller is used. Right controller / hands are ignored
 
 | Index | Name (user's word) | Who uses it |
 |---|---|---|
-| 0 | курок (trigger) | scene: fire, clay grab/throw, panel confirm; shell: `selectstart` presses preview buttons |
+| 0 | курок (trigger) | scene: fire, clay grab/throw, panel confirm, ray grab of a weapon at a distance (ray-grab.js); shell: `selectstart` presses preview buttons |
 | 1 | хват (grip) | scene: grab/release/recalibrate; shell action `'grip'` closes the open wheel |
 | 3 | Z (stick click) | IPD panel "as in headset"; otherwise free |
 | 4 | X | scene: spawn clay in hand (`features.xPlate`) |
@@ -59,7 +59,8 @@ Haptics: `source?.gamepad?.hapticActuators?.[0]?.pulse?.(strength0to1, ms)` (`bu
 - Firing also checks `!panelBusy && !laserPanel.blocksFire()`.
 - Panels expose `busy()` = open, or the button that opened/closed them is still held
   (`releaseFirst` / `gripLock`). New modal UI must add itself to `menuIsOpen`.
-- Hand exclusivity: weapon, clay, recalibrating weapon, text board (`textTest.held`). The nearest
+- Hand exclusivity: weapon, clay, recalibrating weapon, text board (`textTest.held`), weapon held
+  by the ray (`rayGrab.item`, ray-grab.js; stick Y is its push/pull then). The nearest
   search runs only when all are free; `textTest.update` gets `handBusy`.
 
 ## Controller model and axes

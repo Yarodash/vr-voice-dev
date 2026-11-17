@@ -12,8 +12,10 @@
 //
 // createDroneSound(shared) → { burst(p, rounds, size), clank(p, size), boom(p, size), pop(p, size),
 //   update(head, drones, dt), stats() } — p: мировая точка, size: 0 маленький … 3 огромный.
+import { audioBudget, npcOut } from './audio-budget.js';
+
 const BAKE_VERSION = 1;
-const POOL_VERSION = 1;
+const POOL_VERSION = 2; // 2: голоса — в npcBus (шина мира), разовые спрашивают audio-budget.js
 const SHOTS = 8;
 const LOOPS = 4;
 const GAP = 0.075; // с между выстрелами очереди (тот же GAP — в drones.js)
@@ -207,7 +209,8 @@ const bake = (shared, c) => {
 // POOL_VERSION.
 const voicesFor = (shared, g) => {
   const pool = shared.droneVoices;
-  if (pool?.version === POOL_VERSION && pool.master === g.master && pool.context === g.context) return pool;
+  const bus = npcOut(g);
+  if (pool?.version === POOL_VERSION && pool.master === g.master && pool.bus === bus && pool.context === g.context) return pool;
   for (const v of [...(pool?.shots ?? []), ...(pool?.loops ?? [])]) {
     try {
       v.source?.stop();
@@ -227,7 +230,7 @@ const voicesFor = (shared, g) => {
     panner.refDistance = ref;
     panner.rolloffFactor = rolloff;
     panner.maxDistance = 400;
-    input.connect(panner).connect(g.master);
+    input.connect(panner).connect(bus);
     if (g.reverbSend) {
       const send = c.createGain();
       send.gain.value = sendGain;
@@ -239,7 +242,7 @@ const voicesFor = (shared, g) => {
   for (let i = 0; i < SHOTS; i += 1) shots.push(chain(3, 0.7, 0.2));
   const loops = [];
   for (let i = 0; i < LOOPS; i += 1) loops.push(chain(2, 1, 0.05));
-  return (shared.droneVoices = { version: POOL_VERSION, master: g.master, context: c, shots, loops });
+  return (shared.droneVoices = { version: POOL_VERSION, master: g.master, bus, context: c, shots, loops });
 };
 
 // по размеру (0 маленький … 3 огромный)
@@ -268,7 +271,9 @@ export function createDroneSound(shared) {
     } else p.setPosition(x, y, z);
   };
 
-  const play = (name, position, gain, rate = 1) => {
+  const budget = audioBudget(shared);
+  // cat — категория бюджета звуков мира (audio-budget.js): нет места — звук не играет
+  const play = (name, position, gain, rate = 1, cat = 'hit') => {
     try {
       const g = ready();
       if (!g || !position || !ok(position.x) || !ok(position.y) || !ok(position.z)) return;
@@ -276,6 +281,8 @@ export function createDroneSound(shared) {
       if (c.state === 'suspended') c.resume();
       const list = bank.buffers[name];
       if (!list?.length) return; // ещё запекается
+      const buffer = list[Math.floor(Math.random() * list.length)];
+      if (!budget.admit(cat, position, gain, buffer.duration / rate, 3, 0.7)) return;
       const pool = voicesFor(shared, g);
       const t = c.currentTime;
       let voice = null;
@@ -301,7 +308,7 @@ export function createDroneSound(shared) {
       voice.input.gain.setValueAtTime(Math.min(2, Math.max(0, gain)), at);
       setPos(voice.panner, position.x, position.y, position.z, at);
       const source = c.createBufferSource();
-      source.buffer = list[Math.floor(Math.random() * list.length)];
+      source.buffer = buffer;
       source.playbackRate.value = rate;
       source.connect(voice.input);
       source.onended = () => {
@@ -407,10 +414,10 @@ export function createDroneSound(shared) {
   const jit = (a) => 1 + (Math.random() - 0.5) * a;
   return {
     // очередь пулемёта (rounds 3–5): один голос на всю очередь
-    burst: (p, rounds, size) => play(`burst${Math.max(3, Math.min(5, rounds))}`, p, SHOT_GAIN[size] * 0.9, SHOT_RATE[size] * jit(0.08)),
+    burst: (p, rounds, size) => play(`burst${Math.max(3, Math.min(5, rounds))}`, p, SHOT_GAIN[size] * 0.9, SHOT_RATE[size] * jit(0.08), 'gun'),
     clank: (p, size) => play('clank', p, 0.55 + 0.1 * size, (1.2 - 0.15 * size) * jit(0.2)),
-    boom: (p, size) => play('boom', p, 0.7 + 0.25 * size, (1.25 - 0.17 * size) * jit(0.08)),
-    pop: (p, size) => play('pop', p, 0.6 + 0.1 * size, (1.2 - 0.15 * size) * jit(0.1)),
+    boom: (p, size) => play('boom', p, 0.7 + 0.25 * size, (1.25 - 0.17 * size) * jit(0.08), 'boom'),
+    pop: (p, size) => play('pop', p, 0.6 + 0.1 * size, (1.2 - 0.15 * size) * jit(0.1), 'boom'),
     update(head, drones, dt) {
       try {
         humStep(head, drones, dt);
