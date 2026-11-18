@@ -23,6 +23,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshoptSimplifier } from 'three/addons/libs/meshopt_simplifier.module.js';
 import { createAddedScope } from './scope-addon.js';
+import { createCollimator } from './collimator.js';
+import { genGunParams } from './generated-guns.js';
 
 const HANDLE = { x: 0, y: -0.04, z: 0.045 }; // ладонь в системе оружия (main.js HANDLE)
 const BASE = `${import.meta.env.BASE_URL}models/generated/`;
@@ -859,8 +861,12 @@ export function buildGenerated(THREE, entry, { outlineMaterial, outlineM = 0.002
   // прицел-модель (addScope, scope-addon.js): корпус и стёкла над коробкой, если на картинке прицела нет
   const added = entry.addScope && !entry.scope ? createAddedScope(THREE, entry.addScope, { outlineMaterial, outlineM, makeLens, model }) : null;
   if (added) group.add(added.mount);
+  // коллиматор (collimator.js): red-dot на рельсе, точка на бесконечности, пристрелян по пуле этой пушки
+  const collimator = entry.collimator ? createCollimator(THREE, entry.collimator, { outlineMaterial, outlineM, model, fire: genGunParams(entry) }) : null;
+  if (collimator) group.add(collimator.mount);
   const placeScope = (from) => {
     added?.place(from);
+    collimator?.place(from);
     const sc = entry.scope;
     if (!mount || !from.mapPx || !from.mPerPx) return;
     // у модели — стёкла по настоящим торцам трубы (fitScope, уже снаружи торца), у картинки — по точкам

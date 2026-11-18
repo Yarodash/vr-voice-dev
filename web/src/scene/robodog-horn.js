@@ -110,9 +110,10 @@ export function createHorn(shared) {
         }
         v.input.gain.setValueAtTime(Math.min(2, gain), t);
         if (v.panner.positionX) {
-          v.panner.positionX.setValueAtTime(position.x, t);
-          v.panner.positionY.setValueAtTime(position.y, t);
-          v.panner.positionZ.setValueAtTime(position.z, t);
+          // .value: автоматизация позиции — дорогой посэмпловый режим панорамы
+          v.panner.positionX.value = position.x;
+          v.panner.positionY.value = position.y;
+          v.panner.positionZ.value = position.z;
         } else v.panner.setPosition(position.x, position.y, position.z);
         const s = c.createBufferSource();
         s.buffer = bank.buffer;

@@ -36,6 +36,10 @@ export function createRagdoll() {
   const floor = new Float32Array(COUNT);
   const velY = new Float32Array(COUNT);
   const contact = new Uint8Array(COUNT);
+  // отвалившиеся ноги (setLost): их колено и стопа без связей и земли, просто следуют за тазом
+  const lostP = new Uint8Array(COUNT);
+  let lostMask = 0;
+  let slip = false; // ноги скользят по земле (валится на бок: упёртые стопы держали корпус высоко)
   // удары о землю за последний step(): самый сильный (м/с вниз) и где, самое быстрое скольжение
   const hits = { impact: 0, slide: 0, x: 0, y: 0, z: 0 };
   let scale = 1; // размер пса (стая: маленький 1 … огромный 4) — все длины ×scale
@@ -86,6 +90,15 @@ export function createRagdoll() {
   let sleepFrames = 0;
   let asleep = false;
   let accumulator = 0;
+  // плавно улечься (бюджет кукол): поза не меняется, тело целиком опускается до земли за easeDur с
+  // (раньше settle ставил все точки на землю за один кадр — труп «падал одним кадром»)
+  const easeFrom = new Float32Array(COUNT * 3);
+  const easeTo = new Float32Array(COUNT * 3);
+  let easeT = -1;
+  let easeDur = 0.3;
+  const stopEase = () => {
+    easeT = -1;
+  };
 
   const dist = (a, b) => Math.hypot(pos[a * 3] - pos[b * 3], pos[a * 3 + 1] - pos[b * 3 + 1], pos[a * 3 + 2] - pos[b * 3 + 2]);
 
@@ -93,6 +106,7 @@ export function createRagdoll() {
     for (let c = 0; c < nc; c += 1) {
       const kind = ckind[c];
       if (kind === 2 && muscle <= 0) continue;
+      if (lostMask && (lostP[ca[c]] | lostP[cb[c]])) continue;
       const a = ca[c] * 3;
       const b = cb[c] * 3;
       const dx = pos[b] - pos[a];
@@ -174,10 +188,23 @@ export function createRagdoll() {
         hits.z = pos[j + 2];
       }
       if (slide > hits.slide) hits.slide = slide;
-      prev[j] = pos[j] - (pos[j] - prev[j]) * (1 - FRICTION);
-      prev[j + 2] = pos[j + 2] - (pos[j + 2] - prev[j + 2]) * (1 - FRICTION);
+      const fr = slip && i >= KNEE ? 0.04 : FRICTION; // setSlip: стопы и колени скользят
+      prev[j] = pos[j] - (pos[j] - prev[j]) * (1 - fr);
+      prev[j + 2] = pos[j + 2] - (pos[j + 2] - prev[j + 2]) * (1 - fr);
       const vy = pos[j + 1] - prev[j + 1];
       if (vy < 0) prev[j + 1] = pos[j + 1] + vy * RESTITUTION;
+    }
+    if (lostMask) {
+      for (let leg = 0; leg < 4; leg += 1) {
+        if (!(lostMask & (1 << leg))) continue;
+        for (let n = 0; n < 2; n += 1) {
+          const i = (n ? FOOT : KNEE) + leg;
+          for (let k = 0; k < 3; k += 1) {
+            pos[i * 3 + k] = pos[leg * 3 + k];
+            prev[i * 3 + k] = prev[leg * 3 + k];
+          }
+        }
+      }
     }
     for (let i = 0; i < COUNT * 3; i += 1) moved = Math.max(moved, Math.abs(pos[i] - prev[i]));
     return moved;
@@ -232,6 +259,7 @@ export function createRagdoll() {
       muscle = 0;
       asleep = false;
       sleepFrames = 0;
+      stopEase();
       accumulator = 0;
     },
     // сразу улечься (бюджет кукол в стае): все точки — на землю под собой, без скорости, уснуть
@@ -246,11 +274,85 @@ export function createRagdoll() {
       muscle = 0;
       asleep = true;
       accumulator = 0;
+      stopEase();
+    },
+    // Перестать считать куклу БЕЗ рывка (бюджет кукол): лежит у земли — просто уснуть в этой позе; висит
+    // в воздухе — та же поза целиком опускается до касания земли за seconds (плавно), потом уснуть.
+    rest(ground, seconds = 0.3) {
+      let drop = Infinity;
+      for (let i = 0; i < COUNT; i += 1) {
+        const j = i * 3;
+        drop = Math.min(drop, pos[j + 1] - (ground(pos[j], pos[j + 2]) + radius[i]));
+      }
+      drop = Math.max(0, drop);
+      muscle = 0;
+      accumulator = 0;
+      if (drop < 0.02 * scale) {
+        asleep = true;
+        stopEase();
+        return;
+      }
+      for (let i = 0; i < COUNT; i += 1) {
+        const j = i * 3;
+        easeFrom[j] = easeTo[j] = pos[j];
+        easeFrom[j + 2] = easeTo[j + 2] = pos[j + 2];
+        easeFrom[j + 1] = pos[j + 1];
+        easeTo[j + 1] = Math.max(pos[j + 1] - drop, ground(pos[j], pos[j + 2]) + radius[i]);
+      }
+      easeT = 0;
+      easeDur = Math.max(0.05, seconds);
+      asleep = false;
+    },
+    // Волочь по земле без физики (чёрная дыра, кукол сверх бюджета): сдвиг (dx, dz), поза та же, тело
+    // опускается к земле не быстрее maxDrop за вызов (висящее в воздухе плавно ложится, а не за кадр),
+    // точки не ниже земли (едет по рельефу). Зовётся каждый подшаг — ничего не перезапускает.
+    drag(dx, dz, ground, maxDrop) {
+      let drop = Infinity;
+      for (let i = 0; i < COUNT; i += 1) {
+        const j = i * 3;
+        pos[j] += dx;
+        pos[j + 2] += dz;
+        drop = Math.min(drop, pos[j + 1] - (ground(pos[j], pos[j + 2]) + radius[i]));
+      }
+      drop = Math.max(0, Math.min(maxDrop, drop));
+      for (let i = 0; i < COUNT; i += 1) {
+        const j = i * 3;
+        const floor = ground(pos[j], pos[j + 2]) + radius[i];
+        pos[j + 1] = Math.max(pos[j + 1] - drop, floor);
+        prev[j] = pos[j];
+        prev[j + 1] = pos[j + 1];
+        prev[j + 2] = pos[j + 2];
+      }
+      muscle = 0;
+      asleep = true;
+      accumulator = 0;
+      stopEase();
+    },
+    // идёт плавное «улечься» (кукла уже не считается)
+    get easing() {
+      return easeT >= 0;
+    },
+    // насколько кукла ещё движется (сумма квадратов смещений за подшаг, в единицах размера)
+    motion() {
+      let m = 0;
+      for (let i = 0; i < COUNT * 3; i += 1) {
+        const d = pos[i] - prev[i];
+        m += d * d;
+      }
+      return m / (scale * scale);
     },
     // сила мышц 0..1 (0 — обмяк)
+    // отвалившиеся ноги (биты 0–3 — ЛП, ПП, ЛЗ, ПЗ; большие псы): не держат и не тянут тело
+    setLost(mask) {
+      lostMask = mask | 0;
+      for (let leg = 0; leg < 4; leg += 1) lostP[KNEE + leg] = lostP[FOOT + leg] = (lostMask >> leg) & 1;
+    },
     setMuscle(k) {
       muscle = Math.max(0, Math.min(1, k));
-      if (muscle > 0) asleep = false;
+      if (muscle > 0) {
+        asleep = false;
+        stopEase();
+      }
     },
     // толчок в точке (x, y, z) по направлению (dx, dy, dz) (единичный): частицам в радиусе r —
     // прибавка скорости speed (м/с), сильнее у ближних
@@ -267,6 +369,7 @@ export function createRagdoll() {
       }
       asleep = false;
       sleepFrames = 0;
+      stopEase();
     },
     // толчок всему телу: прибавка скорости (vx, vy, vz) м/с каждой частице (полёт целиком)
     push(vx, vy, vz) {
@@ -278,21 +381,42 @@ export function createRagdoll() {
       }
       asleep = false;
       sleepFrames = 0;
+      stopEase();
     },
     // толкнуть одну частицу (подёргивания)
+    // погасить скорость всех точек до доли k (0 — стоп): тяжёлый лёг и не катится
+    setSlip(on) {
+      slip = Boolean(on);
+    },
+    damp(k) {
+      for (let i = 0; i < COUNT * 3; i += 1) prev[i] = pos[i] - (pos[i] - prev[i]) * k;
+    },
     nudge(i, dx, dy, dz) {
       const j = i * 3;
       prev[j] -= dx * SUBSTEP;
       prev[j + 1] -= dy * SUBSTEP;
       prev[j + 2] -= dz * SUBSTEP;
       asleep = false;
+      stopEase();
     },
     step(dt, ground) {
       hits.impact = 0;
       hits.slide = 0;
       if (asleep) return;
+      if (easeT >= 0) {
+        // плавно ложится (rest): без физики, поза та же, скорость нулевая
+        easeT += dt;
+        const u = Math.min(1, easeT / easeDur);
+        const k = u * u * (3 - 2 * u);
+        for (let i = 0; i < COUNT * 3; i += 1) prev[i] = pos[i] = easeFrom[i] + (easeTo[i] - easeFrom[i]) * k;
+        if (u >= 1) {
+          easeT = -1;
+          asleep = true;
+        }
+        return;
+      }
       // копится сценовое время (замедление/ускорение, world-clock.js): подшаг мира до 0,05 с = до 6 шагов
-      accumulator = Math.min(accumulator + dt, SUBSTEP * 7);
+      accumulator = Math.min(accumulator + dt, Math.max(SUBSTEP * 7, dt + SUBSTEP)); // ×32/×64: подшаг до 0,2 с — без потерь
       while (accumulator >= SUBSTEP) {
         accumulator -= SUBSTEP;
         const moved = substep(ground);

@@ -178,7 +178,7 @@ export function createRobodog({ THREE, root, camera, renderer = null, shooting, 
           run.rag = null;
           run.dog = spawnDog();
           unit.spawn(run.dog, { health: HEALTH });
-        }
+        } else if (run.deadLeft < 1.3 && unit.mode === 'dead') unit.setFade(1 - run.deadLeft / 1.3); // труп растворяется
       }
       unit.update(dt);
       if (run.mode === 'dying' && unit.mode === 'dead') run.mode = 'dead';

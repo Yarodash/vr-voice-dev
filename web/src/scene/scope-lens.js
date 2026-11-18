@@ -26,6 +26,9 @@
 // - В объектив не попадает сам прибор (hideObject) и всё, что висит на камере (HUD). Обёртки
 //   scene.onBeforeRender / onAfterRender (fps.js, ipd-panel.js) на время прохода снимаются.
 //   Телеметрия: раз в 5 с строка [scope] в консоли; lens.debug() — данные для scope-debug.js.
+// - Два режима (shared.scopeMode, меню «Прицел: аркадный / реалистичный»): 'arcade' (по умолчанию) — то,
+//   что описано выше; 'realistic' — настоящая оптика (см. EXIT_OBJ_R и ниже). Переключение — uniform
+//   realistic, шейдер не перекомпилируется.
 //
 // Использование:
 //   const lens = createScopeLens({ THREE, renderer, scene, camera });
@@ -54,6 +57,20 @@ export const FIELD_FILL = 1.12; // видимый круг поля шире, ч
 export const VIGNETTE_START = 0.62; // с какой доли радиуса поля начинается затемнение
 export const VIGNETTE_DARK = 0.5; // яркость на самом краю поля
 export const CHROMA = 0.04; // хроматическая аберрация на краю поля (доля радиуса), 0 — выключить (было 0.012; пользователь: «в прицеле — сильная»)
+// «Реалистичный» прицел (Настройки ▸ «Прицел: аркадный / реалистичный», shared.scopeMode, 'scene.scopeMode').
+// Аркадный — всё, что выше, без изменений. Реалистичный — смещение глаза по физике (×1, не EYE_SHIFT) и
+// настоящий выходной зрачок вместо «прощающего» (PUPIL_*, TILT_END): луч стекло → глаз должен пройти
+// сквозь диск выходного зрачка (радиус EXIT_OBJ_R / кратность) на плоскости выноса; зрачок глаза
+// (EYE_PUPIL_R) даёт мягкий край. Сбоку — чёрный серп с края, далеко/близко — круг меньше, мимо — темно.
+export const EXIT_OBJ_R = 0.021; // радиус объектива «как у настоящего» (42 мм), м: выходной зрачок = он / кратность
+export const EYE_PUPIL_R = 0.0035; // зрачок глаза, м — мягкость края тени
+export const BARREL = 0.16; // бочка: к краю поля видно на столько больше мира (выпуклость, спад увеличения)
+export const CHROMA2 = 0.075; // хроматическая аберрация на краю (реалистичный)
+export const VIGNETTE2_START = 0.45; // виньетка режима 2: темнее и раньше
+export const VIGNETTE2_DARK = 0.3;
+export const EDGE_SOFT = 0.35; // к краю поля — блеклее (мягкий край: меньше цвета и контраста)
+export const PARALLAX_K = 7; // сетка уезжает от изображения: доля поля на метр смещения глаза
+export const CURVE = 0.55; // выпуклость стекла для бликов (наклон нормали на краю)
 export const SIZE = 512; // текстура изображения (на глаз), пикселей по стороне
 export const SAMPLES = 4; // MSAA текстуры
 export const EYES = 2; // текстур (глаз) на прицел
@@ -66,11 +83,15 @@ const vertexShader = /* glsl */ `
   varying vec3 vEye;
   varying vec3 vWP;
   varying vec3 vWN;
+  varying vec3 vWX; // оси диска в мире (реалистичный: выпуклая нормаль)
+  varying vec3 vWY;
   void main() {
     vPos = position.xy;
     vEye = (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz; // глаз в системе диска
     vWP = (modelMatrix * vec4(position, 1.0)).xyz;
     vWN = normalize(mat3(modelMatrix) * vec3(0.0, 0.0, 1.0));
+    vWX = normalize(mat3(modelMatrix) * vec3(1.0, 0.0, 0.0));
+    vWY = normalize(mat3(modelMatrix) * vec3(0.0, 1.0, 0.0));
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -91,10 +112,14 @@ const fragmentShader = /* glsl */ `
   uniform float reticle;   // 1 — сетка видна
   uniform float lensR;
   uniform float worldScale; // масштаб прибора в мире (gun-resize.js): поле и вынос — по настоящему расстоянию глаза
+  uniform float realistic; // 1 — реалистичный прицел, 0 — аркадный
+  uniform float exitR;     // реалистичный: радиус выходного зрачка, м
   varying vec2 vPos;
   varying vec3 vEye;
   varying vec3 vWP;
   varying vec3 vWN;
+  varying vec3 vWX;
+  varying vec3 vWY;
 
   float bar(float d, float w) {
     float aa = fwidth(d) * 1.2;
@@ -119,7 +144,8 @@ const fragmentShader = /* glsl */ `
   }
 
   void main() {
-    vec3 E = vec3(vEye.xy * EYE_SHIFT, vEye.z); // смещение глаза вбок — с множителем EYE_SHIFT
+    bool real = realistic > 0.5; // реалистичный; ветвление по uniform — без перекомпиляции
+    vec3 E = vec3(vEye.xy * (real ? 1.0 : EYE_SHIFT), vEye.z); // смещение глаза вбок — с множителем EYE_SHIFT (реалистичный — по физике)
     float ez = max(E.z, 1e-3);
     vec2 tanD = (vPos - E.xy) / ez;               // направление глаз → точка стекла
     vec2 q = tanD / (tanA * worldScale);          // в долях поля; сетка — в q = 0 (ось прицела)
@@ -130,14 +156,27 @@ const fragmentShader = /* glsl */ `
 
     // изображение «на бесконечности»: мировое направление tanD / M
     float ca = CHROMA * r * r;
-    vec2 uvG = toUv(normalize(vec3(tanD / mag, -1.0)), b);
-    vec2 uvR = toUv(normalize(vec3(tanD * (1.0 + ca) / mag, -1.0)), b);
-    vec2 uvB = toUv(normalize(vec3(tanD * (1.0 - ca) / mag, -1.0)), b);
+    vec2 tanS = tanD;                             // по какому направлению брать цвет
+    vec2 qr = q;                                  // где сетка
+    if (real) {
+      tanS = tanD * (1.0 + BARREL * r * r);       // бочка: выпуклое стекло, к краю увеличение меньше
+      ca = CHROMA2 * r * r;
+      qr = q + vEye.xy * worldScale * PARALLAX_K; // параллакс: сетка чуть уезжает от изображения
+    }
+    vec2 uvG = toUv(normalize(vec3(tanS / mag, -1.0)), b);
+    vec2 uvR = toUv(normalize(vec3(tanS * (1.0 + ca) / mag, -1.0)), b);
+    vec2 uvB = toUv(normalize(vec3(tanS * (1.0 - ca) / mag, -1.0)), b);
     vec3 img = vec3(tex(b, clamp(uvR, 0.0, 1.0)).r, tex(b, clamp(uvG, 0.0, 1.0)).g, tex(b, clamp(uvB, 0.0, 1.0)).b);
     vec2 inside = step(vec2(0.0), uvG) * step(uvG, vec2(1.0));
     img *= inside.x * inside.y;
-    img *= mix(1.0, VIGNETTE_DARK, smoothstep(VIGNETTE_START, 1.0, r));
+    if (real) {
+      img = mix(img, vec3(dot(img, vec3(0.299, 0.587, 0.114))), EDGE_SOFT * smoothstep(0.55, 1.0, r));
+      img *= mix(1.0, VIGNETTE2_DARK, smoothstep(VIGNETTE2_START, 1.0, r));
+    } else {
+      img *= mix(1.0, VIGNETTE_DARK, smoothstep(VIGNETTE_START, 1.0, r));
+    }
     if (reticle > 0.5) {
+      vec2 q = qr;
 #ifdef RETICLE_PSO
       float px = fwidth(q.x) * 1.2;
       float w = 0.0055;
@@ -161,23 +200,44 @@ const fragmentShader = /* glsl */ `
     }
 
     // выходной зрачок: яркий круг, уезжает от стороны смещения глаза, к TILT_END — со стекла
-    float rp = mix(1.05, PUPIL_FAR_FRAC, smoothstep(eyeRelief + 0.03, PUPIL_FAR_M, ez * worldScale));
-    vec2 side = tilt > 1e-5 ? tv / tilt : vec2(0.0);
-    float tt = clamp(tilt / TILT_END, 0.0, 1.0);
-    vec2 pc = -side * (1.0 + rp) * tt * sqrt(tt);
-    float pupil = 1.0 - smoothstep(rp - 0.08, rp + 0.03, length(vPos / lensR - pc));
-    float field = 1.0 - smoothstep(0.94, 1.0, r);
-    float see = live * pupil * field * step(0.0, E.z);
+    float see;
+    vec2 pl = vPos / lensR;                       // точка на стекле в долях радиуса
+    float rim = smoothstep(0.86, 1.0, length(pl)); // реалистичный: тёмное кольцо — внутренность трубы
+    if (real) {
+      // реалистичный: луч стекло → глаз пересекает плоскость выноса в L (м); виден, если L в выходном зрачке
+      float k = eyeRelief / (ez * worldScale);
+      vec2 L = (vPos * (1.0 - k) + vEye.xy * k) * worldScale;
+      float pupil = 1.0 - smoothstep(exitR - EYE_PUPIL_R, exitR + EYE_PUPIL_R, length(L));
+      float field = 1.0 - smoothstep(0.86, 1.0, r); // полевая диафрагма — край мягче
+      see = live * pupil * field * (1.0 - rim) * step(0.0, E.z);
+    } else {
+      float rp = mix(1.05, PUPIL_FAR_FRAC, smoothstep(eyeRelief + 0.03, PUPIL_FAR_M, ez * worldScale));
+      vec2 side = tilt > 1e-5 ? tv / tilt : vec2(0.0);
+      float tt = clamp(tilt / TILT_END, 0.0, 1.0);
+      vec2 pc = -side * (1.0 + rp) * tt * sqrt(tt);
+      float pupil = 1.0 - smoothstep(rp - 0.08, rp + 0.03, length(vPos / lensR - pc));
+      float field = 1.0 - smoothstep(0.94, 1.0, r);
+      see = live * pupil * field * step(0.0, E.z);
+    }
 
     // стекло: почти чёрное с просветлением и отражением неба (френель)
     vec3 V = normalize(cameraPosition - vWP);
     vec3 N = normalize(vWN);
+    if (real) N = normalize(N + (vWX * pl.x + vWY * pl.y) * CURVE); // выпуклое стекло
     vec3 R = reflect(-V, N);
     vec3 sky = mix(vec3(0.05, 0.045, 0.04), mix(vec3(0.42, 0.28, 0.36), vec3(0.18, 0.18, 0.38), smoothstep(0.1, 0.7, R.y)), smoothstep(-0.05, 0.08, R.y));
     float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(V, N), 0.0, 1.0), 5.0);
     float sheen = smoothstep(0.35, 0.0, length(vPos / lensR - vec2(-0.35, 0.4)));
     vec3 glass = vec3(0.012, 0.014, 0.02) + sky * (0.1 + 0.6 * fres) + vec3(0.03, 0.05, 0.04) * sheen;
-    gl_FragColor = vec4(img * see + glass * (1.0 - see) + sky * fres * 0.15 * see, 1.0);
+    if (real) {
+      // тень — почти чёрная; поверх — отражение неба и блик солнца на выпуклом стекле; край — труба
+      float spec = pow(max(dot(R, normalize(vec3(0.35, 0.85, 0.4))), 0.0), 70.0);
+      vec3 col = img * see + glass * 0.3 * (1.0 - see) + sky * fres * 0.3 + vec3(0.9, 0.95, 1.0) * spec * 0.45;
+      col = mix(col, vec3(0.008, 0.008, 0.01) + sky * fres * 0.1, rim);
+      gl_FragColor = vec4(col, 1.0);
+    } else {
+      gl_FragColor = vec4(img * see + glass * (1.0 - see) + sky * fres * 0.15 * see, 1.0);
+    }
   }
 `;
 
@@ -185,6 +245,7 @@ export function createScopeLens({
   THREE, renderer, scene, camera,
   magnification = MAGNIFICATION, lensR = LENS_R, tanApparent = TAN_APPARENT, eyeRelief = EYE_RELIEF,
   size = SIZE, reticleStyle = 'duplex',
+  eyeOnly = -1, // 0 | 1 — в шлеме стекло считает только этот глаз (бинокль: окуляр — для глаза за ним); −1 — оба
 }) {
   const shared = (globalThis.__sceneState ??= {});
   tanApparent *= FIELD_FILL;
@@ -223,6 +284,8 @@ export function createScopeLens({
       reticle: { value: 1 },
       lensR: { value: lensR },
       worldScale: { value: 1 },
+      realistic: { value: 0 },
+      exitR: { value: EXIT_OBJ_R / mag },
     },
     vertexShader,
     fragmentShader,
@@ -234,6 +297,14 @@ export function createScopeLens({
       VIGNETTE_START: VIGNETTE_START.toFixed(3),
       VIGNETTE_DARK: VIGNETTE_DARK.toFixed(3),
       CHROMA: CHROMA.toFixed(4),
+      EYE_PUPIL_R: EYE_PUPIL_R.toFixed(5),
+      BARREL: BARREL.toFixed(4),
+      CHROMA2: CHROMA2.toFixed(4),
+      VIGNETTE2_START: VIGNETTE2_START.toFixed(3),
+      VIGNETTE2_DARK: VIGNETTE2_DARK.toFixed(3),
+      EDGE_SOFT: EDGE_SOFT.toFixed(3),
+      PARALLAX_K: PARALLAX_K.toFixed(3),
+      CURVE: CURVE.toFixed(3),
       ...(reticleStyle === 'pso' ? { RETICLE_PSO: '' } : {}),
     },
     toneMapped: false,
@@ -266,6 +337,14 @@ export function createScopeLens({
   // расстоянию глаза. Так увеличенный прицел заполняет своё стекло с того же расстояния, что ×1, а не
   // только с отодвинутого в s раз; каждый кадр из matrixWorld окуляра (collectEyes).
   let worldScale = 1;
+  // реалистичный режим (shared.scopeMode === 'realistic', main.js «Прицел: аркадный / реалистичный»):
+  // читается в начале каждого update
+  let real = false;
+  const syncMode = () => {
+    real = shared.scopeMode === 'realistic';
+    lensMaterial.uniforms.realistic.value = real ? 1 : 0;
+    lensMaterial.uniforms.exitR.value = EXIT_OBJ_R / mag;
+  };
   let statN = 0, statSum = 0, statMax = 0, statCalls = 0, statTris = 0, statAt = performance.now();
   const tiltEnd = Math.tan((TILT_END_DEG * Math.PI) / 180);
   const smooth = (a, b, x) => {
@@ -282,7 +361,12 @@ export function createScopeLens({
     if (ez < 0.005) return 0;
     const dist = out.length() * worldScale; // м в мире
     if (dist > MAX_VIEW_M) return 0;
-    if ((Math.hypot(out.x, out.y) * EYE_SHIFT) / ez >= tiltEnd) return 0;
+    if (real) {
+      // реалистичный: хоть одна точка стекла видна сквозь выходной зрачок (как в шейдере)? Нет — не рисовать
+      const k = eyeRelief / (ez * worldScale);
+      const near = (Math.hypot(out.x, out.y) * k - Math.abs(1 - k) * lensR) * worldScale;
+      if (near >= EXIT_OBJ_R / mag + EYE_PUPIL_R) return 0;
+    } else if ((Math.hypot(out.x, out.y) * EYE_SHIFT) / ez >= tiltEnd) return 0;
     lastDist = Math.min(lastDist, dist);
     return 1 - smooth(MAX_VIEW_M - VIEW_FADE_M, MAX_VIEW_M, dist);
   };
@@ -299,6 +383,10 @@ export function createScopeLens({
   // и половина угла камеры под видимое из глаза стекло (с запасом, не шире двойного поля): в out.x/y/z
   const aimOf = (eyeL, out) => {
     const ez = Math.max(eyeL.z, 0.01);
+    if (real) { // реалистичный: смещение глаза по физике, угол шире на бочку
+      return out.set(-eyeL.x / ez / mag, -eyeL.y / ez / mag,
+        Math.max(1e-4, Math.min((COVER * (1 + BARREL) * lensR) / ez / mag, (2 * tanApparent * worldScale) / mag)));
+    }
     return out.set((-eyeL.x * EYE_SHIFT) / ez / mag, (-eyeL.y * EYE_SHIFT) / ez / mag,
       Math.max(1e-4, Math.min((COVER * lensR) / ez / mag, (2 * tanApparent * worldScale) / mag)));
   };
@@ -378,6 +466,7 @@ export function createScopeLens({
     if (renderer.xr.isPresenting) {
       const eyes = renderer.xr.getCamera().cameras;
       for (let i = 0; i < Math.min(eyes.length, EYES); i += 1) {
+        if (eyeOnly >= 0 && i !== eyeOnly) continue;
         if (inView(eyes[i])) seen[i].fade = eyeSees(eyeWorld.setFromMatrixPosition(eyes[i].matrixWorld), seen[i].local);
       }
     } else {
@@ -420,6 +509,7 @@ export function createScopeLens({
     },
     // для npm run vr:eval: нарисовать текстуру глаза 0 для глаза на выносе на оси, вернуть мс
     debugRender(hideObject = null) {
+      syncMode();
       eyepiece.updateWorldMatrix(true, false);
       renderEye(0, eyeLocal.set(0, 0, eyeRelief), hideObject);
       bindEye(0, 0);
@@ -429,6 +519,7 @@ export function createScopeLens({
     // Каждый кадр, в конце update сцены. active — можно ли смотреть; hideObject — группа прибора
     // (не должна попасть в свой объектив). Возвращает true, если изображение есть.
     update(active, hideObject = null) {
+      syncMode();
       const fade = active ? collectEyes() : 0;
       const live = fade > 0.002;
       if (live) {

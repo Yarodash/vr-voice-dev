@@ -282,23 +282,24 @@ export function createSmoke({ THREE, group }) {
       perpA.normalize();
       perpB.copy(dirN).cross(perpA);
       const { x, y, z } = position;
+      // (пользователь: «поменьше дыма в начале выстрела» — клубов вдвое меньше, они вдвое прозрачнее)
       // струя вперёд: быстро гасит скорость и распускается
-      for (let k = 0; k < 4; k += 1) {
+      for (let k = 0; k < 2; k += 1) {
         const s = random(2.2, 5.5);
         const j = 0.18;
         emit(
           x + dirN.x * 0.01, y + dirN.y * 0.01, z + dirN.z * 0.01,
           (dirN.x + random(-j, j)) * s, (dirN.y + random(-j, j)) * s, (dirN.z + random(-j, j)) * s,
-          set(random(2.4, 3.4), 0.015, random(0.12, 0.2), random(0.32, 0.45), random(7, 10), random(0.06, 0.13), 0.09),
+          set(random(2.4, 3.4), 0.015, random(0.12, 0.2), random(0.16, 0.22), random(7, 10), random(0.06, 0.13), 0.09),
         );
       }
       // плотное ядро у самого дула
-      for (let k = 0; k < 4; k += 1) {
+      for (let k = 0; k < 2; k += 1) {
         const s = random(0.4, 1.4);
         emit(
           x, y, z,
           dirN.x * s + random(-0.15, 0.15), dirN.y * s + random(-0.1, 0.2), dirN.z * s + random(-0.15, 0.15),
-          set(random(2.2, 3.0), 0.012, random(0.08, 0.13), random(0.45, 0.6), random(5, 7), random(0.08, 0.15), 0.07),
+          set(random(2.2, 3.0), 0.012, random(0.08, 0.13), random(0.22, 0.3), random(5, 7), random(0.08, 0.15), 0.07),
         );
       }
       // кольцо газов вокруг дула
@@ -311,7 +312,7 @@ export function createSmoke({ THREE, group }) {
           perpA.x * ca + perpB.x * sa + dirN.x * 0.5,
           perpA.y * ca + perpB.y * sa + dirN.y * 0.5,
           perpA.z * ca + perpB.z * sa + dirN.z * 0.5,
-          set(random(1.4, 2.0), 0.008, random(0.045, 0.07), 0.35, 6, 0.1, 0.07),
+          set(random(1.4, 2.0), 0.008, random(0.045, 0.07), 0.18, 6, 0.1, 0.07),
         );
       }
       heat = Math.min(5, heat + 1);

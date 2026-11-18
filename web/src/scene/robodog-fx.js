@@ -12,7 +12,7 @@ const SPARK_CAP = 140; // большая битва: общий бюджет и�
 const ARC_CAP = 14;
 const SEG = 8; // отрезков в дуге
 const FLASH_CAP = 10;
-const BOLT_CAP = 24; // пули пулемётов на спинах псов: красно-оранжевые трассеры, летят прямо
+const BOLT_CAP = 48; // пули пулемётов на спинах псов: красно-оранжевые трассеры, летят прямо
 const CAP = SPARK_CAP + ARC_CAP * SEG * 2 + FLASH_CAP * 3 + BOLT_CAP * 2;
 
 export function createZapFx({ THREE, root, anchors }) {
@@ -188,7 +188,7 @@ export function createZapFx({ THREE, root, anchors }) {
       return sparkCount + arcCount + flashCount + boltCount;
     },
     update(dt) {
-      const h = Math.min(dt, 0.05);
+      const h = Math.min(dt, 0.25); // ×32/×64: стая и коптеры зовут раз в кадр за всё накопленное (world-clock.js)
       n = 0;
       // искры: гравитация, сопротивление воздуха; чёрточка вдоль скорости
       for (let i = sparkCount - 1; i >= 0; i -= 1) {

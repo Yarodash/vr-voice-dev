@@ -15,7 +15,7 @@
 import { audioBudget, npcOut } from './audio-budget.js';
 
 const BAKE_VERSION = 2;
-const POOL_VERSION = 2; // 2: голоса — в npcBus (шина мира), звуки спрашивают audio-budget.js
+const POOL_VERSION = 4; // 4: позиции — .value; 3: 3: разрывы и свист — equalpower (HRTF перегружал аудиопоток); 2: голоса — в npcBus (шина мира), звуки спрашивают audio-budget.js
 const BOOMS = 6;
 const WHISTLES = 4;
 const THUMPS = 3;
@@ -228,8 +228,9 @@ const voicesFor = (shared, g) => {
     master: g.master,
     bus,
     context: c,
-    boom: make(BOOMS, 'HRTF', 30, 0.35),
-    whistle: make(WHISTLES, 'HRTF', 35, 0.08),
+    // equalpower: HRTF-панорамы мира в бою перегружали аудиопоток Quest (выход глох целиком)
+    boom: make(BOOMS, 'equalpower', 30, 0.35),
+    whistle: make(WHISTLES, 'equalpower', 35, 0.08),
     thump: make(THUMPS, 'equalpower', 80, 0.45),
   });
 };
@@ -245,11 +246,12 @@ export function createArtillerySound(shared) {
     if (bank?.key !== `${BAKE_VERSION}|${c.sampleRate}`) bank = bake(shared, c);
     return g;
   };
-  const setPos = (p, x, y, z, at) => {
+  // .value, не setValueAtTime: автоматизация позиции переводит панораму в дорогой посэмпловый режим
+  const setPos = (p, x, y, z) => {
     if (p.positionX) {
-      p.positionX.setValueAtTime(x, at);
-      p.positionY.setValueAtTime(y, at);
-      p.positionZ.setValueAtTime(z, at);
+      p.positionX.value = x;
+      p.positionY.value = y;
+      p.positionZ.value = z;
     } else p.setPosition(x, y, z);
   };
 

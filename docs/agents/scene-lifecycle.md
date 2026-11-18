@@ -187,7 +187,18 @@ Reload vs swap: weapons "in hand" survive only a swap (`pistols.restore()` uses
   dropped, not caught up: the world runs slower than asked, and fps.js prints the honest speed
   (`×17/64` = 17 achieved of 64 asked). Ceiling 0.4 s of world per frame (×29 at 72 Hz); in a
   heavy horde battle on Quest ~×4–8 (one `horde.update` ≈ 3–5 ms). Handle: `__sceneState.worldClock`
-  (`n, sub, total, wanted, costMs`).
+  (`n, sub, total, wanted, costMs, fast, last, step`).
+- **Fast mode (×32, ×64; `clock.fast`)**: the user trades fps for real speed. Substep `clock.step`
+  0.1 s (×32) / 0.2 s (×64), world budget 30 / 48 ms per frame (15–25 fps, screen 72 Hz), and a hard
+  cut after 80 ms (`worldClock.cut`, the rest is given back to the clock). Systems in the world loop
+  must accept `dt` up to `MAX_STEP_S` (0.2) in fast mode (horde, drones, bullets, tracers, ragdoll
+  accumulator); small ones get `fine` slices ≤ `STEP_S` (car, casings, clays, single robodog).
+  **`clock.last`** (`shared.worldClock.last`) is false on all but the last substep of a frame: there
+  do logic only — horde skips gait/pose of alive dogs (body still `follow()`s; jumping dogs pose every
+  substep), instance buffers and sparks; drones skip `draw`, sparks and hum; visuals run once on the
+  last substep with the accumulated dt (`fxAcc`). Horde ragdoll budget is `RAGDOLL_FAST` (1). Normal
+  speed (`fast` false) takes exactly the old path. Per-system cost: `globalThis.__prof = { world: {}, sub: {} }`
+  from `vr:eval`, read it back and set it to `null` (main.js world loop, horde `PS`).
 - Called `clock.n` times with `clock.sub`: `carDrive.update` (car), `casings.update`, and the world
   block `shooting.update` (bullets, targets, smoke, tracers, impacts, mana), `clays.update`,
   `robodog.update`, `horde.update`, `drones.update`, `artillery.update`. Once with `dt = clock.total`: `world.update`

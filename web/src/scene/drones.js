@@ -38,11 +38,15 @@ import { createDroneSound, BURST_GAP } from './drone-sound.js';
 import { createZapFx } from './robodog-fx.js';
 import { ensureWeaponEnv } from './weapon-env.js';
 import { groundHeight } from './car.js';
+import { MAX_STEP_S } from './world-clock.js';
+import { battleSeconds, droneSizeWeights, dronesAllowed, pickWeighted } from './progression.js';
 
 const PROGRAM_KEY = 'drone-inst-1';
 const MAX = 44; // коптеров всего (живые, падающие, обломки)
 // стороны наравне и в воздухе, и на земле (по просьбе пользователя): живых у каждой не больше TEAM_MAX
 const TEAM_MAX = 20;
+// сколько пуль игрока сбивает коптер по размеру (маленький, средний, большой, огромный) — по просьбе
+const PLAYER_SHOTS = [1, 2, 4, 6];
 // Размеры. span — размах, м; kind — корпус; hp — [от, до]; speed, acc — м/с, м/с²; alt — высота над
 // землёй; R — радиус круга вокруг цели; range — дальность стрельбы; rounds — выстрелов в очереди;
 // cd — пауза между очередями, с; spread — разброс, рад (σ); dmg — урон псу/коптеру за пулю; tilt —
@@ -229,11 +233,16 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       smoke: kind(geo.puff.clone(), smokeMat, SMOKE_CAP, 'drones-smoke', { color: true, alpha: true, order: 3 }),
     };
     geo.puff.dispose(); // клоны у огня и дыма; у огней — свой
+    // тени по солнцу (sun-shadows.js): корпуса и пушки коптеров — отбрасыватели
+    const sunShadows = globalThis.__sceneState?.sunShadows ?? null;
+    const casters = [kinds.light.mesh, kinds.heavy.mesh];
+    for (const mesh of casters) sunShadows?.addCaster(mesh, { cascades: 'far' }); // высоко: тени далеко
     return {
       meshes,
       kinds,
       list: Object.values(kinds),
       dispose() {
+        for (const mesh of casters) sunShadows?.removeCaster(mesh);
         for (const mesh of meshes) {
           mesh.removeFromParent();
           mesh.geometry.dispose();
@@ -461,15 +470,58 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     out.copy(t.bodyCenter);
     return true;
   };
+  // Приоритеты целей по размеру (по просьбе пользователя), и у свободных, и у сопровождения (у них — в
+  // радиусе стаи). Ярус 0 — главнее; внутри яруса — ближайший:
+  //   большой/огромный коптер: 0 крупные псы (≥ BIG_DOG) → 1 мелкие псы → 2 остальное (коптеры, игрок);
+  //   маленький/средний: 0 крупные коптеры → 1 мелкие коптеры → 2 мелкие псы → 3 остальное (крупные псы, игрок).
+  // Липкость: прежнюю цель держит, пока новая не выше ярусом или (в том же ярусе) не заметно ближе.
+  const BIG_DOG = 2.5; // масштаб пса: «большой» и крупнее (бьют лапой)
+  const BIG_DRONE = 2; // SIZES: «большой», «огромный»
+  const tierOf = (big, t) => {
+    if (t === 'player') return big ? 2 : 3;
+    if (t.isDrone) return big ? 2 : t.size >= BIG_DRONE ? 0 : 1;
+    const bigDog = t.scale >= BIG_DOG;
+    if (big) return bigDog ? 0 : 1;
+    return bigDog ? 3 : 2;
+  };
+  // выбор: consider(цель, взвешенное расстояние) — без выделений памяти
+  let selBig = false;
+  let selBest = null;
+  let selD = Infinity;
+  let selT = 9;
+  const selStart = (d) => {
+    selBig = d.size >= BIG_DRONE;
+    selBest = null;
+    selD = Infinity;
+    selT = 9;
+  };
+  const consider = (t, dd) => {
+    const tier = tierOf(selBig, t);
+    if (tier < selT || (tier === selT && dd < selD)) {
+      selBest = t;
+      selD = dd;
+      selT = tier;
+    }
+  };
+  // прежняя цель (ещё в досягаемости, cd — её взвешенное расстояние) остаётся, если новая не выше ярусом
+  // и не ближе на четверть в том же ярусе
+  const keepCurrent = (cur, cd) => {
+    if (cur === selBest) return;
+    const ct = tierOf(selBig, cur);
+    if (ct < selT || (ct === selT && selD > 0.75 * cd)) {
+      selBest = cur;
+      selD = cd;
+      selT = ct;
+    }
+  };
   const pickTarget = (d, units) => {
     const ally = d.team === 'ally';
     let cur = d.target;
     if (cur && !targetAlive(cur)) cur = d.target = null;
-    let best = null;
-    let bestD = SEARCH_M;
+    selStart(d);
     if (!ally) {
-      best = 'player';
-      bestD = Math.hypot(head.x - d.x, head.y - d.y, head.z - d.z) * 0.8; // игрок — чуть желаннее
+      const pd = Math.hypot(head.x - d.x, head.y - d.y, head.z - d.z) * 0.8; // игрок — чуть желаннее
+      if (pd < SEARCH_M) consider('player', pd);
     }
     if (units && (ally || shared.allies !== false)) {
       for (let i = 0; i < units.length; i += 1) {
@@ -477,26 +529,20 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
         if (!dogAlive(u) || (u.dog.team === 'ally') === ally) continue;
         const c = u.bodyCenter;
         const dd = Math.hypot(c.x - d.x, c.y - d.y, c.z - d.z);
-        if (dd < bestD) {
-          bestD = dd;
-          best = u;
-        }
+        if (dd < SEARCH_M) consider(u, dd);
       }
     }
     for (let i = 0; i < drones.length; i += 1) {
       const o = drones[i];
       if (o.state !== 'alive' || o.team === d.team) continue;
       const dd = Math.hypot(o.x - d.x, o.y - d.y, o.z - d.z) * 0.9; // по воздуху — чуть охотнее
-      if (dd < bestD) {
-        bestD = dd;
-        best = o;
-      }
+      if (dd < SEARCH_M) consider(o, dd);
     }
-    // липкость: прежнюю меняет, только если новая заметно ближе
-    if (cur && cur !== best && targetPos(cur, P)) {
-      const cd = Math.hypot(P.x - d.x, P.y - d.y, P.z - d.z);
-      if (bestD > 0.75 * cd) best = cur;
+    if (cur && targetPos(cur, P)) {
+      const cd = Math.hypot(P.x - d.x, P.y - d.y, P.z - d.z) * (cur === 'player' ? 0.8 : cur.isDrone ? 0.9 : 1);
+      if (cd < SEARCH_M) keepCurrent(cur, cd);
     }
+    const best = selBest;
     if (best !== d.target) {
       d.target = best;
       // новая цель — подлетает с ближней стороны
@@ -545,24 +591,17 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     const ally = d.team === 'ally';
     const cx = d.sqX;
     const cz = d.sqZ;
-    let best = null;
-    let bestD = ESCORT_SEEK;
+    selStart(d); // ярусы по размеру (tierOf), расстояние — от центра стаи
     if (!ally) {
       const pd = Math.hypot(head.x - cx, head.z - cz) * (d.sqP ? 0.6 : 1); // стая бежит на игрока — он желаннее
-      if (pd < bestD) {
-        bestD = pd;
-        best = 'player';
-      }
+      if (pd < ESCORT_SEEK) consider('player', pd);
     }
     if (units && (ally || shared.allies !== false)) {
       for (let i = 0; i < units.length; i += 1) {
         const u = units[i];
         if (!dogAlive(u) || (u.dog.team === 'ally') === ally) continue;
         const dd = Math.hypot(u.dog.x - cx, u.dog.z - cz);
-        if (dd < bestD) {
-          bestD = dd;
-          best = u;
-        }
+        if (dd < ESCORT_SEEK) consider(u, dd);
       }
     }
     for (let i = 0; i < drones.length; i += 1) {
@@ -571,17 +610,15 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       const h = Math.hypot(o.x - d.x, o.z - d.z);
       if (o.y - d.y > 0.36 * h) continue;
       const dd = Math.hypot(o.x - cx, o.z - cz) * 0.9;
-      if (dd < bestD) {
-        bestD = dd;
-        best = o;
-      }
+      if (dd < ESCORT_SEEK) consider(o, dd);
     }
-    // липкость: прежняя цель, пока она у стаи и новая не заметно ближе
+    // липкость: прежняя цель, пока она у стаи (и для коптера — в досягаемости подвеса)
     const cur = d.target;
-    if (cur && cur !== best && targetPos(cur, P)) {
-      const cd = Math.hypot(P.x - cx, P.z - cz) * (cur === 'player' && d.sqP ? 0.6 : 1);
-      if (cd < ESCORT_SEEK * 1.2 && bestD > 0.75 * cd) best = cur;
+    if (cur && targetPos(cur, P) && !(cur.isDrone && P.y - d.y > 0.36 * Math.hypot(P.x - d.x, P.z - d.z))) {
+      const cd = Math.hypot(P.x - cx, P.z - cz) * (cur === 'player' && d.sqP ? 0.6 : cur.isDrone ? 0.9 : 1);
+      if (cd < ESCORT_SEEK * 1.2) keepCurrent(cur, cd);
     }
+    const best = selBest;
     d.target = best;
     squadMarks[d.squad] = best;
   };
@@ -653,7 +690,9 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
 
   // ---------------------------------------------------------------- урон
   let clankAt = 0;
-  const kill = (d, dir) => {
+  let ownClankAt = 0; // звон от пули игрока — свой темп: чужие попадания (бой коптеров) его не съедают
+  // own — убила/попала пуля игрока: звук своими голосами, мимо бюджета мира (audio-budget.js)
+  const kill = (d, dir, own = false) => {
     d.state = 'dying';
     d.t = 0;
     d.shots = 0;
@@ -672,7 +711,7 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     fx.sparks(hitP, normal, 14 + 6 * d.size, { speed: [2, 6], spread: 1.4, hot: true, size: 0.8 + 0.4 * d.size });
     fx.flash(hitP, 0.15 + 0.25 * d.span, true);
     addPuff(fire, d.x, d.y, d.z, 0, 0.5, 0, 0.25 * d.span + 0.1, 0.8 * d.span + 0.3, 0.25, 1);
-    sound.pop(hitP, d.size);
+    sound.pop(hitP, d.size, own);
     try {
       onKill?.(d);
     } catch {
@@ -680,7 +719,7 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     }
   };
   // попадание по коптеру d: урон dmg, точка point, направление dir
-  const damage = (d, dmg, point, dir) => {
+  const damage = (d, dmg, point, dir, own = false) => {
     if (d.state !== 'alive') return null;
     d.hp -= dmg;
     d.flash = 1;
@@ -688,16 +727,17 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     normal.copy(dir).negate();
     fx.sparks(point, normal, 6 + 2 * d.size, { speed: [1.5, 4], hot: true, size: 0.6 + 0.3 * d.size });
     const now = performance.now();
-    if (now - clankAt > 45) {
-      clankAt = now;
-      sound.clank(point, d.size);
+    if (own ? now - ownClankAt > 30 : now - clankAt > 45) {
+      if (own) ownClankAt = now;
+      else clankAt = now;
+      sound.clank(point, d.size, own);
     }
     // толчок
     d.vx += dir.x * (1.2 / d.span);
     d.vy += dir.y * (1.2 / d.span);
     d.vz += dir.z * (1.2 / d.span);
     if (d.hp <= 0) {
-      kill(d, dir);
+      kill(d, dir, own);
       return 'kill';
     }
     return 'hit';
@@ -1071,9 +1111,44 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       }
     }
   };
-  const pickSize = (team) => {
+  // Прогрессия боя (progression.js, по просьбе пользователя): в начале боя коптеров нет, потом маленькие,
+  // средние, большие, огромные. Нет shared.battleStartMs (стая не ведёт бой) — прогрессии нет, всё как
+  // было. Раз в кадр (update → progStep): prog.on, prog.t — игровые секунды боя, prog.cap — живых на
+  // сторону (TEAM_MAX × dronesAllowed), prog.escMax / prog.keep — то же для сопровождения.
+  // Уже летающие коптеры остаются.
+  const prog = { on: false, t: 0, allowed: 1, cap: TEAM_MAX, escMax: ESCORT_MAX, keep: ESCORT_KEEP };
+  const progStep = () => {
+    prog.on = shared.battleStartMs != null;
+    if (!prog.on) {
+      prog.allowed = 1;
+      prog.cap = TEAM_MAX;
+      prog.escMax = ESCORT_MAX;
+      prog.keep = ESCORT_KEEP;
+      return;
+    }
+    prog.t = battleSeconds(shared);
+    prog.allowed = dronesAllowed(prog.t);
+    prog.cap = Math.ceil(TEAM_MAX * prog.allowed);
+    prog.escMax = Math.ceil(ESCORT_MAX * prog.allowed);
+    prog.keep = Math.round(ESCORT_KEEP * prog.allowed);
+  };
+  const wBuf = [0, 0, 0, 0];
+  // размер нового коптера; −1 — пока никакой (прогрессия). smallOnly — сопровождение (маленький/средний)
+  const pickSize = (team, smallOnly = false) => {
     const ally = team === 'ally';
     const row = sizeAlive[ally ? 1 : 0];
+    if (prog.on) {
+      // своя копия: progression.js отдаёт свой массив стадии — его не портить
+      const src = droneSizeWeights(prog.t);
+      const w = wBuf;
+      for (let i = 0; i < 4; i += 1) w[i] = smallOnly && i > 1 ? 0 : src[i] ?? 0;
+      for (let tries = 0; tries < 4; tries += 1) {
+        const k = pickWeighted(w);
+        if (k < 0) return -1;
+        if (row[k] < (SIZES[k].maxAlive ?? 99)) return k;
+      }
+      return w[0] > 0 ? 0 : -1;
+    }
     // у обеих сторон одни веса и одни пределы крупных (maxAlive)
     for (let tries = 0; tries < 4; tries += 1) {
       let r = Math.random() * SIZE_WEIGHT;
@@ -1141,24 +1216,26 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     d.humJit = rand(-0.06, 0.06);
     d.blink = Math.random();
     d.squad = 0; // свободный (сопровождением делает makeEscort)
+    d.hold = 0; // «Сцена 4»: столько с висит в строю (standoff)
   };
   // волна: count коптеров кучкой (враги — спереди, союзники — сзади)
   const spawnWave = (team, count) => {
     camera.getWorldPosition(head);
     recount();
-    const cap = TEAM_MAX;
+    const cap = prog.cap; // TEAM_MAX, в начале боя меньше (прогрессия)
     const ally = team === 'ally';
     const a = (Math.random() * 2 - 1) * ((ally ? 40 : 35) * Math.PI) / 180;
     const dist = ally ? rand(35, 55) : rand(95, 130);
     const cx = head.x + Math.sin(a) * dist;
     const cz = ally ? head.z + Math.cos(a) * dist : head.z - Math.cos(a) * dist;
-    // свободным — не больше TEAM_MAX за вычетом мест сопровождения (сколько есть, но не меньше ESCORT_KEEP)
-    const freeCap = TEAM_MAX - Math.max(escorts[team], ESCORT_KEEP);
+    // свободным — не больше cap за вычетом мест сопровождения (сколько есть, но не меньше prog.keep)
+    const freeCap = cap - Math.max(escorts[team], prog.keep);
     let n = 0;
     for (let k = 0; k < count && counts[team] < cap && counts[team] - escorts[team] < freeCap; k += 1) {
+      const size = pickSize(team);
+      if (size < 0) break; // коптеров ещё нет
       const d = freeDrone();
       if (!d) break;
-      const size = pickSize(team);
       const s = SIZES[size];
       const x = cx + rand(-8, 8);
       const z = cz + rand(-8, 8);
@@ -1168,6 +1245,48 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       n += 1;
     }
     return n;
+  };
+  // «Сцена 4» (robodog-horde.js ставит shared.standoff = { id, yaw, hold }, когда псы встали строем): коптеры
+  // строем тем же фронтом — враги впереди (крупнее — дальше и выше), союзники позади; so.hold с висят
+  // на месте (без цели, не стреляют), потом в бой. Сколько — как свободных мест на сторону в бою
+  // (prog.cap − prog.keep: место сопровождению остаётся).
+  const STANDOFF_DEPTH = { enemy: [62, 78, 96, 118], ally: [16, 24, 34, 46] };
+  const STANDOFF_WIDTH = [30, 40, 50, 60]; // ± м вбок по размеру
+  const standoff = (so) => {
+    camera.getWorldPosition(head);
+    recount();
+    progStep();
+    const fx = Math.sin(so.yaw);
+    const fz = -Math.cos(so.yaw);
+    const n = { enemy: 0, ally: 0 };
+    for (const team of shared.allies === false ? ['enemy'] : ['enemy', 'ally']) {
+      const ally = team === 'ally';
+      const sign = ally ? -1 : 1;
+      const want = Math.max(0, prog.cap - prog.keep - counts[team]);
+      for (let k = 0; k < want; k += 1) {
+        const size = pickSize(team);
+        if (size < 0) break;
+        const d = freeDrone();
+        if (!d) break;
+        const s = SIZES[size];
+        const depth = (STANDOFF_DEPTH[team][size] + rand(-6, 6)) * sign;
+        const lat = rand(-1, 1) * STANDOFF_WIDTH[size];
+        const x = head.x + fx * depth - fz * lat;
+        const z = head.z + fz * depth + fx * lat;
+        place(d, team, size, x, groundHeight(x, z) + rand(s.alt[0], s.alt[1]), z);
+        d.vx = d.vz = 0;
+        d.yaw = d.gy = Math.atan2(fx * sign, fz * sign); // носом к другой армии
+        d.hold = so.hold;
+        d.angry = false;
+        sizeAlive[ally ? 1 : 0][size] += 1;
+        counts[team] += 1;
+        n[team] += 1;
+      }
+    }
+    // обычные волны — после схода
+    run.nextEnemy = so.hold + WAVE_GAP * 0.5;
+    run.nextAlly = so.hold + WAVE_GAP * 0.6;
+    console.log(`[drones] строем: враги ${n.enemy}, союзники ${n.ally}`);
   };
   // новая стая ev ({ id, team, n, x, z } из robodog-horde.js): 1–3 сопровождения — новые (прилетают из-за
   // стаи, от игрока дальше) или, если сторона полна, ближайшие свободные маленькие/средние
@@ -1180,11 +1299,13 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     const a0 = Math.random() * Math.PI * 2;
     const ally = team === 'ally';
     let made = 0;
-    for (let k = 0; k < want && escorts[team] < ESCORT_MAX; k += 1) {
-      let d = counts[team] < TEAM_MAX ? freeDrone() : null;
+    // прогрессия: до коптеров — без сопровождения; размеры — по весам боя (только маленький/средний)
+    for (let k = 0; k < want && escorts[team] < prog.escMax; k += 1) {
+      let size = pickSize(team, true);
+      if (size < 0) break;
+      if (size > 1) size = Math.random() < 0.55 ? 0 : 1; // без прогрессии веса общие
+      let d = counts[team] < prog.cap ? freeDrone() : null;
       if (d) {
-        let size = pickSize(team);
-        if (size > 1) size = Math.random() < 0.55 ? 0 : 1;
         // за стаей, от игрока дальше на 18–26 м, выше — снижается к стае
         const ox = ev.x - head.x;
         const oz = ev.z - head.z;
@@ -1243,12 +1364,15 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       // падающий или свой: искры и звон, без урона
       normal.copy(dir).negate();
       fx.sparks(hitP, normal, 5, { speed: [1, 3], hot: true, size: 0.6 + 0.3 * d.size });
-      sound.clank(hitP, d.size);
+      sound.clank(hitP, d.size, true); // пуля игрока — свой голос
       return null;
     }
-    // калибр: АВП — тяжёлый урон (огромному 2 выстрела)
-    const dmg = shared.shotKind === 'awp' ? 5 + Math.floor(d.hpMax / 4) : 1;
-    damage(d, dmg, hitP, dir);
+    // пуля игрока (по просьбе): маленький — с 1 выстрела, средний — с 2, большой — с 4, огромный — с 6
+    // (урон = доля HP, +ε против 6 × (20/6) < 20); АВП — тяжёлый урон (огромному 2 выстрела)
+    const dmg = shared.shotKind === 'awp' ? Math.max(5 + Math.floor(d.hpMax / 4), d.hpMax / PLAYER_SHOTS[d.size] + 1e-6) : d.hpMax / (PLAYER_SHOTS[d.size] ?? 1) + 1e-6;
+    const res = damage(d, dmg, hitP, dir, true); // пуля игрока: звон и хлопок — свои голоса, мимо бюджета мира
+    if (res === 'kill') shared.killConfirm?.drone(d); // пуля игрока: «клац» + хитмаркер
+    else if (res === 'hit') shared.killConfirm?.hitAt(hitP.x, hitP.y, hitP.z); // ранил: серый крестик + тик
     return true;
   }
   function shot() {
@@ -1284,7 +1408,7 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     drones = [];
     for (let i = 0; i < MAX; i += 1) drones.push(newDrone(i));
     // dogWave — номер последней волны псов, которую уже видели (старая из прошлого забега не считается)
-    run = shared.droneRun = { elapsed: 0, nextEnemy: FIRST_ENEMY, nextAlly: FIRST_ALLY, angry: false, drones, dogWave: shared.dogWave?.n };
+    run = shared.droneRun = { elapsed: 0, nextEnemy: FIRST_ENEMY, nextAlly: FIRST_ALLY, angry: false, drones, dogWave: shared.dogWave?.n, standoff: shared.standoff?.id };
   };
   const clearAll = () => {
     if (!drones) return;
@@ -1299,6 +1423,7 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
   shared.droneTargets = null;
 
   let frameNo = 0;
+  let fxAcc = 0; // ×32/×64: время мира, накопленное за промежуточные подшаги кадра (искры, гул)
   let sum = 0;
   let worst = 0;
   let frames = 0;
@@ -1412,7 +1537,11 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
         run.nextAlly = 6;
       }
       const t0 = performance.now();
-      dt = Math.min(dt, 0.05);
+      // ×32/×64 (world-clock.js): подшаг до MAX_STEP_S; рисовка, искры и гул — раз в кадр (последний подшаг)
+      const wc = shared.worldClock;
+      const fast = Boolean(wc?.fast);
+      const lazy = fast && !wc.last;
+      dt = Math.min(dt, fast ? MAX_STEP_S : 0.05);
       camera.getWorldPosition(head);
       camera.getWorldQuaternion(camQ);
       if (head.lengthSq() === 0) return;
@@ -1422,6 +1551,12 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
         return;
       }
       run.elapsed += dt;
+      progStep(); // прогрессия боя: сколько и каких коптеров уже можно
+      const so = shared.standoff; // «Сцена 4»: псы встали строем — коптеры тоже
+      if (so && so.id !== run.standoff) {
+        run.standoff = so.id;
+        standoff(so);
+      }
       // волны
       // волны: у обеих сторон одинаковые (WAVE_N раз в gap); волна псов стороны — большая волна её
       // коптеров (SURGE_N) сразу, обычная откладывается на полный gap
@@ -1468,7 +1603,14 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
           const dd = (d.x - head.x) ** 2 + (d.z - head.z) ** 2;
           const every = dd > LOD_FAR * LOD_FAR ? 4 : dd > LOD_NEAR * LOD_NEAR ? 2 : 1;
           d.lodAcc += dt;
-          if (every === 1 || (frameNo + i) % every === 0) {
+          if (d.hold > 0) {
+            // «Сцена 4»: висит в строю, без цели; время вышло — в бой
+            d.hold -= dt;
+            d.vx = d.vy = d.vz = d.ax = d.az = 0;
+            d.target = null;
+            d.lodAcc = 0;
+            if (d.hold <= 0) d.angry = true;
+          } else if (every === 1 || (frameNo + i) % every === 0) {
             steer(d, Math.min(0.15, d.lodAcc), units);
             d.lodAcc = 0;
           }
@@ -1496,9 +1638,13 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       if (pendingCount) stepHits(dt);
       stepPuffs(fire, dt, 1.2, 2.2);
       stepPuffs(smoke, dt, 0.5, 0.6);
-      draw();
-      fx.update(dt);
-      sound.update(head, drones, dt);
+      fxAcc += dt;
+      if (!lazy) {
+        draw();
+        fx.update(fxAcc);
+        sound.update(head, drones, fxAcc);
+        fxAcc = 0;
+      }
       if ((frameNo & 15) === 0) recount();
 
       const spent = performance.now() - t0;
@@ -1507,7 +1653,7 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       frames += 1;
       if (t0 - since >= LOG_EVERY_MS) {
         recount();
-        console.log(`[drones] cpu=${(sum / frames).toFixed(3)}/${worst.toFixed(2)}ms enemy=${counts.enemy}(esc ${escorts.enemy}) ally=${counts.ally}(esc ${escorts.ally}) fire=${fire.n} smoke=${smoke.n} fx=${fx.active} t=${run.elapsed.toFixed(0)}s`);
+        console.log(`[drones] cpu=${(sum / frames).toFixed(3)}/${worst.toFixed(2)}ms enemy=${counts.enemy}(esc ${escorts.enemy}) ally=${counts.ally}(esc ${escorts.ally}) fire=${fire.n} smoke=${smoke.n} fx=${fx.active} t=${run.elapsed.toFixed(0)}s${prog.on ? ` battle=${prog.t.toFixed(0)}s cap=${prog.cap}` : ''}`);
         sum = worst = frames = 0;
         since = t0;
       }
@@ -1516,7 +1662,7 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
       // с ПК (не в шлеме!): __sceneState.droneSystem.debug.spawn('enemy', 3) — волна сейчас
       spawn: (team = 'enemy', n = 3) => (active() ? spawnWave(team, n) : 0),
       list: () => drones?.filter((d) => d.state !== 'off').map((d) => ({ id: d.id, team: d.team, size: SIZES[d.size].name, state: d.state, hp: d.hp, x: +d.x.toFixed(1), y: +d.y.toFixed(1), z: +d.z.toFixed(1), target: d.target === 'player' ? 'player' : d.target?.isDrone ? `drone${d.target.id}` : d.target ? 'dog' : null, angry: d.angry, squad: d.squad || 0, ...(d.squad ? { packN: d.sqN, packX: +d.sqX.toFixed(1), packZ: +d.sqZ.toFixed(1), aboveGround: +(d.y - groundHeight(d.x, d.z)).toFixed(1), fromPack: +Math.hypot(d.x - d.sqX, d.z - d.sqZ).toFixed(1) } : {}) })),
-      info: () => run && { elapsed: +run.elapsed.toFixed(1), angry: run.angry, nextEnemy: +run.nextEnemy.toFixed(1), counts: (recount(), { ...counts }), escorts: { ...escorts }, marks: Object.keys(squadMarks).length, fire: fire.n, smoke: smoke.n, pending: pendingCount },
+      info: () => run && { elapsed: +run.elapsed.toFixed(1), angry: run.angry, nextEnemy: +run.nextEnemy.toFixed(1), counts: (recount(), { ...counts }), escorts: { ...escorts }, prog: { ...prog, t: +prog.t.toFixed(1), allowed: +prog.allowed.toFixed(2) }, marks: Object.keys(squadMarks).length, fire: fire.n, smoke: smoke.n, pending: pendingCount },
       kill: (id) => {
         const d = drones?.[id];
         if (d?.state === 'alive') kill(d, V2.set(0, 0, -1));

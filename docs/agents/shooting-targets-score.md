@@ -35,7 +35,7 @@ shooting.aim(muzzle|null, dir, range = 60, speed = 360) -> Vector3|null   // per
 shooting.autoAim(muzzle, dir, deg, speed, gravity?, projectile?) -> Vector3|null   // auto-aim shot direction (shared vector) into the best target of the deg° cone, ballistic + lead; null = nobody (recipes.md «Сгенерированная пушка», autoAim)
 // shoot() also takes { projectile: 'mana', color, gravity } — mana bolt (mana.js) instead of a bullet,
 //   and { homing: { delayS, turnDegS, gravity }, autoAimDeg } — homing projectile (recipes.md «Homing»)
-//   projectile 'rocket' | 'plasma' (pool bullet + arena-weapons.js FX/splash) | 'rail' (instant piercing railShot) — recipes.md «Arena projectiles»
+//   projectile 'rocket' | 'plasma' (pool bullet + arena-weapons.js FX/splash) | 'rail' (instant piercing railShot) — recipes.md «Arena projectiles»; a new type: recipes.md «Новый снаряд»
 // aimTargets(visit): visit(centre, vx, vy, vz, key) — key = stable target object (homing re-finds it each step)
 shooting.autoAimLock() -> { x, y, z, plate, deg, dist, ring } | null       // debug: last lock
 shooting.bullets() -> [{ age, speed, kind, x, y, z }]; shooting.aimedIndex()   // debug for vr:eval
@@ -112,7 +112,21 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   are drawn by `robodog-instances.js` (9 InstancedMeshes: body, eyes, upper/lower leg L/R, turret
   base/gun, shadow; per-instance paint `aPaintA/aPaintB` via `paintSlot` vertex attribute, hit
   flash `aEmissive`, shadow `aAlpha`; program key `robodog-inst-1`). Pool 64 rigs (grows 3/frame).
-  Sizes `SIZES` 1×…12× (+ titan 36× debug-only), packs of 3–8 that emerge from the ground, calm
+  Sizes `SIZES` 1×…12× (+ titan 36× debug-only); which size spawns is set by the battle stage
+  (`progression.js`, game time since `shared.battleStartMs`: stage weights [small, medium, big, huge],
+  «huge» split over огромный/гигантский/колоссальный 0.5/0.33/0.17 = `HUGE_SPLIT`, `pickSize`, both teams
+  alike; explicit spawns `hordeDebug.spawn(name)` / `debug.spawn(i)` ignore it). `horde.apply(on, { keep,
+  battleS })` sets `battleStartMs = sceneNowMs − battleS` on a new battle (Restart: 0; Continue / page
+  reload: `live.battleS`, written by main.js `scenes.snapshot()` rounded to 10 s); a hot swap keeps it;
+  horde off → `null` (drones then skip progression). Alive cap per side `teamCap()` = max(2,
+  round(TEAM_POOL × `dogsAllowed`)) = 8 / 16 / 28 / 40 by stage, same for both teams: `spawnPack` trims
+  `want` to it, wave size is ≤ cap − alive (a wave stops when the side hits the cap), `matchStep` goal ≤
+  cap; dogs above the cap (after a stage jump back) live on, they just aren't replaced; explicit
+  `hordeDebug.spawn` ignores it. Stage change (polled every horde update via
+  `stageOf(battleSeconds)`, so menu «Эпоха» jumps count too; `run.stage`, the first stage of a battle is
+  silent): `[battle] стадия N: <STAGE_NAMES>` in the console, horn far ahead (`horn.play`, pitch 1.05),
+  banner «Стадия: <name>» on the camera (canvas 512×128 redrawn only on change, 3.2 s real time,
+  `horde-stage-banner`). Packs of 3–8 that emerge from the ground, calm
   until the player's first shot, then enraged (red eyes). Allies (`dog.team = 'ally'`, green paint
   6 + green eyes, menu «Собаки ▸ Союзники», `shared.allies`, localStorage `scene.allies`) spawn
   behind and fight enemies; targets = nearest hostile with stickiness (`pickTarget`, `tp`).
@@ -154,8 +168,20 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   `horde.debug.force({ rear, rearReach, prowl, brake, look } | null)` (pose on all dogs), `dog.frozen = true`
   (stands still, takes the forced pose). Every 5th
   dog has a back turret (tracers = `fx.bolt`). Legs break (`legHit`, gait `cmd.broken`), 2nd
-  broken leg kills. Budgets: ≤ `RAGDOLL_MAX` simulating corpses (others `settle()` flat), update
-  LOD by distance (`LOD_NEAR`/`LOD_FAR`: pose every 2/4 frames), corpses sink sooner when busy.
+  broken leg kills. Budgets: ≤ `RAGDOLL_MAX` simulating corpses; over budget the CALMEST one (lowest
+  `ragdoll.motion()`) gets `unit.rest()`: near the ground it just sleeps in its pose, in the air the same
+  pose sinks rigidly to the ground over 0.3 s×√s (`ragdoll.rest`, `ragdoll.easing`), flying ones
+  (motion > `RAGDOLL_FLYING`) keep simulating up to `RAGDOLL_MAX + 2`. Never use the instant
+  `unit.settle()` for that (it dropped every particle to the ground in one frame — the user saw corpses
+  "fall in one frame"; it stays only for black-hole dragging, which now uses `unit.drag`). Ragdoll leg bones take their twist from the
+  knee hinge (normal of the thigh–shin plane, `placeRagdoll`), the same as the alive IK — the death frame
+  has no bone flick (measured 0.000 rad vs 0.1–0.4 before). Update
+  LOD by distance only for small/medium dogs (`LOD_NEAR`/`LOD_FAR`: pose every 2/4 frames, the body
+  still follows every frame); large+ (scale ≥ 2.5) pose EVERY frame (user: big dogs looked "low frame
+  rate"), corpses sink sooner when busy. Smoothness rules: turning has inertia (`dog.w` accelerates
+  ≤ 16/√s rad/s², max 4/s^¼ rad/s — never assign `dog.w`/`dog.yaw` directly); a jump's heading goes to
+  `dog.jumpYaw` and is turned to during the crouch (no snap); gait rhythm (frequency, duty, trot↔gallop
+  phase offsets) follows a smoothed speed `vS` (~0.25 s) so speed jumps don't teleport feet in the cycle.
   Debug: `__sceneState.horde.debug.{info, units, spawn(i), pack, allyPack}`, `__sceneState.hordeDebug.{spawn(name, n, dist), clear}`.
   Ragdoll gotcha: constraint arrays must fit all constraints (`MAX_C`); overflow silently read
   `undefined` and made every ragdoll ~15× slower. Bullets throw ragdolls by calibre: main.js sets `shared.shotKind` before each
@@ -170,7 +196,12 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   in `shared.droneRun` (survives swaps, grows on MAX change; teams equal: each ≤ `TEAM_MAX` 20 alive, same size weights and large/huge caps 4/2), both sides waves `WAVE_N` 3–5 (+ the gap to the other side, ≤ `CATCH_UP` 4) every gap×0.85–1.15 (×0.5 when > 20 % behind), gap 10→6 s, first waves at 3/5 s; a dog wave (`shared.dogWave`) launches `SURGE_N` 6–8 drones of that side at once and resets its timer (enemies
   in front 95–130 m, allies behind). Flight: PD steering to an orbit point around the target (enemy
   vs player — only in the ±60° front sector), tilt from acceleration, wobble; steering LOD > 70/120 m.
-  Target = nearest hostile (player ×0.8, dogs via `horde.debug.units()` read-only, drones), sticky.
+  Target = nearest hostile (player ×0.8, dogs via `horde.debug.units()` read-only, drones), sticky,
+  BY PRIORITY TIERS (`tierOf`, user request 2026-11-17; distance only within a tier): big drones
+  (size ≥ `BIG_DRONE` 2) — big dogs (scale ≥ `BIG_DOG` 2.5) → small dogs → rest (drones, player);
+  small/medium — big drones → small drones → small dogs → rest (big dogs, player). Same tiers for escorts
+  within `ESCORT_SEEK`. Hysteresis (`keepCurrent`): current kept unless a higher tier appears or, same tier,
+  one 25 % closer.
   Calm until the player's first shot (`run.angry`) or a hit. Fire: pre-mixed burst sound + per-round
   `fx.bolt` tracers (own `createZapFx`), hits queued by travel time: player → `screenShake(0.18)` at most
   every 350 ms, front-only (±70°); dog → `unit.strike`; drone → `damage`. Player bullets: `addShootable`
@@ -180,6 +211,11 @@ hit point the beam stops at ground y=0 or 60 m. Visible when `shared.laser` (men
   smoke (+1 fx); per-instance `aPaintA/aPaintB/aFx` (program `drone-inst-1`). Exposed for the horde:
   `shared.droneTargets` (drone objects `{ isDrone, state, team, x, y, z, span }`) and
   `shared.droneStrike(drone, point, dir, dmg)` — dogs don't target drones yet.
+  Progression (`progression.js`, user request): when `shared.battleStartMs` is set (horde battle), drones.js
+  `progStep()` per frame → `prog.cap = ceil(TEAM_MAX × dronesAllowed(t))`, `escMax`/`keep` scaled the same;
+  sizes of new drones (waves, surges, escorts — escorts small/medium only) from `droneSizeWeights(t)` copied
+  into `wBuf` (never mutate the stage arrays); all 0 → nothing spawns. Existing drones stay. No
+  `battleStartMs` → no progression (old weights, TEAM_MAX). `debug.info().prog`, telemetry `battle=…s cap=…`.
   Squad escorts (2026-11-17, «псы и коптеры заодно»): every `spawnPack` in robodog-horde.js gets a squad
   id (`shared.squadSeq`, never reset; `dog.squad`, survives swaps) and pushes `{ id, team, n, x, z }` to
   `shared.squadQueue` (≤ 8); drones.js drains it each frame (`addEscorts`): 1 / 2 / 3 escorts for packs

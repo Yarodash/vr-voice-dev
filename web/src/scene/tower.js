@@ -24,6 +24,7 @@ import { groundAt } from './targets.js';
 export const TOWER_H = 8; // верх пола площадки над землёй, м
 const RAIL_H = 1.05; // верх перил над полом
 const HALF = 1.6; // половина площадки
+const WALK_MARGIN = 0.3; // ходьба стиком: голова не ближе этого к краю площадки (перила)
 const FOOT = 2.1; // ноги внизу: ±FOOT по X и Z
 const TOP = 1.42; // ноги вверху (под площадкой)
 const KEY = 'scene.tower';
@@ -417,12 +418,35 @@ export function createTower({ THREE, root, camera, shared }) {
   show();
   syncRig(); // после перезагрузки rig уже поднят (из 'vr.rig'); если нет — поднять
 
+  const walkHead = new THREE.Vector3();
+  let walkSave = 0;
   const api = {
     get on() {
       return state.on;
     },
     set,
     toggle: () => set(!state.on),
+    // ходьба по площадке стиком (main.js: рука пуста): сдвинуть rig на (dx, dz) м по миру, но голова
+    // не выходит за площадку (WALK_MARGIN от края). rig в 'vr.rig' — не чаще раза в 0,5 с
+    walk(dx, dz, realDt) {
+      const rig = camera.parent;
+      if (!state.on || !rig) return;
+      camera.getWorldPosition(walkHead);
+      const lim = HALF - WALK_MARGIN;
+      const nx = Math.min(state.x + lim, Math.max(state.x - lim, walkHead.x + dx));
+      const nz = Math.min(state.z + lim, Math.max(state.z - lim, walkHead.z + dz));
+      rig.position.x += nx - walkHead.x;
+      rig.position.z += nz - walkHead.z;
+      walkSave -= realDt;
+      if (walkSave <= 0) {
+        walkSave = 0.5;
+        try {
+          localStorage.setItem(RIG_KEY, JSON.stringify({ p: rig.position.toArray(), q: rig.quaternion.toArray() }));
+        } catch {
+          // без хранилища — до перезагрузки
+        }
+      }
+    },
     // после ctx.recenter (оболочка поставила rig заново, голова — в начале мира): вышку — под голову, rig — вверх
     afterRecenter() {
       if (!state.on) return;

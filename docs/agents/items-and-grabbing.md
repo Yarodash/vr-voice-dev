@@ -2,7 +2,7 @@
 
 Files: `scene/pistols.js` (weapon registry + persistence), `scene/pistol-model.js`,
 `scene/ak-model.js` (+ `web/public/models/ak47/ak47.glb`, built by `scripts/build-ak47-model.mjs`),
-`scene/relative-grab.js`, `scene/clays.js` (clay plates, kind `'plate'`), `scene/text-test.js`
+`scene/relative-grab.js`, `scene/clays.js` (clay plates, kind `'plate'`), `scene/binoculars.js`, `scene/text-test.js`
 (relatively-grabbed board, in progress), all wired in `scene/main.js`.
 
 Two grab styles (user's terms):
@@ -173,6 +173,43 @@ flash · awp (×5 damage) 1.8/s + big flash; hum lower/louder/farther with size.
   `{ s: size, d: [x, y, z, yaw], r: { p, q } }` (held is not restored after a reload).
 - Debug (desktop page only): `__sceneState.myDroneDebug.{ info(), input = { sx, sy, up, down, fire } | null,
   shot(pose?) -> { ms, calls }, api }`.
+
+## Binoculars (binoculars.js)
+
+Menu `Заспавнить ▸ Бинокль` (`BINO_SPAWN`) → `binoculars.spawn()`: ONE pair, 0.45 m in front of the
+head, 0.15 m below the eyes, objectives away from the player (spawning again moves it).
+- Model (procedural, geometry cached in `shared.binoGeo` by builder source): two lathe barrels
+  (rubber armour, darker grip band, flared objective bell with a gold ring and metal rim), eyecups,
+  bridge + hinge + ribbed focus wheel, diopter ring, badges, strap lugs. Model axes: X right, Y up,
+  −Z = objectives, +Z = eyes; barrels at x = ±`BX` (0.032). Draws: rubber + metal (vertex colours) +
+  2 eyepieces + 2 objectives + outline (BackSide, inflated along normals).
+- Grab: «Абсолютно схватить» with the grip, both grip modes, free hand only (`handBusy`); reach 0.15 m
+  to the middle. Seat = `gripWorld × axes.matrix × seatLocal`, default `SEAT_POS` (left barrel above
+  the fist, barrels along green, eyepieces 3 cm behind the axes origin). Held menu (`heldKind
+  'binoculars'`, title Бинокль): `Удалить бинокль` (`BINO_REMOVE`), `Перенастроить хват` (same label as
+  the remote's; `onMenu` checks `binoculars.held` first: the pair freezes, the next grip press near it
+  stores `seatLocal`, localStorage `scene.binoculars.seat`), + common. Controller model and shell beam
+  hidden while held; trigger, X plate, near/ray grab are off; Y as always.
+- Outline: light blue = in hand reach, white = ray target / held by the ray. Ray grab: main.js passes
+  `rayItems` (= `pistols.items` + `binoculars.item`, rebuilt each frame without allocation) to
+  `rayGrab.update`; `binoculars.item` is `{ kind: 'binoculars', group }` or null when absent/held.
+- View: two `createScopeLens` with `eyeOnly: 0 | 1` (new option in scope-lens.js: in XR only that eye
+  counts for the glass; −1 = both, the default), no reticle, `lensR` 0.021, `tanApparent` 0.36,
+  eye relief 0.07, `size` 448. Objectives sit at the barrel fronts → stereo baseline 6.4 cm. Lenses
+  update ONLY while held and the head is behind the eyepieces (head in binocular space: z within
+  0.2 m behind the glass, |x|,|y| < 9 cm); otherwise `update(false)` once → dim glass. So at most
+  2 extra scene passes per frame, none when it is not at the face.
+- Zoom: stick Y while held and the menu is closed, up = more, ×2…×12 (`ZOOM_MIN/MAX`). Rate in log
+  space: full stick = ×2→×12 in 1.6 s, curve `0.12k + 0.88k³` (fine control near the centre); shown
+  zoom eases to the target (`ZOOM_SMOOTH`); tiny haptic tick at each integer. Label «×N» (canvas
+  128×48, redrawn ≤ 25/s only while shown) in the lower part of the right eyepiece for 1.3 s after a
+  change, only at the face.
+- State: `shared.binoculars` `{ exists, held, p, q, zoom }` (survives swaps, incl. held), localStorage
+  `scene.binoculars` `{ p, q, z }` (held is not restored after a reload). Telemetry `[bino] frames=…
+  lenses cpu=avg/max ms` every 5 s while at the face (plus the two `[scope]` lines).
+- Debug: `__sceneState.binoDebug` `{ info(), zoom(n), group, lenses, api }`. Desktop check: set
+  `__sceneState.binoculars.held = true` (no hand → the pose stays), put the group so `camera` is
+  0.07 m behind an eyepiece, wait, `screenshot()`; set `held = false` afterwards.
 
 ## Where to hook a new item
 

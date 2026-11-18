@@ -435,8 +435,12 @@ export function createArena({ THREE, group, camera, groundAt, smokePuff, plates 
             const dmg = rocket ? Math.max(1, Math.round(1 + 5 * k * k)) : 1;
             const res = u.strike(c, V2, dmg);
             const sp = rocket ? 4 + 9 * k : 1.5;
-            if (res === 'kill') u.blast?.(V2.x * sp, V2.y * sp, V2.z * sp);
-            else if (rocket && res === 'hit' && u.scale <= 1.7 && k > 0.2) u.knock(V2, 0.6 + 1.4 * k);
+            if (res === 'kill') {
+              u.blast?.(V2.x * sp, V2.y * sp, V2.z * sp);
+              shared.killConfirm?.dog(u); // ракета/плазма игрока: «клац» + хитмаркер (kill-confirm.js)
+            }
+            else if (res === 'hit') shared.killConfirm?.dogHit(u); // ранен взрывом: серый крестик
+            if (rocket && res === 'hit' && u.scale <= 1.7 && k > 0.2) u.knock(V2, 0.6 + 1.4 * k);
           } else if ((u.mode === 'dying' || u.mode === 'dead') && u.deadFor < 30) {
             const sp = rocket ? 3 + 8 * k : 1 + 1.5 * k;
             u.blast?.(V2.x * sp, V2.y * sp, V2.z * sp);
@@ -465,7 +469,9 @@ export function createArena({ THREE, group, camera, groundAt, smokePuff, plates 
         if (d.state === 'alive' && d.team !== 'ally') {
           V.set(d.x, d.y, d.z);
           try {
-            shared.droneStrike?.(d, V, V2, rocket ? Math.max(1, Math.round(1 + 6 * k)) : 1);
+            const dr = shared.droneStrike?.(d, V, V2, rocket ? Math.max(1, Math.round(1 + 6 * k)) : 1);
+            if (dr === 'kill') shared.killConfirm?.drone(d);
+            else if (dr === 'hit') shared.killConfirm?.droneHit(d);
           } catch {
             // коптер не важнее
           }

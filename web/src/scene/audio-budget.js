@@ -17,38 +17,62 @@
 // Ничего не строится на звук: одна шина на страницу (audioGraph.npcBus), остальное — числа.
 //
 // С ПК: npm run vr:eval -- "__sceneState.audioBudget.stats()"
-export const BUDGET_VERSION = 1;
+export const BUDGET_VERSION = 3; // 2: лимиты шире — в бою на Quest молчали ~40 % очередей и 44 % взрывов
 
-const GLOBAL = 16; // одновременных звуков мира (разовых; петли гула не в счёт — их и так 4–6)
-const HARD = 20; // сверх GLOBAL — только заметно более слышные, и не больше этого
+const GLOBAL = 28; // одновременных звуков мира (разовых; петли гула не в счёт — их и так 4–6)
+const HARD = 34; // сверх GLOBAL — только заметно более слышные, и не больше этого
 const MIN_AUDIBLE = 0.025; // ниже — не слышно в битве (≈ −32 дБ): не играть
 const LOUDER = 1.5; // во сколько раз слышнее самого тихого звучащего, чтобы пройти сверх лимита
 // max — одновременных в категории; rate — событий в секунду (ведро на rate/2, не меньше 2)
 export const CATEGORIES = {
   step: { max: 3, rate: 6 }, // шаги, шарниры, гул земли, скрежет, взмах лапы
-  gun: { max: 4, rate: 8 }, // пулемёты псов и коптеров, наводка башенки
-  hit: { max: 4, rate: 12 }, // звон металла, рикошет, удары
+  gun: { max: 8, rate: 14 }, // пулемёты псов и коптеров, наводка башенки
+  hit: { max: 6, rate: 16 }, // звон металла, рикошет, удары
   zap: { max: 3, rate: 8 }, // разряды, треск
-  boom: { max: 3, rate: 5 }, // разрывы коптеров, артиллерии, отключение пса
+  boom: { max: 8, rate: 14 }, // разрывы коптеров, артиллерии, отключение пса: видимый взрыв должен звучать
   voice: { max: 2, rate: 3 }, // лай, шипение гидравлики
   far: { max: 3, rate: 4 }, // далёкое: выстрел батареи, свист снаряда, рог
 };
 
 // Выход звуков мира: npcBus (одна на страницу, создаётся лениво, к master). Модули мира подключают
 // свои голоса сюда вместо master и пересобирают их, если шина сменилась.
+// Шина мира → свой лимитер → master: громкий разрыв рядом больше не «прижимает» общий компрессор выхода
+// (замер на Quest: −13,6 дБ на 0,4 с — свои выстрелы в это время почти не слышны). Мир упирается в свой
+// потолок (≈ −5,5 дБ), а сжимается только он сам. Один DynamicsCompressor на страницу.
+const NPC_BUS_VERSION = 2;
 export const npcOut = (g) => {
   if (!g?.context || !g.master) return g?.master ?? null;
-  if (!g.npcBus || g.npcBus.context !== g.context) {
+  if (!g.npcBus || g.npcBus.context !== g.context || g.npcBusVersion !== NPC_BUS_VERSION || g.npcBusMaster !== g.master) {
+    try {
+      g.npcBus?.disconnect();
+      g.npcLimiter?.disconnect();
+    } catch {
+      // уже отключены
+    }
     const bus = g.context.createGain();
     bus.gain.value = 1;
-    bus.connect(g.master);
+    const lim = g.context.createDynamicsCompressor();
+    lim.threshold.value = -6;
+    lim.knee.value = 4;
+    lim.ratio.value = 12;
+    lim.attack.value = 0.002;
+    lim.release.value = 0.15;
+    const makeup = g.context.createGain();
+    // Chromium сам поднимает выход компрессора ((1/полный_диапазон)^0,6 ≈ ×1,46 при −6 дБ, 12:1) — снять его:
+    // тихие звуки мира остаются как были, громкие упираются в ≈ −5,5 дБ
+    makeup.gain.value = 0.68;
+    bus.connect(lim).connect(makeup).connect(g.master);
     g.npcBus = bus;
+    g.npcLimiter = lim;
+    g.npcBusVersion = NPC_BUS_VERSION;
+    g.npcBusMaster = g.master;
   }
   return g.npcBus;
 };
 
 export function audioBudget(shared) {
-  if (shared.audioBudget?.version === BUDGET_VERSION) return shared.audioBudget;
+  // >=: модуль старой версии (его держит ещё не пересозданный объект) не откатывает новый бюджет
+  if (shared.audioBudget?.version >= BUDGET_VERSION) return shared.audioBudget;
   const prevHead = shared.audioBudget?.head;
   const now = () => performance.now() / 1000;
   const cats = {};

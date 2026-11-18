@@ -1037,6 +1037,33 @@ export function createArtillery({ THREE, root, camera, horde = null }) {
       smallBlast(x, y, z, S);
       return true;
     },
+    // ПОЛНЫЙ разрыв артиллерийского снаряда в (x, z) на земле — для любого модуля (projectiles/*):
+    // огненный шар, столб дыма, воронка, пятно, «бум» (дойдёт со скоростью звука, игровое время) и
+    // тряска. damage > 0 — ещё и урон по области __sceneState.areaDamage(точка, radius, damage, { credit })
+    // (area-damage.js; credit 'player' — маркеры и деньги игроку, null — чужой). Работает в любой сцене
+    // (вне битвы тоже). → { dogs, drones, kills } или true (без урона); false — плохие координаты
+    strike(x, z, { damage = 0, radius = SPLASH_R, credit = 'player', sound: withSound = true, shake = true } = {}) {
+      if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+      ensureRun(); // очередь событий (звук, тряска) — в run; update() ведёт её и вне битвы
+      camera.getWorldPosition(head);
+      const gy = groundHeight(x, z);
+      const dist = Math.hypot(x - head.x, gy - head.y, z - head.z);
+      blastFx(x, gy, z, dist);
+      if (withSound) queue(run.t + dist / SOUND_MPS, 'boom', x, gy + 2, z, dist);
+      if (shake && dist < 170) {
+        const k = Math.min(0.85, 15 / Math.max(1, dist));
+        const t0 = run.t + dist / 900;
+        queue(t0, 'shake', x, gy, z, k);
+        queue(t0 + 0.07, 'shake', x, gy, z, k * 0.55);
+        queue(t0 + 0.16, 'shake', x, gy, z, k * 0.35);
+      }
+      if (!(damage > 0)) return true;
+      try {
+        return shared.areaDamage?.(V.set(x, gy + 0.6, z), radius, damage, { credit }) ?? true;
+      } catch {
+        return true; // урон не важнее разрыва
+      }
+    },
     debug: {
       info: () => ({
         enabled, on: active(), t: run ? +run.t.toFixed(1) : null,

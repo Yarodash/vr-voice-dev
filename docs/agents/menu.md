@@ -46,6 +46,9 @@ Current tree:
   stick X scales it around the grip (×1.6/s at full deflection, 0.3…3, deadzone 0.2; the stick must
   first return to centre), label «Размер ×1,25» above the grip; the re-grab commits seat + size.
 - `heldKind === 'plate'` (title Тарелка): `Удалить тарелку`, + common.
+- `heldKind === 'binoculars'` (title Бинокль, `scene/binoculars.js`): `Удалить бинокль` (`BINO_REMOVE`),
+  `Перенастроить хват` (label shared with the remote; onMenu routes it to the binoculars when they are
+  held), + common. Spawn: `Заспавнить ▸ Бинокль` (`BINO_SPAWN`).
 - empty hand (title Меню): if `features.spawn`: `Заспавнить ▸ {Заспавнить пистолет, Заспавнить
   калаш, Заспавнить тарелку, Мой дрон ▸ {маленький, средний, большой, огромный}, …}`,
   `Хват: нажать|держать`; + common. Drone sizes: `MY_DRONE_SIZES` (index = size), onMenu checks
@@ -58,7 +61,10 @@ Current tree:
   {Продолжить, Рестарт}…, Сохранить как новую, Очистить всё}`; `Настройки ▸ {Отцентрировать,
   Расстояние между глазами, Время: ×N (keepOpen), Инерция: вкл/выкл (keepOpen, inertia.js), …,
   Тряска: вкл/сильно/выкл (keepOpen, cycles; shake.js, `scene.shake`), Сбросить размеры оружия
-  (`RESET_GUN_SIZES`: all `scene.scale.*` → 1, `resetGunScales` in gun-resize.js)}`.
+  (`RESET_GUN_SIZES`: all `scene.scale.*` → 1, `resetGunScales` in gun-resize.js), Прицел: аркадный|реалистичный
+  (keepOpen, `SCOPE_MODE_PREFIX = 'Прицел:'`; `shared.scopeMode` and `scene.scopeMode` = `'arcade'`
+  (default) | `'realistic'`; also in the menu of a held
+  scoped gun after «Отладка прицела» and in the binoculars menu)}`.
 
 ## onMenu dispatch (scene/main.js)
 

@@ -19,13 +19,13 @@
 // (robodog-sound.js) — свой пул на том же графе. 24: bolt(…, 'cycle'); 23: AWP и затвор
 import { audioBudget } from './audio-budget.js';
 
-export const SOUND_VERSION = 33; // 33: stats().budget; 32: свой звук не пропускается (нет свободного — делит голос со старейшим), голова → audioBudget, свой выстрел приглушает шину мира; 31: мана громче; 30: мана без запасного выстрела, lastShot в stats; 29: мана (shot kind 'mana', manaHit); 28: мягче лимитер; 27: пулы без лишнего (dog)
+export const SOUND_VERSION = 43; // 43: реверб — короткая моно-свёртка (петли раскачивались, «ультразвук»); 42: 42: шина мира со своим лимитером (audio-budget.js npcOut); 41: 41: слушатель — .value (без автоматизации); 40: 40: реверб без ConvolverNode (он давал провалы вывода в бою на Quest); 39: 39: пул hand для оружия в руке, мир — equalpower; 38: 38: счётчик слышимого (monitor, stats().monitor, «[audio] тишина»); 37, 36: пересоздать с новым audio-budget.js (старый объект звука держит старый модуль бюджета); 35: 35: stats().stolenBy / stolenYoung; 34: 34: окно темпа выстрела своё у руки и у дальнего стрелка (дрон); 33: stats().budget; 32: свой звук не пропускается (нет свободного — делит голос со старейшим), голова → audioBudget, свой выстрел приглушает шину мира; 31: мана громче; 30: мана без запасного выстрела, lastShot в stats; 29: мана (shot kind 'mana', manaHit); 28: мягче лимитер; 27: пулы без лишнего (dog)
 // какие записи звучат в игре (sound-board.js помечает их «в игре»)
 export const GUN_FILES = { pistol: ['pistolB1', 'pistolB2'], ak: ['ak1', 'ak2', 'ak3'] };
 
 const BAKE_VERSION = 5; // 5: мана — «вумм-шинг» вместо выстрела; 4: мана (manaShot, manaHit); 3: AWP одним буфером. Меняй, когда меняются рецепты ниже (синтез перезапечётся)
-const BUS_VERSION = 2; // меняй при изменении выхода (лимитер, реверб)
-const POOL_VERSION = 3; // меняй при изменении устройства голосов
+const BUS_VERSION = 5; // меняй при изменении выхода (лимитер, реверб); 3: outProbe/inProbe — счётчик слышимого; 4: петли (самовозбуждались!); 5: короткая моно-свёртка
+const POOL_VERSION = 4; // меняй при изменении устройства голосов; 4: пул hand (оружие в руке)
 
 const NEAR_FAR = 1.2; // дальше — обычный HRTF; ближе — ближнее поле
 const NEAR_FULL = 0.55; // ближе — почти чистое стерео
@@ -36,7 +36,11 @@ const SHOT_MIN_GAP_MS = 55; // звук своего выстрела — не �
 // только звук старше этого (с): он уже в тихом хвосте; самый новый не отнимается никогда. Нечего
 // отнять — звучит сверх max, пока есть свободные цепочки. Голос — один источник буфера, их может быть много.
 const POOLS = {
-  gun: { size: 16, max: 12, minAge: 0.45, near: true, model: 'HRTF' }, // выстрелы (запись 1,3 с)
+  // выстрелы оружия в руке — высший приоритет: свой пул (дрон его не занимает), max 18 при темпе автомата
+  // 90 мс = 1,6 с > записи 1,3 с — выстрел не обрывается; equalpower: ствол у головы (ближнее поле — стерео),
+  // а 14 одновременных HRTF при очереди вместе с боем перегружали аудиопоток Quest
+  hand: { size: 20, max: 18, minAge: 1.0, near: true, model: 'equalpower' },
+  gun: { size: 8, max: 6, minAge: 0.45, near: true, model: 'HRTF' }, // далёкие свои выстрелы («Мой дрон»)
   impact: { size: 12, max: 10, minAge: 0.25, near: false, model: 'HRTF' }, // звон мишени, тарелки, разряды
   mech: { size: 4, max: 3, minAge: 0.2, near: false, model: 'equalpower' }, // затвор АВП
   small: { size: 6, max: 4, minAge: 0.08, near: false, model: 'equalpower' }, // гильзы: тихо и часто
@@ -384,6 +388,24 @@ const softClipCurve = () => {
   return curve;
 };
 
+// Реверб — КОРОТКАЯ МОНО-свёртка (0,45 с, один канал): ConvolverNode с хвостом 1,5 с (стерео) на Quest в
+// большом бою не успевал (playbackStats: 3,2 с провалов вывода из каждых 4 с; без реверба — 0).
+// Петли с обратной связью (Шрёдер, BUS_VERSION 4) НЕ использовать: самовозбуждались — тон ~2,5 кГц,
+// +14 дБ/с («ультразвук» в шлеме; офлайн-рендер щелчка). Свёртка (КИХ) не может раскачаться.
+const REVERB_SECONDS = 0.45;
+const buildReverb = (c, input, out) => {
+  const conv = c.createConvolver();
+  conv.channelCount = 1; // вход сводится в моно: одна свёртка вместо двух-четырёх
+  conv.channelCountMode = 'explicit';
+  const n = Math.floor(c.sampleRate * REVERB_SECONDS);
+  const ir = c.createBuffer(1, n, c.sampleRate);
+  const d = ir.getChannelData(0);
+  for (let i = 0; i < n; i += 1) d[i] = (Math.random() * 2 - 1) * (1 - i / n) ** 3.2;
+  conv.buffer = ir;
+  input.connect(conv).connect(out);
+  return [conv];
+};
+
 const disconnect = (...nodes) => {
   for (const n of nodes) {
     try {
@@ -425,20 +447,19 @@ export function createSound() {
     probe.fftSize = 256;
     g.master.connect(compressor).connect(trim).connect(clip).connect(c.destination);
     compressor.connect(probe);
-    const convolver = c.createConvolver();
-    const length = Math.floor(c.sampleRate * 1.5);
-    const impulse = c.createBuffer(2, length, c.sampleRate);
-    for (let channel = 0; channel < 2; channel += 1) {
-      const data = impulse.getChannelData(channel);
-      for (let i = 0; i < length; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / length) ** 3.2;
-    }
-    convolver.buffer = impulse;
+    // счётчик слышимого (monitor): что реально уходит в динамики (после клипа) и что приходит в master
+    const outProbe = c.createAnalyser();
+    outProbe.fftSize = 2048;
+    clip.connect(outProbe);
+    const inProbe = c.createAnalyser();
+    inProbe.fftSize = 2048;
+    g.master.connect(inProbe);
     g.reverbSend.gain.value = 0.5;
-    g.reverbSend.connect(convolver).connect(g.master);
+    const reverbNodes = buildReverb(c, g.reverbSend, g.master);
     const nearDelay = c.createDelay(0.1);
     nearDelay.delayTime.value = 0.03;
     nearDelay.connect(g.reverbSend);
-    Object.assign(g, { busVersion: BUS_VERSION, busNodes: [compressor, trim, clip, probe, convolver, nearDelay], probe, nearDelay });
+    Object.assign(g, { busVersion: BUS_VERSION, busNodes: [compressor, trim, clip, probe, nearDelay, outProbe, inProbe, ...reverbNodes], probe, nearDelay, outProbe, inProbe, compressor });
     counters.busBuilds += 1;
   };
 
@@ -612,11 +633,18 @@ export function createSound() {
     disconnect(shot.source, shot.env);
     if (v.shot === shot) v.shot = null;
   };
-  const steal = (v, t) => {
+  const steal = (v, t, pool) => {
     const shot = v.shot;
     if (!shot || shot.fading) return;
     shot.fading = true;
     counters.stolen += 1;
+    // отладка: в каком пуле и в каком возрасте обрываются звуки (stats().stolenBy, stolenYoung — моложе 0,5 с)
+    const by = (counters.stolenBy ??= {});
+    by[pool?.name ?? '?'] = (by[pool?.name ?? '?'] ?? 0) + 1;
+    if (t - shot.startedAt < 0.5) {
+      const young = (counters.stolenYoung ??= {});
+      young[pool?.name ?? '?'] = (young[pool?.name ?? '?'] ?? 0) + 1;
+    }
     try {
       const gain = shot.env.gain;
       gain.cancelScheduledValues(t);
@@ -648,14 +676,14 @@ export function createSound() {
       }
     }
     if (oldest && oldest !== newest && (active >= pool.max || !free) && (t - oldest.shot.startedAt >= pool.minAge || !free)) {
-      steal(oldest, t);
+      steal(oldest, t, pool);
     }
     if (free) return free;
     // Свободных цепочек нет: все пулы sound.js — звуки игрока, их не пропускаем. Новый звук делит
     // цепочку со старейшим (тот гаснет своей огибающей за 60 мс; паннер прыгнет только у его хвоста).
     let first = null;
     for (const v of pool.voices) if (v.shot && (!first || v.shot.startedAt < first.shot.startedAt)) first = v;
-    if (first && !first.shot.fading) steal(first, t);
+    if (first && !first.shot.fading) steal(first, t, pool);
     if (first) counters.shared = (counters.shared ?? 0) + 1;
     return first;
   };
@@ -803,6 +831,7 @@ export function createSound() {
     const now = performance.now();
     if (now < nextWatch) return;
     nextWatch = now + 500;
+    if (g.busVersion !== BUS_VERSION) buildBus(g); // новый выход — сразу, не дожидаясь первого звука
     const c = g.context;
     if (c.state === 'suspended' || c.state === 'interrupted') {
       counters.resumes += 1;
@@ -821,6 +850,87 @@ export function createSound() {
         return;
       }
     }
+  };
+
+  // Счётчик СЛЫШИМОГО (из update, раз в 100 мс): пик на выходе (после клипа, то, что идёт в динамики)
+  // и на входе master. Идут свои выстрелы из руки (последний < 250 мс назад), а на выходе тишина дольше
+  // 300 мс — «[audio] тишина …» в консоль со всем, что могло заглушить. И часы: если currentTime
+  // отстаёт от реального времени — аудиопоток не успевает считать (провалы звука).
+  const mon = (shared.audioMonitor ??= { silences: 0, longestMs: 0, last: null, lagEvents: 0, worstRate: 1, outPeak: 0, inPeak: 0 });
+  let monNext = 0;
+  let monData = null;
+  let silentSince = 0;
+  let silentShots = 0;
+  let clockAt = 0;
+  let clockCtx = 0;
+  const peakOf = (an) => {
+    monData ??= new Float32Array(2048);
+    an.getFloatTimeDomainData(monData);
+    let p = 0;
+    for (let i = 0; i < monData.length; i += 1) {
+      const a = Math.abs(monData[i]);
+      if (a > p || a !== a) p = a !== a ? Infinity : a; // NaN → Infinity: видно в логе
+    }
+    return p;
+  };
+  const silenceInfo = (g, ms) => {
+    const c = g.context;
+    const l = c.listener;
+    const gun = g.pools?.hand?.voices ?? [];
+    return {
+      ms: Math.round(ms), shots: silentShots, ctx: c.state, t: +c.currentTime.toFixed(2),
+      master: +g.master.gain.value.toFixed(3), npc: g.npcBus ? +g.npcBus.gain.value.toFixed(3) : null,
+      comp: g.compressor ? +g.compressor.reduction.toFixed(1) : null, inPeak: +mon.inPeak.toFixed(4), outPeak: +mon.outPeak.toFixed(4),
+      listener: l.positionX ? [l.positionX.value, l.positionY.value, l.positionZ.value, l.forwardX.value, l.forwardY.value, l.forwardZ.value].map((v) => +(+v).toFixed(2)) : null,
+      gunActive: gun.filter((v) => v.shot && !v.shot.fading).length,
+      gunEnv: gun.filter((v) => v.shot).slice(0, 4).map((v) => +v.shot.env.gain.value.toFixed(2)),
+      gunPos: gun.filter((v) => v.shot).slice(0, 2).map((v) => [v.panner.positionX.value, v.panner.positionY.value, v.panner.positionZ.value].map((x) => +(+x).toFixed(2))),
+      worstRate: +mon.worstRate.toFixed(2), lagEvents: mon.lagEvents, bank: shared.soundBank?.ak?.length ?? 0,
+    };
+  };
+  const monitor = (g) => {
+    const now = performance.now();
+    if (now < monNext) return;
+    monNext = now + 100;
+    if (!g.outProbe || g.context.state === 'closed') return;
+    // часы аудио против реальных: за ~1 с должно пройти ~1 с аудио
+    const ct = g.context.currentTime;
+    if (!clockAt) {
+      clockAt = now;
+      clockCtx = ct;
+    } else if (now - clockAt >= 1000) {
+      const rate = (ct - clockCtx) / ((now - clockAt) / 1000);
+      if (g.context.state === 'running') {
+        mon.worstRate = Math.min(mon.worstRate, rate);
+        if (rate < 0.9) {
+          mon.lagEvents += 1;
+          console.warn(`[audio] аудиопоток отстаёт: за ${((now - clockAt) / 1000).toFixed(2)} с отыграно ${(ct - clockCtx).toFixed(2)} с`);
+        }
+      }
+      clockAt = now;
+      clockCtx = ct;
+    }
+    mon.outPeak = peakOf(g.outProbe);
+    mon.inPeak = g.inProbe ? peakOf(g.inProbe) : 0;
+    const shooting = now - (shared.lastHandShotMs ?? -1e9) < 250;
+    const quiet = !(mon.outPeak > 0.004) || mon.outPeak === Infinity;
+    if (shooting && quiet) {
+      if (!silentSince) {
+        silentSince = now;
+        silentShots = 0;
+      }
+    } else if (silentSince) {
+      const ms = now - silentSince;
+      silentSince = 0;
+      if (ms >= 300) {
+        mon.silences += 1;
+        mon.longestMs = Math.max(mon.longestMs, Math.round(ms));
+        mon.last = silenceInfo(g, ms);
+        console.warn(`[audio] тишина ${Math.round(ms)} мс при выстрелах`, JSON.stringify(mon.last));
+      }
+    }
+    if (silentSince && shooting) silentShots = shared.handShotsTotal - (mon.shotsAtSilence ?? 0);
+    if (!silentSince) mon.shotsAtSilence = shared.handShotsTotal ?? 0;
   };
 
   const api = {
@@ -853,6 +963,7 @@ export function createSound() {
         bank: bank && { pistol: bank.pistol.length, ak: bank.ak.length, awp: bank.awp?.length ?? 0, fx: Object.fromEntries(Object.entries(bank.fx).map(([k, l]) => [k, l.length])) },
         ...counters,
         budget: shared.audioBudget?.stats?.(), // звуки мира (audio-budget.js)
+        monitor: { ...mon, last: mon.last }, // слышимое: тишина при выстрелах, отставание аудиопотока
       };
     },
     // Слушатель = голова: вызывать каждый кадр. Позиция и ориентация — AudioParam, сглаживание 20 мс.
@@ -861,6 +972,7 @@ export function createSound() {
       if (!g?.context || !camera) return;
       try {
         watch(g);
+        monitor(g);
         camera.updateWorldMatrix(true, false);
         const e = camera.matrixWorld.elements; // колонки: 0 — вправо, 1 — вверх, 2 — назад (без масштаба)
         for (let i = 0; i < 15; i += 1) if (!Number.isFinite(e[i])) return; // NaN в слушателе заглушил бы всё
@@ -875,15 +987,17 @@ export function createSound() {
         const l = g.context.listener;
         const t = g.context.currentTime;
         if (l.positionX) {
-          l.positionX.setTargetAtTime(lp[0], t, 0.02);
-          l.positionY.setTargetAtTime(lp[1], t, 0.02);
-          l.positionZ.setTargetAtTime(lp[2], t, 0.02);
-          l.forwardX.setTargetAtTime(lf[0], t, 0.02);
-          l.forwardY.setTargetAtTime(lf[1], t, 0.02);
-          l.forwardZ.setTargetAtTime(lf[2], t, 0.02);
-          l.upX.setTargetAtTime(lu[0], t, 0.02);
-          l.upY.setTargetAtTime(lu[1], t, 0.02);
-          l.upZ.setTargetAtTime(lu[2], t, 0.02);
+          // Только .value, без автоматизации: setTargetAtTime каждый кадр держал все PannerNode графа в
+          // посэмпловом режиме (азимут/угол на каждый сэмпл) и копил события — аудиопоток Quest не
+          // успевал (провалы вывода под огнём). Старые события снимаются один раз.
+          const ps = [l.positionX, l.positionY, l.positionZ, l.forwardX, l.forwardY, l.forwardZ, l.upX, l.upY, l.upZ];
+          if (g.listenerPlain !== true) {
+            for (const p of ps) p.cancelScheduledValues(0);
+            g.listenerPlain = true;
+          }
+          const vs = [lp[0], lp[1], lp[2], lf[0], lf[1], lf[2], lu[0], lu[1], lu[2]];
+          for (let i = 0; i < 9; i += 1) ps[i].value = vs[i];
+          void t;
         } else {
           l.setPosition(lp[0], lp[1], lp[2]);
           l.setOrientation(lf[0], lf[1], lf[2], lu[0], lu[1], lu[2]);
@@ -915,15 +1029,26 @@ export function createSound() {
         ensure();
         // Ускоренное время (×4…×64) даёт выстрел каждый кадр: пул выстрелов забивался молодыми звуками
         // и остальные пропадали. Не чаще раза в SHOT_MIN_GAP_MS реального времени — звучит очередью.
+        // Окно своё у оружия в руке и у далёкого стрелка («Мой дрон» на автопилоте): иначе очередь
+        // дрона съедала звук выстрелов из руки (общее окно — до половины выстрелов без звука).
         const nowMs = performance.now();
-        if (nowMs - (shared.lastShotSoundAt ?? 0) < SHOT_MIN_GAP_MS) return false;
-        shared.lastShotSoundAt = nowMs;
+        const p = validPos(position);
+        const far = p && head.ok && Math.hypot(p.x - head.x, p.y - head.y, p.z - head.z) > 3;
+        const gates = (shared.shotSoundGates ??= { hand: 0, far: 0 });
+        const gate = far ? 'far' : 'hand';
+        const shotPool = far ? 'gun' : 'hand'; // оружие в руке — свой пул (POOLS.hand)
+        if (nowMs - gates[gate] < SHOT_MIN_GAP_MS) return false;
+        gates[gate] = nowMs;
+        if (!far) {
+          shared.lastHandShotMs = nowMs; // для счётчика слышимого (monitor)
+          shared.handShotsTotal = (shared.handShotsTotal ?? 0) + 1;
+        }
         // мана: запечённый «магический» выстрел, высота гуляет ±6 %; пока не запёкся — тишина, а не выстрел
         if (kind === 'mana') {
           const list = shared.soundBank?.fx.manaShot;
           counters.lastShot = list?.length ? `manaShot@${shared.soundBank.fxReady}` : 'mana:not-baked';
           if (!list?.length) return false;
-          return play('gun', pick(list), { position, gain: 1.3 + Math.random() * 0.2, rate: 0.94 + Math.random() * 0.12, wet: 0.35 });
+          return play(shotPool, pick(list), { position, gain: 1.3 + Math.random() * 0.2, rate: 0.94 + Math.random() * 0.12, wet: 0.35 });
         }
         counters.lastShot = kind;
         // AWP: один голос — запечённая смесь (bakeAwp); пока она не готова — только основной слой.
@@ -934,15 +1059,15 @@ export function createSound() {
         const sample = pick(ak ? bank?.ak : bank?.pistol);
         const level = 0.88 + Math.random() * 0.24;
         if (awp && bank?.awp?.length) {
-          return play('gun', pick(bank.awp), { position, gain: level, rate: 0.98 + Math.random() * 0.04, wet: 0.45 });
+          return play(shotPool, pick(bank.awp), { position, gain: level, rate: 0.98 + Math.random() * 0.04, wet: 0.45 });
         }
         if (sample && awp) {
-          return play('gun', sample, { position, gain: 1.3 * level, rate: 0.66 + Math.random() * 0.04, wet: 0.45 });
+          return play(shotPool, sample, { position, gain: 1.3 * level, rate: 0.66 + Math.random() * 0.04, wet: 0.45 });
         }
         if (sample) {
-          return play('gun', sample, { position, gain: (ak ? 1 : PISTOL_GAIN) * level, rate: 1 + (Math.random() - 0.5) * 0.06, wet: ak ? 0.22 : 0.24 });
+          return play(shotPool, sample, { position, gain: (ak ? 1 : PISTOL_GAIN) * level, rate: 1 + (Math.random() - 0.5) * 0.06, wet: ak ? 0.22 : 0.24 });
         }
-        return play('gun', pick(bank?.fx[ak ? 'synthAk' : 'synthPistol']), { position, gain: level, wet: 0.5 });
+        return play(shotPool, pick(bank?.fx[ak ? 'synthAk' : 'synthPistol']), { position, gain: level, wet: 0.5 });
       });
     },
     tink(position) {

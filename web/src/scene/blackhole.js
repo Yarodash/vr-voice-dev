@@ -571,6 +571,7 @@ export function createBlackhole({ THREE, group, camera, groundAt, plates = null,
         killed += 1;
         tmp.set(ux, Math.max(0.3, uy), uz).normalize();
         if (u.strike(tmp2.copy(c), tmp, 1e4) === 'kill') {
+          shared.killConfirm?.dog(u); // дыра игрока: «клац» + хитмаркер (союзники — нет, kill-confirm.js)
           dog.bhSwirl = true;
           const toss = Math.min(1.6, a / 25);
           u.ragdoll.push(ux * 6 * toss, (4 + 4 * h.k) * toss + Math.max(0, uy) * 4, uz * 6 * toss);
@@ -609,12 +610,17 @@ export function createBlackhole({ THREE, group, camera, groundAt, plates = null,
         const hl = Math.hypot(ux, uz) || 1;
         const sx = (ux / hl) * v;
         const sz = (uz / hl) * v;
-        const p = u.ragdoll.pos;
-        const q = u.ragdoll.prev;
-        for (let j = 0; j < p.length; j += 3) {
-          p[j] += sx; p[j + 2] += sz; q[j] += sx; q[j + 2] += sz;
+        // без рывка (по просьбе пользователя): поза та же, висящий в воздухе плавно ложится, по рельефу
+        // (раньше settle() каждый подшаг ставил все точки на землю — первый кадр волочения был скачком)
+        if (u.drag) u.drag(sx, sz, dt);
+        else {
+          const p = u.ragdoll.pos;
+          const q = u.ragdoll.prev;
+          for (let j = 0; j < p.length; j += 3) {
+            p[j] += sx; p[j + 2] += sz; q[j] += sx; q[j + 2] += sz;
+          }
+          u.settle();
         }
-        u.settle();
         continue;
       }
       if (u.mode === 'down' || corpse) {
@@ -675,7 +681,10 @@ export function createBlackhole({ THREE, group, camera, groundAt, plates = null,
       const inCore = r < h.core + 0.5 * d.span;
       if (d.state === 'alive' && (inCore || (!ally && aRaw > CAPTURE_A))) {
         tmp.set(-ux, -uy, -uz);
-        if (shared.droneStrike?.(d, tmp2.set(d.x, d.y, d.z), tmp, 1e4) === 'kill') d.spinRate = (Math.random() < 0.5 ? -1 : 1) * (14 + 10 * Math.random());
+        if (shared.droneStrike?.(d, tmp2.set(d.x, d.y, d.z), tmp, 1e4) === 'kill') {
+          d.spinRate = (Math.random() < 0.5 ? -1 : 1) * (14 + 10 * Math.random());
+          shared.killConfirm?.drone(d);
+        }
       }
       void nowS;
     }
@@ -780,7 +789,9 @@ export function createBlackhole({ THREE, group, camera, groundAt, plates = null,
         if (u.mode === 'alive' || u.knocked) {
           enrageDog(u);
           const dmg = Math.max(1, Math.round((2 + 10 * k) * q * (ally ? 0.5 : 1)));
-          u.strike(p, tmp, dmg);
+          const res = u.strike(p, tmp, dmg);
+          if (res === 'kill') shared.killConfirm?.dog(u);
+          else if (res === 'hit') shared.killConfirm?.dogHit(u); // ранен вспышкой дыры: серый крестик
           if (u.mode === 'alive' && !u.emerging && q * m > 0.25 && lifted + extra < BLAST_LIFT_MAX) {
             u.knock(tmp, 0.6);
             extra += 1;
@@ -809,7 +820,9 @@ export function createBlackhole({ THREE, group, camera, groundAt, plates = null,
         d.vx += tmp.x * v;
         d.vy += tmp.y * v + 2 * q;
         d.vz += tmp.z * v;
-        if (d.state === 'alive') shared.droneStrike?.(d, tmp2.set(d.x, d.y, d.z), tmp.negate(),(2 + 8 * k) * q * (d.team === 'ally' ? 0.5 : 1));
+        const dr = d.state === 'alive' ? shared.droneStrike?.(d, tmp2.set(d.x, d.y, d.z), tmp.negate(),(2 + 8 * k) * q * (d.team === 'ally' ? 0.5 : 1)) : null;
+        if (dr === 'kill') shared.killConfirm?.drone(d);
+        else if (dr === 'hit') shared.killConfirm?.droneHit(d);
       }
     }
     // мишени — наружу

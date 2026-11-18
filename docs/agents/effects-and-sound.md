@@ -4,6 +4,26 @@ Files: `scene/effects.js` (owned by shooting.js: `createEffects({ THREE, group }
 `scene/smoke.js`, `scene/tracer.js`, AK flash in `scene/main.js`, `scene/sound.js`.
 Assets: `web/public/sounds/guns/*.ogg` (CC0, LICENSE.txt).
 
+## kill-confirm.js — kill confirmation (hitmarker + «клац»)
+
+The player's kill (own bullets/rockets/rail/plasma/black hole and «Мой дрон» bullets) → `shared.killConfirm?.dog(unit)`
+/ `.drone(d)` / `.at(x, y, z, big)` (allies ignored inside). Call sites: robodog-horde.js `hit` (shootables =
+player bullets only), drones.js `hit`, arena-weapons.js `splash`, blackhole.js (4 places). Artillery/NPC kills
+never call it. Marker: one instanced quad + ShaderMaterial (pool 8, ring), view-space billboard, size ∝ distance
+(cross ~3.6°), depthTest off, renderOrder 905, pop/fade/rotation in the shader (CPU: one uniform per frame,
+`instanceCount 0` when idle); white, red for big (dog scale ≥ 2.5, drone size ≥ 2). In `shared.scopeHide` (not
+drawn in scope / drone camera passes). Sound: JS-baked buffers (`__sceneState.killSoundBank`, `BANK_VERSION`),
+5 persistent voices gain → StereoPanner → master (`__sceneState.killVoices`), one BufferSource per click;
+multi-kill = clicks queued `GAP` 85 ms apart (≤ 0.36 s ahead, pitch rises in a streak), marker synced to its
+click; `audioBudget.duck(0.7)` per click. Debug: `__sceneState.killConfirm.stats()`, `.test(dist, big)` (desktop only).
+
+Money (`scene/money.js`): every kill above pays `dogReward(scale)` (10/20/50/100/200/400, titan 1200) or
+`droneReward(size)` (40/80/200/400) via `shared.money.add(n, { x, y, z, delay })`. Balance in
+`shared.moneyState`, localStorage `'scene.money'` (all scenes, saved ≤ 1/s). HUD plate `scene-money` in the
+shell HUD group at local (−0.4, 0.12) (top-left, ~29°/22°), canvas redrawn only on change, pulses green on
+gain. «+$N» right of the cross floats up 0.8 s: one instanced glyph mesh (atlas «0–9+$», renderOrder 906,
+in `scopeHide`). Debug: `__sceneState.money.{stats, balance, add, set, reset, test(dist, n)}`.
+
 ## shake.js — VR-safe screen shake
 
 Comfort rule (Meta/Roblox comfort guides; Zulubo 2019 "VR screen shake: the art of not throwing
@@ -112,11 +132,27 @@ Lifecycle: scene/main.js does
 rebuilt only when `BUS_VERSION` / `POOL_VERSION` change. `shared.soundBank` = decoded samples +
 baked synth, keyed by `GUN_FILES` + `BAKE_VERSION` + sample rate.
 
+**AUDIO-THREAD RULES (Quest, measured with `context.playbackStats` — underrun 3,2 s of every 4 s in a big battle before):**
+- Reverb = ONE short mono `ConvolverNode` (`buildReverb` in sound.js: 0,45 s, 1 channel, `channelCount 1`).
+  The old 1,5 s stereo IR alone caused the underruns. Never feedback loops (DelayNode → filter → gain → back):
+  the Schroeder version self-oscillated (~2,5 kHz, +14 dB/s — «ультразвук»). Check any reverb offline
+  (OfflineAudioContext, one click, energy per second must fall).
+- Never automate listener/panner positions (`setTargetAtTime`/`setValueAtTime` on `positionX…`, `forwardX…`):
+  it puts every PannerNode into per-sample mode. Assign `.value`.
+- World voices use `'equalpower'`; HRTF only for the player's own sounds.
+- World bus `npcOut(g)` = gain → own limiter (−6 dB, 12:1) → master, so a nearby blast cannot pump the master
+  compressor and bury the player's shots (seen: −13,6 dB for 0,4 s).
+- Hand weapon shots: own pool `hand` (20 voices, max 18, equalpower) — the drone's shots use `gun`.
+- Audible-output meter: `sound.stats().monitor` (`__sceneState.audioMonitor`): output/input peaks, «[audio] тишина N мс
+  при выстрелах», «[audio] аудиопоток отстаёт» (currentTime vs real time) in `logs/page-console.log`.
+
 **PRIORITY RULE (`scene/audio-budget.js`, `__sceneState.audioBudget`):** the player's own sounds always
 play clearly; world sounds share a budget.
 - **Player** (sound.js: shots, hits, mana, bolt, casings; arena-sound.js: rocket/rail/plasma + their
-  blasts; blackhole-sound.js; robodog-sound.js with `own = true` — clank/zap from the player's bullet in
-  `unit.hit`; my-drone.js — the personal drone's hum, own voice `shared.myDroneVoice` → master) never ask the budget. Their pools are reserved (world sounds never use them: dogs have 4
+  blasts; blackhole-sound.js; robodog-sound.js with `own = true` — clank/zap/powerDown from the player's bullet in
+  `unit.hit` (6 own voices); drone-sound.js `clank(p, size, true)` / `pop(p, size, true)` — the player's
+  bullet on a drone (drones.js `hit` → `damage(..., own)`, 4 own voices → master, own 30 ms clank gate
+  separate from NPC hits); my-drone.js — the personal drone's hum, own voice `shared.myDroneVoice` → master) never ask the budget. Their pools are reserved (world sounds never use them: dogs have 4
   extra `own` voices → master) and never skip: sound.js pools with no free chain share the oldest
   chain (oldest fades 60 ms, `stats().shared`); the others fade their oldest in 20 ms. Player shots
   call `audioBudget(shared).duck()` → the world bus dips ~−4 dB for ~0.1 s and returns in ~0.3 s.
@@ -124,9 +160,12 @@ play clearly; world sounds share a budget.
   sound) — before playing: `if (!audioBudget(shared).admit(cat, p, gain, seconds, ref, rolloff)) return;`
   (pick the buffer first: seconds = duration / rate; ref/rolloff = the voice's panner). Audibility =
   gain × inverse-distance attenuation to the head (head from `sound.update`); < 0.025 → culled;
-  per-category concurrency + token-bucket rate (`CATEGORIES`: step 3 / 6 s⁻¹, gun 4 / 8, hit 4 / 12,
-  zap 3 / 8, boom 3 / 5, voice 2 / 3, far 3 / 4); all world one-shots ≤ 16, over that only if 1.5×
-  more audible than the quietest playing, hard cap 20. World voices connect to `npcOut(g)`
+  per-category concurrency + token-bucket rate (`CATEGORIES`: step 3 / 6 s⁻¹, gun 8 / 14, hit 6 / 16,
+  zap 3 / 8, boom 8 / 14, voice 2 / 3, far 3 / 4); all world one-shots ≤ 28, over that only if 1.5×
+  more audible than the quietest playing, hard cap 34 (BUDGET_VERSION 3: with 4/8, 3/5, 16/20 Quest
+  battle dropped ~40 % of NPC bursts and 44 % of explosions; now ~0 %, FPS unchanged). `audioBudget()`
+  keeps a NEWER budget (`version >=`): the persistent `shared.sound` holds the module it was built with —
+  after changing audio-budget.js bump SOUND_VERSION too. World voices connect to `npcOut(g)`
   (`audioGraph.npcBus` → master), never to master directly; rebuild when `pool.bus !== npcOut(g)`.
   Loops (drone hum ×4, rocket hiss, black-hole rumble/whine) are fixed voices, not budgeted.
 - Debug: `__sceneState.audioBudget.stats()` (live, peak, culled/rated/capped/over per category);

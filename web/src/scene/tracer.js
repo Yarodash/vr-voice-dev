@@ -174,6 +174,7 @@ export function createTracers({ THREE, group }) {
   const dx = new Float32Array(MAX), dy = new Float32Array(MAX), dz = new Float32Array(MAX);
   const len = new Float32Array(MAX), age = new Float32Array(MAX), bright = new Float32Array(MAX);
   const spd = new Float32Array(MAX), grav = new Float32Array(MAX), ids = new Int32Array(MAX);
+  const thin = new Float32Array(MAX); // 1 — обычный; < 1 — тонкий и бледный («Трассеры: выкл»: всё равно видно выстрел)
   let count = 0;
   let nextId = 1;
   let warm = 0; // кадров после создания (см. конец update)
@@ -182,13 +183,13 @@ export function createTracers({ THREE, group }) {
     sx[i] = sx[j]; sy[i] = sy[j]; sz[i] = sz[j];
     dx[i] = dx[j]; dy[i] = dy[j]; dz[i] = dz[j];
     len[i] = len[j]; age[i] = age[j]; bright[i] = bright[j];
-    spd[i] = spd[j]; grav[i] = grav[j]; ids[i] = ids[j];
+    spd[i] = spd[j]; grav[i] = grav[j]; ids[i] = ids[j]; thin[i] = thin[j];
   };
 
   return {
     // from — дуло, dir — единичный вектор ствола, speed — м/с, gravity — м/с², maxLen — м пути до
     // исчезновения, если пуля так ни во что и не попала. Возвращает номер трассера для land().
-    fire(from, dir, speed, gravity, maxLen) {
+    fire(from, dir, speed, gravity, maxLen, slim = 1) {
       let i;
       if (count < MAX) i = count++;
       else {
@@ -199,7 +200,8 @@ export function createTracers({ THREE, group }) {
       dx[i] = dir.x; dy[i] = dir.y; dz[i] = dir.z;
       len[i] = maxLen;
       age[i] = 0; // как у пули: в первом же кадре пролетает speed·dt
-      bright[i] = 0.85 + Math.random() * 0.15;
+      bright[i] = (0.85 + Math.random() * 0.15) * (slim < 1 ? 0.55 : 1);
+      thin[i] = slim;
       spd[i] = speed;
       grav[i] = gravity / (2 * speed * speed);
       ids[i] = nextId;
@@ -217,7 +219,7 @@ export function createTracers({ THREE, group }) {
     },
 
     update(dtRaw) {
-      const dt = Math.min(0.05, dtRaw || 0);
+      const dt = Math.min(0.2, dtRaw || 0); // как пули (shooting.js, MAX_STEP_S в world-clock.js): ×64 — подшаг до 0,2 с
       uTime.value = (uTime.value + dt) % 1000;
       let n = count;
       for (let i = n - 1; i >= 0; i -= 1) {
@@ -245,7 +247,7 @@ export function createTracers({ THREE, group }) {
           dirArr[q] = dx[i]; dirArr[q + 1] = dy[i]; dirArr[q + 2] = dz[i]; dirArr[q + 3] = 0;
           // хвост «тянется» за головой полной длиной, даже когда голова уже упёрлась в цель
           spanArr[q] = travelled - STREAK; spanArr[q + 1] = head; spanArr[q + 2] = 1;
-          spanArr[q + 3] = STREAK_HALF_WIDTH;
+          spanArr[q + 3] = STREAK_HALF_WIDTH * thin[i];
           if (spanArr[q] < 0) spanArr[q] = 0;
           gravArr[m] = grav[i];
           m += 1;
@@ -261,7 +263,7 @@ export function createTracers({ THREE, group }) {
           const d = Math.min(1, late / TRAIL_DISSIPATE);
           dirArr[q] = dx[i]; dirArr[q + 1] = dy[i]; dirArr[q + 2] = dz[i]; dirArr[q + 3] = 1 + d;
           spanArr[q] = trailTail; spanArr[q + 1] = head; spanArr[q + 2] = trailAlpha;
-          spanArr[q + 3] = TRAIL_HALF_WIDTH * (1 + 3 * d ** 0.7); // расплывается вширь до 4×
+          spanArr[q + 3] = TRAIL_HALF_WIDTH * thin[i] * (1 + 3 * d ** 0.7); // расплывается вширь до 4×
           gravArr[m] = grav[i];
           m += 1;
         }

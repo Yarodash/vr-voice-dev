@@ -11,6 +11,8 @@ In `scene/main.js` the closure already has: `THREE, root, renderer, camera, scen
 - [Add a scene feature flag](#add-a-scene-feature-flag)
 - [New weapon kind](#new-weapon-kind)
 - [Сгенерированная пушка (picture → card → GLB)](#сгенерированная-пушка)
+- [Новый снаряд / новое действие выстрела (projectile module, area damage, kill credit)](#new-projectile)
+- [ТЗ новой пушки — шаблон (priorities, acceptance, live delivery)](#tz-template)
 - [New grabbable item (absolute or relative)](#new-grabbable-item)
 - [Add a sound](#add-a-sound)
 - [Add an effect](#add-an-effect)
@@ -160,21 +162,49 @@ gun stays in the hand (same item, pose, held state), only what is drawn inside i
 Code: `scene/generated-gun.js` (builders, caches), wired in `pistols.js` (kind `'gen:<id>'`),
 `main.js` (GUNS, calib, fire mode, scope tilt, spawnOnAdd), `menu.js` (spawn items, title, toggles).
 
+**Every new gun's code work** (its shot, projectile, effects, sounds) follows the
+[«ТЗ новой пушки — шаблон»](#tz-template): a prioritized spec with an acceptance check per priority,
+each priority delivered live (save → `scene:check` → hot-swap) and announced to `main` with a short
+`SendMessage` right after it is accepted. User tweaks relayed mid-way take precedence.
+
 Files: `web/public/models/generated/<id>/card.png` (PNG with alpha, gun SIDE view, barrel to the
 RIGHT, any size — it is cropped/downscaled to 1024 px in the page) and `<id>/mesh.glb` (Tripo,
-~30k tris, 1K texture). The Tripo MCP pipeline (`D:\3d_models\output\mcp\<run>\`) already leaves
-`cutout.png` (= card.png) next to `mesh.glb`: copy both.
+~30k tris, 1K texture).
+
+**Auto-placement (user's rule, 2026-11-18: «чтобы оно само подставлялось в игру»).** `npm start` runs
+`scripts/gen-autoplace.mjs` (alone: `npm run gen:autoplace`). Agents do NOT copy files or edit
+`card`/`glb`/`v` by hand. The **dispatcher calls the generation tools itself** (user: no image/3D agent):
+- **Image:** `generate_image` / `edit_image` with `output_dir = …\generated\<id>\src`, then
+  `remove_image_background` with `output_path = …\generated\<id>\card.png`. The moment card.png is
+  written, the watcher sets `card: true`, bumps `v`, says «Картинка «<name>» в игру» in the headset.
+- **3D:** `generate_3d_model(image_path = …\generated\<id>\card.png, remove_background: false)`. When
+  the Tripo run finishes (`D:\3d_models\output\mcp\<run>\result.json`, its `image` is that card.png),
+  the watcher copies `mesh.glb` into `<id>\`, sets `glb: true`, bumps `v`, says «3D … в игре».
+- No entry for `<id>` yet → it adds a minimal one. Log: `logs/gen-autoplace.log`; state (what was
+  already placed) is kept in `.vr/gen-autoplace.json`.
+Agents still do the rest by hand: placeholder entry, `trigger.box`/`scope` measured from the card,
+`glbFlip`.
+
+**Agents (user's rule).** Image and 3D: the dispatcher calls Gemini/Tripo itself (no agent); gen-autoplace
+puts the results in the game. Agents of a new gun (shot code, trigger/scope measuring) run on **Haiku**.
+The code agent starts from the projectile recipe in this file, not by reading the whole codebase.
+
+**No visual quality gate (user's rule).** Put every generated image and every Tripo model into the
+game as soon as it arrives. Don't reject a model by its preview and don't regenerate on your own;
+the user looks at it in VR and asks for a redo. The technical steps still apply: background cutout,
+registry fields, `npm run scene:check`, muzzle direction (`glbFlip`). Scopes keep their own fitting
+checklist (below).
 
 Stages (each is one edit of the entry):
 
 0. **Placeholder, instantly** (no files yet):
    ```js
-   { id: 'm4', name: 'М4', length: 0.9, auto: true, shape: 'rifle', card: false, glb: false, v: 1, spawnOnAdd: true },
+   { id: 'm4', name: 'М4', length: 0.9, auto: true, shape: 'rifle', card: false, glb: false, v: 1 },
    ```
    A translucent blue hologram of a generic `shape` (`rifle | smg | pistol | shotgun | sniper`;
    without it — by `length`) with a floating label «М4 / генерирую…». Already grabbable and shoots
    (GUN_AUTO / GUN_SEMI). «Заспавнить М4» appears in «Заспавнить ▸» (more than 3 generated guns —
-   nested «Новые пушки ▸»). `spawnOnAdd: true` puts one copy ~0.55 m in front of the head, sideways,
+   nested «Новые пушки ▸»). The user spawns it from the menu — do NOT set `spawnOnAdd` (user, 2026-11-18: «не надо мне спавнить пушку, я сам себе могу заспавнить»). `spawnOnAdd: true` would put one copy ~0.55 m in front of the head, sideways,
    once per id+v (localStorage `scene.gen.spawned.<id>.<v>`, both pages spawn their own).
 1. **Card**: drop `card.png`, set `card: true`. The placeholder becomes a solid thick picture: two
    picture faces ±`thicknessM/2` (default 3.5 cm; the back is mirrored) + side walls traced from the
@@ -218,6 +248,16 @@ Stages (each is one edit of the entry):
    (gunmetal + glowing green rings round both glasses, bands, rail strips) or `'black'`; `reticle`,
    `tanApparent` as in `scope`. Same stick tilt / «Отладка прицела» / gun-resize as `scope`
    (ignored if the entry also has `scope`).
+5. **Collimator / red-dot on the rail** — `collimator` (`scene/collimator.js`, e.g. `khaki_m4`):
+   ```js
+   collimator: { at: [440, 200.5] }, // + zeroM = 30, dotMoa = 5, color, windowR = 0.022, height, length, tilt, tint
+   ```
+   A modelled tube red-dot on a mount. `at` is card.png pixels of the rail top edge under the middle of
+   the mount; measure it from the alpha with a script. On a GLB the mount sits on the highest vertex under
+   it. The dot is parallax-free (the glass colours by the eye→glass direction), zeroed every frame to
+   where this gun's bullet is at `zeroM`, and works with gun-resize.
+   **Window ≥ Ø 4.4 cm (`windowR` ≥ 0.022). That is the user's minimum: «меньше — смотреть
+   невозможно». Never smaller.**
 
 **Scope acceptance test** (any added or fitted scope — `addScope`, `scope`, a procedural one; the
 user wants it right the first time). Verify EACH point with your own desktop screenshots before
@@ -241,6 +281,17 @@ reporting (guard `if (session) return 'skip'`; render with a separate `Perspecti
    `matrixWorld` each frame: field `tanA × s`, eye relief / pupil / view distance in real metres), so
    at the SAME real eye distance (~8 cm) a ×1.5 or ×0.7 scope fills its glass like ×1. Move other
    scoped guns out of the way first — an earlier test may have parked one at the same spot.
+6. Check BOTH optics modes (`__sceneState.scopeMode` `'arcade'` (default) | `'realistic'`, menu
+   «Прицел: аркадный / реалистичный»). Every `createScopeLens` reads it in `update()`; nothing to wire
+   per scope. Аркадный is the forgiving optics (EYE_SHIFT 0.35, PUPIL_*, TILT_END). Реалистичный is
+   the real one: true eye offset, an exit-pupil eyebox
+   (`EXIT_OBJ_R / mag` ± `EYE_PUPIL_R` on the eye-relief plane: black crescent off-axis, a smaller
+   circle when too far or too close, fully black ~9 mm off-axis at 4×), barrel distortion `BARREL`,
+   stronger edge chroma, vignette and desaturation, reticle parallax `PARALLAX_K`, convex sheen with
+   a sun glint `CURVE`, a dark tube ring. The modes are a uniform branch, so there is no recompile; in
+   the realistic mode an eye outside the eyebox skips its render. To compare the modes, flip
+   `__sceneState.scopeMode` on the desktop page and take screenshots. NEVER `import()` scene files
+   in `vr:eval` (an orphan module copy makes every later edit fully reload the headset page).
 
 Re-generated files: overwrite them and bump `v` (URLs get `?v=<v>`, caches are keyed by it).
 
@@ -291,7 +342,9 @@ to dogs/drones/plates, `screenShake` by distance). Gravity in `R = 4 + 15.5k` m:
 anyone (allies too) inside the core, is killed at once (`unit.strike(…, 1e4)` / `droneStrike(…, 1e4)`,
 ≤ 3 kills per substep); corpses in the vortex stay `dying` (sparks, arcs) and tumble on an orbit with
 random particle kicks (≤ `SWIRL_MAX` 4 simulated, = horde `RAGDOLL_MAX`); beyond that they are dragged
-along the ground (`ragdoll.pos` shift + `unit.settle()`, ≤ 6 per substep); captured drones spin hard.
+along the ground (`unit.drag(dx, dz, dt)` → `ragdoll.drag`: shift, same pose, sinks to the ground at
+≤ 5·√s m/s, follows terrain — safe to call every substep; the old `ragdoll.pos` shift + instant
+`unit.settle()` dropped an airborne corpse to the ground in one frame, ≤ 6 per substep); captured drones spin hard.
 Allies outside the core: alive with `a > 10` → `unit.knock` + toss (≤ `LIFT_MAX` 6 lifted ragdolls at once), held airborne by the hook
 `unit.holdDown()` (robodog-unit.js: resets the «down» timer); heavier/over cap — slide toward it +
 stagger; corpses (dying / awake / close) pulled via `ragdoll.push`; near the core the ragdoll velocity
@@ -354,10 +407,155 @@ shared (`userData.shared`, `pistols.remove` skips them). Card ready in cache →
 frame; otherwise placeholder until the promise resolves. Debug: `__sceneState.weaponDebug.items()`
 (each gen item has `gen.shows`: `placeholder | card | glb`), `.spawn('gen:m16')`, `.gen()`.
 
-Verify without the headset: on the `[desktop]` page (`if (session) return 'skip'`)
-`__sceneState.weaponDebug.spawn('gen:<id>')`, then move `weaponDebug.items().at(-1).group` in front
-of `camera` and `return await screenshot()`. Objects added to `root` by an eval vanish at the next
-scene swap (other agents edit in parallel) — re-run.
+Verify without the headset: on the `[desktop]` page only
+(`if (/Quest|OculusBrowser/.test(navigator.userAgent)) return 'skip'` — not `if (session)`: the Quest
+page has no session while the user is out of VR) `__sceneState.weaponDebug.spawn('gen:<id>')`, then
+move `weaponDebug.items().at(-1).group` in front of `camera` and `return await screenshot()`. Objects
+added to `root` by an eval vanish at the next scene swap (other agents edit in parallel) — re-run.
+
+<a id="new-projectile"></a>
+## Новый снаряд / новое действие выстрела
+
+Fill-in-the-template job. The template is THREE files, so three agents work at once, each in its own
+file only (`scene/projectiles/`):
+- `_template.js` → `<name>.js` — **logic**: `[П1]` shot (flight, landing, waiting `FUSE_S` of game
+  time) and `[П2]` `detonate()` (by default a full artillery blast with player-credited area damage;
+  `BLAST = false` → it only counts). It calls the other two by event.
+- `_template.sounds.js` → `<name>.sounds.js` — **`[П3]` sounds**: `SOUNDS` keyed by event
+  `launch | land | preStrike | strike | expire` (`{ seconds, variants, render, vol, ref, lead }`);
+  a missing key is silent.
+- `_template.fx.js` → `<name>.fx.js` — **`[П4]` looks**: `createFx(ctx)` → hooks
+  `fire | fly | land | wait | strike | expire | update | dispose | stats`; an exception in a hook is
+  swallowed with one `[<name>-fx]` warning, so the shot keeps working.
+The core look (the glowing sprite, its colour, the blink) stays in the logic file.
+
+**П0 — the dispatcher, before any agent, ~1 s:**
+`npm run new:projectile -- <name> <gun id> [--speed 40] [--gravity 9.81] [--fuse 3] [--no-blast]`
+(`scripts/new-projectile.mjs`). It copies the three files, registers `<name>` in `projectiles/index.js`,
+adds `projectile, speed, gravity, projectileOpts.fuseS` to the gun entry and runs `scene:check`. The bare
+template shot is in VR at once. `--no-blast` is for a gun whose effect is not an explosion. Then three
+agents start in parallel (warm ones, see [Warm gun agents](#warm-agents)): logic П1→П2, sounds П3,
+looks П4. Each touches **only** its file; logic may also tune the gun entry. Do not open `shooting.js`,
+`artillery.js`, `arena-weapons.js`.
+
+Never delete a projectile file and re-create it under the same name: Vite's module graph keeps the dead
+node, `scene-hmr-guard` cuts it as an orphan («orphan cut» in `logs/npm-start.log`), and edits stop
+reaching the page. Take a new name instead.
+
+1. (П0 did it) files copied, `NAME`/`create<Name>` renamed, registered, gun entry set.
+2. Logic agent: fill `[П1]`, then `[П2]` in `<name>.js`; gun fields: `speed, gravity?, gapMs, kickMs,
+   kickRad, kickBackM, buzz, projectileOpts: { …anything… }`. `projectileOpts` reaches `fire({ opts })`
+   untouched; no other file needs a new field.
+3. Sound agent: `<name>.sounds.js` only. Looks agent: `<name>.fx.js` only. Their acceptance: below.
+4. **Проверка:** `npm run test:shot -- <gun id> --enemy 3 --ally 3 --shot` (one command, ~10 s,
+   desktop page only; `scripts/test-shot.mjs` → `__sceneState.testKit.shotTest`, `scene/test-kit.js`).
+   It needs the desktop page in a **foreground** browser tab: a background tab throttles frames, and
+   the shot never lands (`landed: 0`). It fires the gun exactly like its trigger (same `GUNS` options) 20° up from the camera, waits for
+   `landed` +1, puts a frozen enemy and ally dog 3 m from `lastPoint` across the line of fire
+   (shielded from the running battle: only your module's code can hurt them), waits for `strikes`
+   +1, screenshots that moment, and prints ONE JSON; exit 0 only if every declared check passed:
+   ```json
+   {"gun":"gen:flare_shotgun","module":"flare","shots":1,"fired":1,"landed":1,"landedAfterS":2.83,
+    "landPoint":[0,0.86,-107.04],"strikes":1,"strikeAfterS":6.24,"lastStrike":{"x":0,"z":-107.04,"dogs":7,"drones":2,"kills":4},
+    "enemy":{"team":"enemy","mode":"dead","hp0":2,"hp":-5,"hurt":true,"dist":3,"hpAtStrike":2},
+    "ally":{"team":"ally","mode":"alive","hp0":2,"hp":2,"hurt":false,"dist":3,"hpAtStrike":2},
+    "killConfirm":{"kills":4,"dogs":2,"drones":2,"hits":5},"money":{"balance":140},"creditedToPlayer":true,
+    "checks":{"fired":true,"landed":true,"strikes":true,"enemyHurtAndCredited":true,"allyUnharmed":true,"noPageErrors":true},
+    "ok":true,"screenshot":"D:\\vr_something\\logs\\screenshots\\…-desktop.jpg","pageErrors":[]}
+   ```
+   It reads only your `stats()` counters, so keep the template's names: `fired`, `landed`,
+   `strikes` (a missing counter is skipped, not failed), `lastPoint: { x, y, z }` (where the last one
+   landed; else the newest `live[]` entry), `lastStrike: { x, z, dogs, drones, kills }`. Strike at the
+   moment of landing → it places the dogs and fires a second shot (`shots: 2`). Options: `--wait 8`
+   (s, raise it for long fuses), `--pitch 20`, `--yaw 0`, `--keep` (leave the dogs). Pieces for your
+   own checks in vr:eval: `testKit.placeDog(team, x, z, { size, frozen, shield })`, `clearTestDogs()`,
+   `fireGun(kind, { pitchDeg, yawDeg, from })`, `waitFor(fn, ms)`, `snapshotStats()`.
+   `npm run scene:check` after every save; errors also land in `logs/page-console.log`. A file
+   that nothing imports yet (the copy before step 2) makes `scene:check` wait: register first.
+   **Vite trap:** a module file deleted and re-created under the same name (or saved several times
+   quickly) can stay stale while `scene:check` says OK. Edit it once more, then confirm the new code
+   is live, e.g. `npm run vr:eval -- "String(__sceneState.shooting.projectiles.<name>.update).includes('<new bit>')"`.
+
+**Module contract** (`create<Name>(ctx)` returns; all optional except `fire`): `life` (s of flight,
+default 3), `gravity` (default 9.81), `pool: false` (fly yourself: only `fire` is called);
+`fire({ from, dir, speed, g, opts }) → id > 0` (play the launch sound here, `duck: true`);
+`move(id, pos, age)` each substep in flight; `impact(id, point, what, vel)` — `what` 1 ground,
+2 plate, 3 stand, 4 dog/drone/clay (direct hit already applied); `expire(id, point)` — ended in the
+air or evicted; `update(dt)` game-time substep (`Math.min(MAX_STEP_S, dt)`, no `performance.now()`);
+`stats()`; `dispose()` (remove meshes from `group`, dispose own materials, not cached textures).
+`from`/`dir`/`point`/`pos` are shared vectors: copy them.
+
+**ctx helpers**: `THREE, group, camera, shared, effects, groundAt(x, z)`;
+`areaDamage(point, radius, maxDamage, { credit: 'player' | null, allies = false, push = 1 })` →
+`{ dogs, drones, kills }` (dogs and drones, allies spared; `'player'` gives hitmarker, «клац», money);
+`strike(x, z, { damage = 0, radius = 7.5, credit = 'player', sound = true, shake = true })` — full
+artillery shell blast on the ground (fireball, crater, scorch, boom, shake; with `damage` it calls
+`areaDamage`); `explode(x, y, z, S = 0.3)` — small blast, visuals only;
+`soundBank(key, { snd: { seconds, variants, render(d, sr) } }, { voices })` →
+`play(snd, point, vol, { rate, ref, duck })` (baked once, fixed voices; also importable with
+`normalize`, `fadeTail` from `../sound-bank.js`); `smokePuff(...)`, `plates()`, `knockPlate(p, point, dir)`.
+Same handles in vr:eval: `__sceneState.areaDamage`, `__sceneState.artillerySystem.strike`.
+
+<a id="tz-template"></a>
+## ТЗ новой пушки — шаблон
+
+Every generated gun's code work (projectile, special shot, effect) is written and accepted by this
+spec. Filled-in example: [tz/flare-shotgun.md](tz/flare-shotgun.md).
+
+**Выдача по частям (leading rule).** The user is in VR and looks at the gun right away:
+- every priority, or a working half of one, goes live at once: save → `npm run scene:check` = OK →
+  hot-swapped; nothing is held back "until the end";
+- right after each accepted priority: a short `SendMessage` to `main` with what is live and the key
+  numbers («П1 в игре: свеча летит и горит; дальность ~35 м, 20 м/с»), the dispatcher tells the user;
+- user tweaks relayed mid-way beat the plan: apply, ship, continue;
+- every save keeps the gun shooting (no half-states that break the shot).
+
+**Who does what, in parallel.** П0 is the dispatcher's `npm run new:projectile` (~1 s, the bare shot is
+live). Then three agents at once, each in its own file: **logic** П1 → П2 in order (`<name>.js`),
+**sounds** П3 (`<name>.sounds.js`), **looks** П4 (`<name>.fx.js`). Each announces its own steps to
+`main`. The sound and looks agents start from the spec and the template stub, not from the logic
+agent's code: the events and hooks are fixed in advance.
+
+**Spec skeleton** (copy into `docs/agents/tz/<id>.md`; within the logic file the next priority comes
+only after the previous is accepted):
+- **П1 — the shot works** (required): trigger → the projectile, rate, speed, arc, what it looks like
+  in flight and where it ends; caps (max alive, life).
+  **Приёмка:** `npm run test:shot -- <id> --shot` (step 4 above): `fired: 1`, `landed: 1`,
+  `landPoint` on the ground, `pageErrors: []`; look at the screenshot.
+- **П2 — main effect and damage, credited to the player** (required): what happens, when (game
+  time), radius and damage; allies spared.
+  **Приёмка:** `npm run test:shot -- <id> --enemy 3 --ally 3 --shot` (needs the dog battle on) →
+  exit 0: `strikes: 1`, `checks.enemyHurtAndCredited` (enemy `hurt`, `killConfirm` kills/hits grew),
+  `checks.allyUnharmed`; screenshot of the effect.
+- **П3 — sounds** (own agent, `<name>.sounds.js` only): which events sound and how (`launch`, `land`
+  = burning/idle, `preStrike` + `lead`, `strike`, `expire`); baked, `launch` ducks the world by itself.
+  **Приёмка:** `npm run test:shot -- <id>` exit 0 (the shot still works), then
+  `npm run vr:eval -- "__sceneState.projectileDebug.<name>.stats().sound"`: `baked` lists every
+  sound with ≥ 1 variant, `played` grows per shot; no `[<name>-sound]` warnings in `logs/page-console.log`.
+- **П4 — looks** (own agent, `<name>.fx.js` only): muzzle flash, trail, flame, smoke, sparks; pools,
+  no `new` per frame; shader warm-up if a new material. **Приёмка:** `npm run test:shot -- <id> --shot`
+  exit 0, `stats().fx` (your own counters), no `[<name>-fx]` warnings, screenshot viewed, first shot
+  without a hitch (`[perf] worst`).
+- **Docs** (whoever finishes last): a line in the recipe, `npm run docs:index`.
+
+**Report** per priority: «принято» + evidence (the `stats()` numbers, screenshot path) or
+«не сделано — почему». Plus `FIRST WORKING: <time>` when П1 and П2 are accepted.
+
+<a id="warm-agents"></a>
+### Warm gun agents (pre-briefed, waiting)
+
+So that no agent spends its first seconds reading, the dispatcher keeps three agents already briefed:
+`gun-logic-warm`, `gun-sound-warm`, `gun-fx-warm` (pipeline model, see «Agents»). Each one:
+- is spawned with the warm-up prompt: read this recipe's [Новый снаряд](#new-projectile) and
+  [ТЗ](#tz-template) sections, the template file(s) for its role, the filled-in example
+  `tz/flare-shotgun.md` (the gun itself was removed from the game); reply `ГОТОВ` in one line
+  and **stop**, editing nothing;
+- gets the job later via `SendMessage` (to its name): gun id, projectile name, the spec path or the
+  spec text. Its context is intact, so it starts writing at once;
+- is used for ONE gun. Right after handing it a job, the dispatcher spawns a fresh warm agent of the
+  same role for the next gun, so the done one's context does not grow.
+Order for a new gun: placeholder entry → `npm run new:projectile` (П0) → spec file → `SendMessage` to
+the three warm agents → spawn three new warm agents.
 
 ## New grabbable item
 

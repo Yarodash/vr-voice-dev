@@ -23,7 +23,9 @@ export const RANGE_FEATURES = { targets: true, spawn: true, xPlate: true, score:
 // car — машина (car.js), её положение в data.car / live.car; robodog — робопёс-одиночка
 // (robodog.js), в снимке только { alive } (data.robodog / live.robodog); robodogHorde — стая
 // робопсов бежит на игрока (robodog-horde.js, «Сцена 3»), в снимке ничего
-export const EMPTY_FEATURES = { targets: false, spawn: false, xPlate: false, score: false, car: false, robodog: false, robodogHorde: false }; // пустое поле
+export const EMPTY_FEATURES = { targets: false, spawn: false, xPlate: false, score: false, car: false, robodog: false, robodogHorde: false, armyStandoff: false }; // пустое поле
+// armyStandoff — «Сцена 4»: бой сразу на последней эпохе, обе армии стоят строем (враги впереди,
+// союзники позади) и через несколько секунд сходятся (robodog-horde.js / drones.js: standoff)
 // Счёт выключен везде (пользователь убрал его из всех сцен): score.js остался, чтобы вернуть —
 // убрать «score: false» отсюда и включить флаг сценам.
 const features = (saved) => ({ ...EMPTY_FEATURES, ...saved, score: false });
@@ -132,6 +134,28 @@ export function migrateHordeScenes() {
     saveCompositions(list);
     localStorage.setItem(KEY, '1');
     return true;
+  } catch {
+    return false;
+  }
+}
+
+// Разовый перенос: «Сцена 4» — битва последней эпохи «стенка на стенку» (для видео): то же, что «Сцена 3»,
+// плюс armyStandoff. Возвращает true, если список сцен поменялся.
+export const STANDOFF_FEATURES = { ...HORDE_FEATURES, armyStandoff: true };
+export function migrateStandoffScene() {
+  const KEY = 'scene.standoffMigrated';
+  try {
+    if (localStorage.getItem(KEY)) return false;
+    const list = loadCompositions();
+    let changed = false;
+    if (!list.some((e) => e.features?.armyStandoff)) {
+      const empty = { version: 1, weapons: [], clays: [], targets: null, score: null };
+      const name = list.some((e) => e.name === 'Сцена 4') ? nextName(list) : 'Сцена 4';
+      list.push({ name, savedAt: new Date().toISOString(), features: { ...STANDOFF_FEATURES }, data: empty, live: empty });
+      changed = saveCompositions(list);
+    }
+    localStorage.setItem(KEY, "1");
+    return changed;
   } catch {
     return false;
   }

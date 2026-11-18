@@ -12,6 +12,10 @@ import { createSound } from './sound.js';
 import { createMana } from './mana.js';
 import { createBlackhole } from './blackhole.js';
 import { createArena, ROCKET_LIFE } from './arena-weapons.js';
+import { PROJECTILES } from './projectiles/index.js';
+import { createAreaDamage } from './area-damage.js';
+import { createSoundBank } from './sound-bank.js';
+import { MAX_STEP_S } from './world-clock.js';
 
 const SPEED_OF_SOUND = 343; // м/с: звук попадания приходит с задержкой
 const GRAVITY = 9.81; // м/с²
@@ -50,6 +54,38 @@ export function createShooting({ THREE, root, camera }) {
   });
   // Звук живёт между подменами сцены: контекст создаётся один раз (их число в странице ограничено).
   const sound = (shared.sound ??= createSound());
+  // Урон по области для всех (area-damage.js): __sceneState.areaDamage(point, radius, maxDamage, { credit })
+  const areaDamage = (shared.areaDamage = createAreaDamage(THREE));
+  // Снаряды-модули (projectiles/index.js, шаблон projectiles/_template.js): projectile: '<имя>' в записи
+  // оружия → модуль. Пули модуля летят в этом пуле (попадания, гравитация, подшаги — здесь); модуль
+  // получает fire / move / impact / expire / update / dispose и сам рисует, звучит и наносит урон.
+  const projCtx = {
+    THREE, group, camera, shared, effects, groundAt, areaDamage,
+    strike: (x, z, opts) => shared.artillerySystem?.strike?.(x, z, opts) ?? false, // полный разрыв (artillery.js)
+    explode: (x, y, z, S) => shared.artillerySystem?.explode?.(x, y, z, S) ?? false, // малый разрыв, только вид
+    soundBank: createSoundBank, // (key, recipes, { voices }) → { play(name, p, vol, { rate, ref, duck }), stats() }
+    smokePuff: (x, y, z, ux, uy, uz, a0, a1, life, a) => effects.smokePuff(x, y, z, ux, uy, uz, a0, a1, life, a),
+    plates: () => (enabled ? targets : null),
+    knockPlate: (t, p, d) => targetSet.knock(t, p, d),
+  };
+  const projMods = {};
+  for (const [name, create] of Object.entries(PROJECTILES)) {
+    try {
+      projMods[name] = create(projCtx);
+    } catch (e) {
+      console.warn('[shooting] снаряд не создан', name, e?.message ?? e);
+    }
+  }
+  const projList = Object.values(projMods);
+  // модуль сам ловит свои ошибки не всегда: ошибка одного снаряда не ломает стрельбу
+  const projCall = (m, fn, a, b, c, d) => {
+    try {
+      return m[fn]?.(a, b, c, d); // без ...args: зовётся каждый подшаг, без выделений памяти
+    } catch (e) {
+      console.warn(`[shooting] снаряд ${fn}`, e?.message ?? e);
+      return undefined;
+    }
+  };
 
   // Мишени на деревянных стойках, их падение и тени — targets.js.
   // Мишени можно выключить целиком (сцена без мишеней, compositions.js): их группа скрыта, пули и
@@ -322,7 +358,7 @@ export function createShooting({ THREE, root, camera }) {
   // ---- Пули в полёте (пул, без выделений памяти за кадр)
   const bullets = [];
   for (let i = 0; i < MAX_BULLETS; i += 1) {
-    bullets.push({ active: false, muzzle: new THREE.Vector3(), dir: new THREE.Vector3(), speed: BULLET_SPEED, age: 0, kind: null, tracer: 0, onResult: null, born: 0, g: GRAVITY, mana: 0, color: null, arena: 0, life: BULLET_LIFE,
+    bullets.push({ active: false, muzzle: new THREE.Vector3(), dir: new THREE.Vector3(), speed: BULLET_SPEED, age: 0, kind: null, tracer: 0, onResult: null, born: 0, g: GRAVITY, mana: 0, color: null, arena: 0, life: BULLET_LIFE, proj: null, projId: 0,
       // самонаведение: численный полёт (pos, vel), цель (hPlate | hProv + hKey), её центр и скорость
       home: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), travel: 0, hDelay: 0, hTurn: 0, hPlate: -1, hProv: null, hKey: null, hPos: new THREE.Vector3(), hVel: new THREE.Vector3() });
   }
@@ -340,6 +376,12 @@ export function createShooting({ THREE, root, camera }) {
     b.active = false;
     effects.tracerLand(b.tracer, b.speed * t);
     if (b.mana) mana.land(b.mana, t);
+    if (b.proj) {
+      // снаряд-модуль кончился, ни во что не попав (время/путь вышли, вытеснен из полного пула)
+      const m = b.proj;
+      b.proj = null;
+      projCall(m, 'expire', b.projId, b.home ? b.pos : posAt(bPoint, b.muzzle, b.dir, b.speed, t, b.g));
+    }
     const cb = b.onResult;
     b.onResult = null;
     if (cb) {
@@ -421,7 +463,7 @@ export function createShooting({ THREE, root, camera }) {
         bNormal.transformDirection(target.matrixWorld);
         addDecal(target, bPoint);
         targetSet.knock(target, bPoint, bVel);
-        if (!b.mana && !b.arena) {
+        if (!b.mana && !b.arena && !b.proj) {
           effects.impact(bPoint, bNormal.clone());
           const delay = Math.min(250, (b.muzzle.distanceTo(bPoint) / SPEED_OF_SOUND) * 1000);
           const at = bPoint.clone();
@@ -429,7 +471,7 @@ export function createShooting({ THREE, root, camera }) {
         }
         result = true;
       }
-    } else if (what === 1 && !b.mana && !b.arena) {
+    } else if (what === 1 && !b.mana && !b.arena && !b.proj) {
       camera.getWorldPosition(camPos);
       if (b.gfx > 0) {
         if (camPos.distanceToSquared(bPoint) < 400 * 400) effects.groundHit(bPoint.clone(), b.gfx);
@@ -442,6 +484,12 @@ export function createShooting({ THREE, root, camera }) {
     }
     // ракета — взрыв с уроном по области, плазма — голубой всплеск (arena-weapons.js)
     if (b.arena) arena.impact(b.arena, bPoint, what);
+    // снаряд-модуль (projectiles/*): попал сюда; what — во что (см. castBullet), bVel — направление полёта
+    if (b.proj) {
+      const m = b.proj;
+      b.proj = null;
+      projCall(m, 'impact', b.projId, bPoint, what, bVel);
+    }
     shared.shotKind = keepKind;
     finish(b, t, result);
     return true;
@@ -724,7 +772,15 @@ export function createShooting({ THREE, root, camera }) {
     // homing: { delayS = 0.05, turnDegS = 360, gravity = 0 } + autoAimDeg — самонаведение: цель
     // выбирается в конусе autoAimDeg° вокруг ствола (как автонаводка), снаряд стартует ВДОЛЬ ствола и
     // доворачивает к ней по дуге (stepHoming). Трассера у самонаводящейся пули нет (мана рисует свой след).
-    shoot(muzzle, direction, { ejector, right, up, big = false, speed = BULLET_SPEED, onResult = null, projectile = null, color = null, gravity = null, homing = null, autoAimDeg = 0, charge = 0, forceTracer = false, groundFx = 0 } = {}) {
+    shoot(muzzle, direction, { ejector, right, up, big = false, speed = BULLET_SPEED, onResult = null, projectile = null, color = null, gravity = null, homing = null, autoAimDeg = 0, charge = 0, forceTracer = false, groundFx = 0, projectileOpts = null } = {}) {
+      // projectile: '<имя из projectiles/index.js>' — снаряд-модуль; projectileOpts — поле записи оружия,
+      // доходит до mod.fire({ opts }) как есть (свои настройки снаряда без правок main.js и shooting.js)
+      const pm = projectile ? projMods[projectile] ?? null : null;
+      if (pm && pm.pool === false) {
+        // модуль летит сам (без пули пула): ему только выстрел
+        projCall(pm, 'fire', { from: muzzle, dir: direction, speed, g: gravity ?? pm.gravity ?? GRAVITY, opts: projectileOpts, onResult });
+        return;
+      }
       // forceTracer — трассер даже при «Трассеры: выкл»; groundFx > 0 — пыль от попадания в землю этого
       // размера на любом расстоянии до 400 м (пулемёт «Моего дрона», my-drone.js)
       // projectile: 'blackhole' — чёрная дыра (blackhole.js) силы charge 0..1 вместо пули; будит врагов
@@ -782,6 +838,7 @@ export function createShooting({ THREE, root, camera }) {
       }
       b.life = BULLET_LIFE;
       b.arena = 0;
+      b.proj = null;
       if (isMana) {
         b.tracer = -1;
         b.mana = mana.fire(b.muzzle, b.dir, speed, b.g, color, b.home);
@@ -790,6 +847,21 @@ export function createShooting({ THREE, root, camera }) {
         return;
       }
       b.mana = 0;
+      // снаряд-модуль (projectiles/index.js): пуля пула без трассера; вид, звук выстрела и конец — в модуле
+      if (pm) {
+        b.tracer = -1;
+        if (!b.home) b.g = gravity ?? pm.gravity ?? GRAVITY;
+        b.life = pm.life ?? BULLET_LIFE;
+        const id = projCall(pm, 'fire', { from: b.muzzle, dir: b.dir, speed, g: b.g, opts: projectileOpts });
+        if (!id) {
+          b.active = false; // модуль отказался (полон пул и т. п.): пули нет
+          b.onResult = null;
+          return;
+        }
+        b.proj = pm;
+        b.projId = id;
+        return;
+      }
       // ракета / плазма (arena-weapons.js): без гравитации (если gravity не задана), свой вид и звук
       if (projectile === 'rocket' || projectile === 'plasma') {
         b.tracer = -1;
@@ -812,13 +884,14 @@ export function createShooting({ THREE, root, camera }) {
     // gravity — как у shoot (null: по projectile)
     autoAim(muzzle, direction, deg, speed = BULLET_SPEED, gravity = null, projectile = null) {
       if (!(deg > 0) || !searchLock(muzzle, direction, deg, speed)) return null;
-      return solveLock(muzzle, speed, autoDir, gravity ?? (projectile === 'mana' ? MANA_GRAVITY : GRAVITY));
+      return solveLock(muzzle, speed, autoDir, gravity ?? (projectile === 'mana' ? MANA_GRAVITY : projMods[projectile]?.gravity ?? GRAVITY));
     },
     manaStats: () => mana.stats(), // для vr:eval
     // заряд чёрной дыры у дула (main.js, gun.charge): item — оружие в руке или null; true — стал полным
     chargeFx: (item, level, seconds) => blackhole.charge(item, level, seconds),
     blackhole, // для vr:eval: blackhole.stats(), blackhole.fire(from, dir, { k })
     arena, // для vr:eval: arena.stats() (ракеты, плазма, лучи рейлгана — arena-weapons.js)
+    projectiles: projMods, // для vr:eval: projectiles.<имя>.stats() (снаряды-модули, projectiles/index.js)
     railInfo: () => ({ ...railInfo }), // последний луч рейлгана: far, ground, candidates, hits, any
     // для vr:eval: последняя захваченная цель { x, y, z, plate, deg, dist } или null
     autoAimLock: () =>
@@ -885,12 +958,21 @@ export function createShooting({ THREE, root, camera }) {
       }
       if (enabled) targetSet.update(dt); // полёт сбитых мишеней и тени
       // пули: тот же шаг, что у трассера (tracer.js) — голова трассера там, где пуля
-      const bulletDt = Math.min(0.05, dt || 0);
-      if (bulletDt > 0) for (let i = 0; i < MAX_BULLETS; i += 1) if (bullets[i].active) stepBullet(bullets[i], bulletDt);
+      const bulletDt = Math.min(MAX_STEP_S, dt || 0); // пуля всё равно летит отрезками BULLET_STEP
+      if (bulletDt > 0) {
+        for (let i = 0; i < MAX_BULLETS; i += 1) {
+          const b = bullets[i];
+          if (!b.active) continue;
+          stepBullet(b, bulletDt);
+          // снаряд-модуль ещё летит: где он сейчас (модуль двигает свой спрайт)
+          if (b.active && b.proj?.move) projCall(b.proj, 'move', b.projId, b.home ? b.pos : posAt(bPoint, b.muzzle, b.dir, b.speed, b.age, b.g), b.age);
+        }
+      }
       effects.update(dt);
       mana.update(dt);
       blackhole.update(dt);
       arena.update(dt);
+      for (let i = 0; i < projList.length; i += 1) projCall(projList[i], 'update', dt); // игровое время, подшаг мира
     },
     dispose() {
       for (let i = 0; i < MAX_BULLETS; i += 1) bullets[i].active = false; // летящие пули пропадают вместе со сценой
@@ -899,6 +981,7 @@ export function createShooting({ THREE, root, camera }) {
       mana.dispose();
       blackhole.dispose();
       arena.dispose();
+      for (let i = 0; i < projList.length; i += 1) projCall(projList[i], 'dispose');
       targetSet.dispose();
     },
   });

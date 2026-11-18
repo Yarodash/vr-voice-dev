@@ -22,9 +22,9 @@
 import { audioBudget, npcOut } from './audio-budget.js';
 
 const BAKE_VERSION = 6; // 2: whoosh (лапа), mg (пулемёт); 3: bark (ярость); 5: металл, шарниры, ricochet, hiss, turretWind; 6: ниже и шумнее (было «как птицы»)
-const POOL_VERSION = 3; // 2: 12 голосов; 3: + OWN своих голосов (к master), голоса мира — в npcBus
-const VOICES = 12; // звуки мира (их число ограничивает audio-budget.js)
-const OWN = 4; // звон от СВОЕЙ пули (own = true): только эти голоса, мир их не занимает, бюджет не спрашивают
+const POOL_VERSION = 7; // 7: позиции — .value (чистые панорамы); 6: 6: голоса мира — equalpower (HRTF перегружал аудиопоток в бою); 2: 12 голосов; 3: + OWN своих голосов (к master), голоса мира — в npcBus; 4: OWN 6 (попадание = звон + разряд, убийство — ещё отключение); 5: VOICES 16 (лимиты бюджета шире)
+const VOICES = 16; // звуки мира (их число ограничивает audio-budget.js)
+const OWN = 6; // звон от СВОЕЙ пули (own = true): только эти голоса, мир их не занимает, бюджет не спрашивают
 // категория бюджета (audio-budget.js) по звуку
 const CAT = { zap: 'zap', crackle: 'zap', powerDown: 'boom', clank: 'hit', clankHeavy: 'hit', ricochet: 'hit', thud: 'hit', servo: 'step', groundThud: 'step', scrape: 'step', whoosh: 'step', turretWind: 'gun', mg: 'gun', bark: 'voice', hiss: 'voice', growl: 'voice', howl: 'voice' };
 
@@ -581,11 +581,13 @@ const voicesFor = (shared, g) => {
     }
   }
   const c = g.context;
-  const make = (out) => {
+  // мир — 'equalpower' (дёшево), свои — HRTF: 16 HRTF-панорам мира в бою перегружали аудиопоток Quest
+  // (за 1 с отыгрывалось 0,68 с — выход глох целиком, и свои выстрелы тоже)
+  const make = (out, model = 'equalpower') => {
     const input = c.createGain();
     input.gain.value = 0;
     const panner = c.createPanner();
-    panner.panningModel = 'HRTF';
+    panner.panningModel = model;
     panner.distanceModel = 'inverse';
     panner.refDistance = 1.5;
     panner.rolloffFactor = 0.5;
@@ -597,7 +599,7 @@ const voicesFor = (shared, g) => {
     return { input, panner, source: null, endAt: 0, startedAt: 0 };
   };
   const voices = Array.from({ length: VOICES }, () => make(bus));
-  const own = Array.from({ length: OWN }, () => make(g.master));
+  const own = Array.from({ length: OWN }, () => make(g.master, 'HRTF'));
   return (shared.dogVoices = { version: POOL_VERSION, master: g.master, bus, context: c, voices, own });
 };
 
@@ -644,10 +646,11 @@ export function createDogSound(shared) {
       } else voice.input.gain.cancelScheduledValues(t);
       voice.input.gain.setValueAtTime(Math.min(2, Math.max(0, gain)), at);
       const p = voice.panner;
+      // .value, не setValueAtTime: автоматизация позиции переводит панораму в дорогой посэмпловый режим
       if (p.positionX) {
-        p.positionX.setValueAtTime(position.x, at);
-        p.positionY.setValueAtTime(position.y, at);
-        p.positionZ.setValueAtTime(position.z, at);
+        p.positionX.value = position.x;
+        p.positionY.value = position.y;
+        p.positionZ.value = position.z;
       } else p.setPosition(position.x, position.y, position.z);
       const source = c.createBufferSource();
       source.buffer = buffer;
@@ -692,7 +695,7 @@ export function createDogSound(shared) {
   return {
     zap: big((p, k = 1, g, r, own) => play('zap', p, 0.6 * k * g, r * jitter(0.12), own)),
     crackle: big((p, _k, g, r) => play('crackle', p, 0.4 * g, r * jitter())),
-    powerDown: big((p, _k, g, r) => play('powerDown', p, 0.7 * g, r * jitter(0.04))),
+    powerDown: big((p, _k, g, r, own) => play('powerDown', p, 0.7 * g, r * jitter(0.04), own)),
     // попадание по живому: стальной «дзанг» разной высоты, иногда рикошет со свистом
     clank: big((p, _k, g, r, own) => (Math.random() < 0.1 ? play('ricochet', p, 0.7 * g, r * jitter(0.15), own) : play('clank', p, 0.8 * g, r * jitter(0.2), own))),
     // k: 0..1 — калибр (пистолет ~0.4, калаш ~0.7, AWP 1): громче и ниже

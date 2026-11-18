@@ -51,6 +51,15 @@ scene.add(new THREE.GridHelper(20, 40, 0x334155, 0x1e293b));
 const root = new THREE.Group(); // the scene module's sandbox
 scene.add(root);
 const rig = new THREE.Group(); // the player: camera and controllers (see recenterHere)
+// Which controller holds things and has all the buttons: 'left' (default) or 'right' (the scene's
+// «Настройки ▸ Основная рука» calls ctx.setPrimaryHand). Survives reloads.
+const PRIMARY_HAND_KEY = 'vr.primaryHand';
+let primaryHand = 'left';
+try {
+  if (localStorage.getItem(PRIMARY_HAND_KEY) === 'right') primaryHand = 'right';
+} catch {
+  // no storage: the left hand
+}
 scene.add(rig);
 
 window.addEventListener('resize', () => {
@@ -138,6 +147,10 @@ let transcribing = false; // the hidden terminal shows `Transcribing…`: the dr
 let awaitingAnswer = false; // the last phrase was sent and Claude has not answered yet (orange dot)
 let userMessageId = null; // the pop-up that shows the phrase the user has just sent
 let sendRequested = false; // "send" was pressed; wait until the recognition has finished
+let sendRequestedAt = 0; // when (performance.now()): Y let go, or a send button pressed
+let sendWaitLogged = false; // the "still waiting" line for this request is already in the log
+let voiceIdleAt = 0; // when the bridge last reported the dictation finished (voice state -> idle)
+let usedPtt = false; // this page has recorded something: only such a page sends a forgotten draft
 let triggerPressed = false;
 
 // Problems the user has to know about (no link to the PC, scene error, no microphone).
@@ -155,7 +168,9 @@ const bridge = createBridge({
   onMessage(message) {
     if (message.t === 'hello') panel?.reset(); // the bridge replays the screen right after this
     if (message.t === 'hello' || message.t === 'voice') {
-      voiceState = message.voice ?? message.state;
+      const next = message.voice ?? message.state;
+      if (next === 'idle' && voiceState !== 'idle') voiceIdleAt = performance.now(); // the dictation has just ended
+      voiceState = next;
       panel?.setVoiceState(voiceState);
     }
     if (message.t === 'voice-error') setNote(`диктовка не сработала: ${message.error}`);
@@ -238,6 +253,7 @@ const controls = createControls({
   onStick: (x, y) => wheel.setStick(x, y),
   getMapper: () => mapperHolder.mapper,
   hitTest: () => pointer.action,
+  getPrimaryHand: () => primaryHand,
 });
 // The scene may point the ray that presses the on-screen buttons along its own object (its -Z
 // axis from its position): `ctx.pointerAim.object = someObject3D`, null to go back to the
@@ -252,7 +268,20 @@ const mapperHolder = { mapper: null };
 const sceneHost = new SceneHost(
   {
     THREE, root, scene, camera, renderer, pointerAim,
-    getLeftController: () => controls.leftGrip,
+    // the PRIMARY controller's grip (left by default; the name stayed from when it always was)
+    getLeftController: () => controls.primaryGrip,
+    getPrimaryHand: () => primaryHand, // 'left' | 'right'
+    // the scene swaps the hands on the fly: buttons, the ray, the wheel and the recording move over
+    setPrimaryHand: (hand) => {
+      if ((hand !== 'left' && hand !== 'right') || hand === primaryHand) return;
+      primaryHand = hand;
+      controls.primaryChanged();
+      try {
+        localStorage.setItem(PRIMARY_HAND_KEY, hand);
+      } catch {
+        // no storage: until the next reload
+      }
+    },
     // the scene hands over the menu for the radial wheel: { title, items: [{ label, children? }] }
     setMenu: (menu) => {
       menuHolder.menu = menu;
@@ -262,8 +291,16 @@ const sceneHost = new SceneHost(
     // the scene says which button does what: an object with step(nowMs, { buttons }) -> [actions]
     // (see scene/controls-map.js); what the actions do ('record-start', 'wheel-toggle', ...) is
     // up to the page. What a swapped-out map knew about the buttons held down is carried over.
+    // All of its state is carried over, not only `previous`: with Y held during a swap the new map
+    // had no `yPressedAt`, so letting go of Y did nothing — the phrase was never sent and kept
+    // recording (agents swap the scene every few seconds). Its callbacks stay the new map's own.
     setMapper: (mapper) => {
-      if (mapperHolder.mapper?.previous) mapper.previous = [...mapperHolder.mapper.previous];
+      const old = mapperHolder.mapper;
+      if (old) {
+        for (const [key, value] of Object.entries(old)) {
+          if (typeof value !== 'function' && key in mapper) mapper[key] = Array.isArray(value) ? [...value] : value;
+        }
+      }
       mapperHolder.mapper = mapper;
     },
     // true while the radial menu is open: the grip then means "back", so the scene must not
@@ -358,9 +395,13 @@ const LONG_PRESS_MS = 300; // the same as TAP_MS in the button map: from here a 
 let pressStartedAt = 0;
 let recordingLong = false; // the press has already lasted LONG_PRESS_MS
 let draftBeforePress = ''; // what was already dictated and unsent when the press of Y began
+let sendPendingBeforePress = false; // the previous phrase was still waiting to be sent when Y was pressed
 function setTriggerPressed(pressed) {
   triggerPressed = pressed;
-  if (pressed) draftBeforePress = draftText;
+  if (pressed) {
+    draftBeforePress = draftText;
+    sendPendingBeforePress = sendRequested;
+  }
   pressStartedAt = performance.now();
   recordingLong = false;
   showMessage(); // the preview says "…" while a phrase is being recorded (once the press is long)
@@ -529,20 +570,44 @@ showMessage();
 const pointer = createPointer({ scene, panels: messagePanels, aim: pointerAim });
 
 // "Send" may be pressed while the last words are still being recognised. The text is sent only
-// once the trigger is up, the bridge has finished the dictation and the text has stopped changing.
-const SETTLE_MS = 500;
+// once the trigger is up, the bridge has finished the dictation and the text has stopped changing
+// (counted from the last change and from the end of the dictation, whichever is later: the last
+// words can land in the prompt a moment after the bridge says it is done). If there is no text yet,
+// the request is NOT dropped at once: the words may still be on their way. It is dropped only after
+// SEND_WAIT_MS. (It used to be dropped at once; the words then arrived and went out only through
+// the forgotten-draft path below, 10 s later.)
+const SETTLE_MS = 400;
+const SEND_WAIT_MS = 6000; // after "send": how long to wait for any text at all
 const AUTO_SEND_MS = 10000; // an unsent draft that has not changed this long goes out by itself
+function requestSend() {
+  sendRequested = true;
+  sendRequestedAt = performance.now();
+  sendWaitLogged = false;
+}
 function sendWhenReady(time) {
-  if (!sendRequested || triggerPressed || releaseTimer !== null || voiceState !== 'idle' || transcribing) return;
-  if (time - draftChangedAt < SETTLE_MS) return;
-  sendRequested = false;
-  if (draftText) {
-    bridge.send({ t: 'send', text: draftText }); // the bridge then empties the prompt
-    sentFlashUntil = time + 1000;
-    awaitingAnswer = true;
-    userMessageId = `u${Date.now()}`;
-    addMessage({ id: userMessageId, text: draftText, from: 'user' }); // shown with the mark "You"
+  if (!sendRequested) return;
+  const waited = Math.round(performance.now() - sendRequestedAt);
+  const ready = !triggerPressed && releaseTimer === null && voiceState === 'idle' && !transcribing
+    && time - Math.max(draftChangedAt, voiceIdleAt) >= SETTLE_MS;
+  if (!ready || (!draftText && waited < SEND_WAIT_MS)) {
+    if (waited >= 2000 && !sendWaitLogged) {
+      sendWaitLogged = true;
+      console.log(`[send] ждёт ${waited} мс: voice=${voiceState} tr=${transcribing} trigger=${triggerPressed}`
+        + ` release=${releaseTimer !== null} текст=${draftText.length} симв.`);
+    }
+    return;
   }
+  sendRequested = false;
+  if (!draftText) {
+    console.log(`[send] за ${waited} мс текста нет: не отправлено`);
+    return;
+  }
+  console.log(`[send] отправлено через ${waited} мс после запроса (${draftText.length} симв.)`);
+  bridge.send({ t: 'send', text: draftText }); // the bridge then empties the prompt
+  sentFlashUntil = time + 1000;
+  awaitingAnswer = true;
+  userMessageId = `u${Date.now()}`;
+  addMessage({ id: userMessageId, text: draftText, from: 'user' }); // shown with the mark "You"
 }
 
 let lastFrame = 0;
@@ -563,7 +628,7 @@ renderer.setAnimationLoop((time) => {
   const previewShown = typingMessage() !== null;
   // the ray goes along the controller's own pointing direction (not the scene's axes: aiming along
   // them needed the controller raised too high); pointerAim is still where the wheel sits
-  const aim = controls.leftController;
+  const aim = controls.primaryController;
   aim?.updateWorldMatrix(true, false);
   pointer.update(renderer.xr.isPresenting ? aim : null, previewShown);
   messagePanels[0].setHover(previewShown ? pointer.action : null); // the button under the ray lights up
@@ -585,10 +650,12 @@ renderer.setAnimationLoop((time) => {
   }
   sendWhenReady(time);
   // Forgotten draft: a recognised phrase that has not changed for AUTO_SEND_MS is sent by itself
-  // (the user sometimes does not notice it was not sent).
-  if (draftText && !sendRequested && !triggerPressed && releaseTimer === null && voiceState === 'idle' && !transcribing
-      && time - draftChangedAt >= AUTO_SEND_MS) {
-    sendRequested = true;
+  // (the user sometimes does not notice it was not sent). Only by a page that has recorded: every
+  // open page sees the same prompt, and a PC browser doing it too sent each such phrase twice.
+  if (usedPtt && draftText && !sendRequested && !triggerPressed && releaseTimer === null && voiceState === 'idle'
+      && !transcribing && time - draftChangedAt >= AUTO_SEND_MS) {
+    console.log('[send] забытый черновик: отправляю сам');
+    requestSend();
   }
   paintDot(time);
   // at most one window repainted per frame: each repaint uploads a 1600×640 texture (~10 ms on
@@ -637,8 +704,9 @@ let releaseTimer = null;
 
 function onPtt(down) {
   if (!down) {
+    if (recordingLong) console.log(`[send] отпустил Y: voice=${voiceState} текст=${draftText.length} симв.`);
     setTriggerPressed(false);
-    sendRequested = true; // letting go of Y sends what was said, once the recognition has finished
+    requestSend(); // letting go of Y sends what was said, once the recognition has finished
     releaseTimer = setTimeout(() => {
       releaseTimer = null;
       mic.stop();
@@ -658,6 +726,7 @@ function onPtt(down) {
     return;
   }
   setTriggerPressed(true);
+  usedPtt = true;
   bridge.send({ t: 'ptt', down: true });
   mic.start((frame) => bridge.sendBinary(frame.buffer));
 }
@@ -669,7 +738,7 @@ function onAction(action) {
   if (action === 'reload') {
     location.reload();
   } else if (action === 'send') {
-    sendRequested = true; // sent once the recognition has finished (see sendWhenReady)
+    requestSend(); // sent once the recognition has finished (see sendWhenReady)
   } else if (action === 'delete') {
     // throw away what was recorded; with nothing recorded it does nothing (the grip is also used
     // to grab things in the scene, so it must not close the message; the cross does that)
@@ -678,7 +747,10 @@ function onAction(action) {
   } else if (action === 'record-cancel') {
     // A short press of "=" was a tap for the menu, not speech: drop the recording that had
     // started and anything it left in the hidden prompt (the stray text can arrive a moment later).
-    sendRequested = false;
+    // A phrase let go of just before, whose send is still waiting for its last words, is sent
+    // anyway: the tap only opens the menu. (Dropping it made it go out 10 s later, as a forgotten draft.)
+    sendRequested = sendPendingBeforePress;
+    if (sendRequested) console.log('[send] короткое Y (меню): прошлая фраза всё равно уйдёт');
     // Only what the press itself recorded is thrown away. If a phrase was already waiting (dictated
     // earlier, not sent), it must survive opening the menu: nothing is cleared then.
     if (!draftBeforePress) {
@@ -688,7 +760,7 @@ function onAction(action) {
   } else if (action === 'send-draft') {
     // the button next to the unsent preview: send what is there as it is (after a reload the phrase
     // may already be waiting, and there is nothing left to say)
-    sendRequested = true;
+    requestSend();
   } else if (action === 'cancel-draft') {
     // the cross next to the unsent preview: forget what was dictated
     sendRequested = false;

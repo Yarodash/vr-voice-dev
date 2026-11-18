@@ -19,7 +19,7 @@ const TAP_MS = 300; // a press of Y shorter than this is a tap: the menu, not a 
 const TRIPLE_PRESS_MS = 1000; // the three presses of Y must fit into this time (from the first)
 const GRIP = 1;
 const Y = 5;
-const MENU_BTN = 12; // «≡»
+const MENU_BTN = 12; // «≡» (у правого контроллера его нет: основная рука правая — нажатие стика, menuButton())
 
 export class ControlMap {
   // menuOpen(): открыто ли радиальное меню сейчас. Перезагрузка — только на жест «закрыто → открыто →
@@ -27,7 +27,9 @@ export class ControlMap {
   // «Время»), которые жмут Y несколько раз подряд при открытом меню, перезагружали страницу.
   // yBlocked(): Y сейчас ничего не делает (пульт «Моего дрона» в руке): нажатие, начатое при этом,
   // и его отпускание проглатываются целиком (даже если пульт отпустили, не отпуская Y)
-  constructor(menuOpen = () => false, yBlocked = () => false, remoteHeld = () => false) {
+  // menuButton(): индекс «≡» основного контроллера (12 у левого, 3 — нажатие стика — у правого)
+  constructor(menuOpen = () => false, yBlocked = () => false, remoteHeld = () => false, menuButton = () => MENU_BTN) {
+    this.menuButton = menuButton;
     this.menuOpen = menuOpen;
     this.yBlocked = yBlocked;
     this.remoteHeld = remoteHeld;
@@ -79,7 +81,7 @@ export class ControlMap {
 
     if (rising(GRIP)) actions.push('grip');
     // «≡» (buttons[12]) с пультом дрона в руке — открыть/закрыть меню пульта (Y в это время занят дроном)
-    if (rising(MENU_BTN) && this.remoteHeld()) actions.push('wheel-toggle');
+    if (rising(this.menuButton()) && this.remoteHeld()) actions.push('wheel-toggle');
 
     this.previous = [...buttons];
     return actions;

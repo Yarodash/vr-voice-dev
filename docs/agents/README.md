@@ -5,6 +5,11 @@ and a Claude Code session on the PC edits the code; the scene hot-swaps without 
 without leaving VR. User-facing rules are in `CLAUDE.md` (Russian); this folder is the code map.
 Code comments in `web/src/scene/` are Russian and accurate; they are the second source of truth.
 
+**Read [api-index.md](api-index.md) first, then open only the files you need.** It lists, per file,
+the header, exported functions, the API object each `createX` returns (with line numbers) and the
+`__sceneState` handles it sets. Generated: `npm run docs:index` (re-run after changing exports).
+Adding a new projectile or shot action: [recipes.md](recipes.md#new-projectile).
+
 ## 60-second mental model
 
 - **Shell** = `web/src/*.js` (renderer, XR session, mic, controller, radial wheel, HUD message

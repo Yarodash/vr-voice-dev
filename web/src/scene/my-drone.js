@@ -37,11 +37,12 @@ const STORE_KEY = 'scene.myDrone';
 // (shared.shotKind: урон и отброс как у этого оружия; 'awp' — ×5 по псам и коптерам), sound — звук
 // выстрела (sound.js setWeapon); speed — пули, м/с; flash — вторая вспышка; hum — [громкость,
 // скорость петли, опорное расстояние] гула
+// скорости (по просьбе): огромный в 4 раза быстрее прежнего (5 → 20 м/с), большой и средний — пропорционально
 export const SIZES = [
   { span: 0.45, frame: 'light', maxV: 12, upV: 5, yaw: 2.2, acc: 13, gap: 0.12, shot: 'pistol', sound: 'pistol', speed: 400, flash: false, hum: [0.24, 2.1, 1.6] },
-  { span: 0.9, frame: 'light', maxV: 9, upV: 4, yaw: 1.75, acc: 10, gap: 0.1, shot: 'ak', sound: 'ak', speed: 900, flash: false, hum: [0.32, 1.45, 2.6] },
-  { span: 2, frame: 'heavy', maxV: 7, upV: 3.2, yaw: 1.2, acc: 6, gap: 0.14, shot: 'ak', sound: 'ak', speed: 900, flash: true, hum: [0.5, 0.8, 5] },
-  { span: 5, frame: 'heavy', maxV: 5, upV: 2.5, yaw: 0.7, acc: 3.5, gap: 0.55, shot: 'awp', sound: 'awp', speed: 1000, flash: true, hum: [0.75, 0.42, 12] },
+  { span: 0.9, frame: 'light', maxV: 14, upV: 5, yaw: 1.75, acc: 12, gap: 0.1, shot: 'ak', sound: 'ak', speed: 900, flash: false, hum: [0.32, 1.45, 2.6] },
+  { span: 2, frame: 'heavy', maxV: 16, upV: 6, yaw: 1.2, acc: 11, gap: 0.14, shot: 'ak', sound: 'ak', speed: 900, flash: true, hum: [0.5, 0.8, 5] },
+  { span: 5, frame: 'heavy', maxV: 20, upV: 8, yaw: 0.7, acc: 10, gap: 0.55, shot: 'awp', sound: 'awp', speed: 1000, flash: true, hum: [0.75, 0.42, 12] },
 ];
 const GUN_SCALE_HEAVY = 1.5; // пулемёт тяжёлой рамы (большой, огромный) крупнее
 // камера под носом (в долях размаха): лёгкая рама — у камеры-шарика, тяжёлая — у сенсора

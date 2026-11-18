@@ -19,6 +19,8 @@ export const CLEAR_ALL = 'Очистить всё';
 export const SCENE_CONTINUE = 'Продолжить';
 export const SCENE_RESTART = 'Рестарт';
 export const RESET_SCORE = 'Сбросить счёт';
+import { STAGE_NAMES } from './progression.js';
+export const EPOCH_PREFIX = 'Эпоха: '; // Настройки ▸ Эпоха ▸ «Эпоха: Начало» … — стадия боя прямо сейчас (progression.js)
 export const RESET_GUN_SIZES = 'Сбросить размеры оружия'; // Настройки ▸: все scene.scale.* → 1 (gun-resize.js)
 // машина (car-drive.js): первый пункт любого меню в сцене с функцией «car»
 export const CAR_ENTER = 'Сесть за руль';
@@ -38,6 +40,13 @@ export const MY_DRONE_RELEASE = 'Отпустить пульт';
 export const MY_DRONE_AUTOPILOT_ON = 'Автопилот: вкл';
 export const MY_DRONE_AUTOPILOT_OFF = 'Автопилот: выкл';
 export const MY_DRONE_SIZES = ['маленький', 'средний', 'большой', 'огромный']; // «Мой дрон ▸ …» — индекс = размер (my-drone.js SIZES)
+// бинокль (binoculars.js): «Заспавнить ▸ Бинокль», в руке — «Удалить бинокль», «Перенастроить хват» (MY_DRONE_REGRIP: main.js смотрит, что в руке)
+export const BINO_SPAWN = 'Бинокль';
+export const BINO_REMOVE = 'Удалить бинокль';
+// «Прицел: аркадный / реалистичный» (keepOpen) — в «Настройках», у оружия с прицелом и у бинокля
+// (main.js → shared.scopeMode 'arcade' | 'realistic', scope-lens.js)
+export const SCOPE_MODE_PREFIX = 'Прицел:';
+export const ZOOM_PREFIX = 'Кратность ×'; // меню оружия с прицелом: кратность по кругу (main.js, 'scene.zoom.<kind>')
 export const ARTILLERY_ON = 'Артиллерия: вкл';
 export const ARTILLERY_OFF = 'Артиллерия: выкл';
 
@@ -54,8 +63,11 @@ export function buildMenu({
   timeScale = 1, // замедление времени: 1 → 0,5 → 0,25 → 1 (пункт в «Настройках»)
   scopeDebug = false, // панель отладки прицела (scope-debug.js), пункт у АВП в руке
   inertia = false, // «Инерция: вкл/выкл» в «Настройках»: гасит дрожание руки (inertia.js)
+  primaryHand = null, // «Основная рука: левая / правая» в «Настройках» (keepOpen); null — пункта нет
   prone = false, // «Режим лёжа: вкл/выкл» в «Настройках»: центрирование ставит глаза в ~35 см над землёй
   tracersOff = false, // «Трассеры: вкл/выкл» в «Настройках»
+  shadows = null, // «Тени: вкл/выкл» в «Настройках» (keepOpen; sun-shadows.js); null — пункта нет
+  scopeZoom = null, // кратность прицела оружия в руке («Кратность ×N»)
   droneAutopilot = false, // «Автопилот: вкл/выкл» в меню пульта (my-drone.js)
   fireMode = null, // 'semi' | 'auto' — у пушки в руке с modes (generated-guns.js)
   shake = 1, // «Тряска: вкл / сильно / выкл» в «Настройках» (shake.js): 1 | 2 | 0
@@ -63,7 +75,10 @@ export function buildMenu({
   tower = false, // «Вышка: вкл/выкл» (tower.js): в «Собаки ▸», если он есть, иначе в «Настройки ▸»
   drones = null, // «Собаки ▸ Квадрокоптеры: вкл/выкл» (drones.js); null — пункта нет
   artillery = null, // «Собаки ▸ Артиллерия: вкл/выкл» (artillery.js); null — пункта нет
+  scopeMode = 'arcade', // «Прицел: аркадный / реалистичный» (scope-lens.js)
 }) {
+  const zoomItem = { label: `${ZOOM_PREFIX}${String(scopeZoom ?? '?').replace('.', ',')}`, keepOpen: true };
+  const scopeModeItem = { label: `${SCOPE_MODE_PREFIX} ${scopeMode === 'realistic' ? 'реалистичный' : 'аркадный'}`, keepOpen: true };
   const towerItem = { label: tower ? 'Вышка: вкл' : 'Вышка: выкл', keepOpen: true };
   const carItems = car ? [{ label: car === 'in' ? CAR_EXIT : CAR_ENTER }] : [];
   const outlineItem = { label: aimOutline ? 'Обводка прицела: вкл' : 'Обводка прицела: выкл', keepOpen: true };
@@ -89,13 +104,17 @@ export function buildMenu({
   // настройки: «Отцентрировать» (ctx.recenter: где стоишь и куда смотришь — начало мира),
   // «Расстояние между глазами» открывает панель IPD (ipd-panel.js)
   const timeLabel = `Время: ×${String(timeScale).replace('.', ',')}`;
-  const settingsItem = { label: 'Настройки', children: [{ label: 'Отцентрировать' }, { label: 'Расстояние между глазами' }, { label: timeLabel, keepOpen: true }, { label: inertia ? 'Инерция: вкл' : 'Инерция: выкл', keepOpen: true }, { label: prone ? 'Режим лёжа: вкл' : 'Режим лёжа: выкл' }, { label: tracersOff ? 'Трассеры: выкл' : 'Трассеры: вкл', keepOpen: true }, { label: shake === 0 ? 'Тряска: выкл' : shake === 2 ? 'Тряска: сильно' : 'Тряска: вкл', keepOpen: true }, { label: RESET_GUN_SIZES }, ...(allies === null ? [towerItem] : [])] };
+  const settingsItem = { label: 'Настройки', children: [{ label: 'Отцентрировать' }, { label: 'Расстояние между глазами' }, { label: timeLabel, keepOpen: true }, { label: inertia ? 'Инерция: вкл' : 'Инерция: выкл', keepOpen: true }, ...(primaryHand ? [{ label: `Основная рука: ${primaryHand === 'right' ? 'правая' : 'левая'}`, keepOpen: true }] : []), { label: prone ? 'Режим лёжа: вкл' : 'Режим лёжа: выкл' }, { label: tracersOff ? 'Трассеры: выкл' : 'Трассеры: вкл', keepOpen: true }, ...(shadows === null ? [] : [{ label: shadows ? 'Тени: вкл' : 'Тени: выкл', keepOpen: true }]), { label: shake === 0 ? 'Тряска: выкл' : shake === 2 ? 'Тряска: сильно' : 'Тряска: вкл', keepOpen: true }, { label: RESET_GUN_SIZES }, scopeModeItem, { label: 'Эпоха', children: STAGE_NAMES.map((name) => ({ label: EPOCH_PREFIX + name })) }, ...(allies === null ? [towerItem] : [])] };
   const dogsItem = allies === null ? [] : [{ label: DOGS_MENU, children: [{ label: allies ? 'Союзники: вкл' : 'Союзники: выкл', keepOpen: true }, towerItem, ...(drones === null ? [] : [{ label: drones ? DRONES_ON : DRONES_OFF, keepOpen: true }]), ...(artillery === null ? [] : [{ label: artillery ? ARTILLERY_ON : ARTILLERY_OFF, keepOpen: true }])] }];
   const common = [...(features.targets ? [physicsItem] : []), ...dogsItem, scenesItem, settingsItem];
   if (heldKind === 'remote') {
     // пульт «Моего дрона» в руке (my-drone.js; управления дроном с пульта пока нет)
     // меню с пультом открывается кнопкой «≡» (controls-map.js)
     return { title: 'Пульт', items: [{ label: droneAutopilot ? MY_DRONE_AUTOPILOT_ON : MY_DRONE_AUTOPILOT_OFF, keepOpen: true }, { label: MY_DRONE_REGRIP }, { label: MY_DRONE_RELEASE }, { label: MY_DRONE_REMOVE }, { label: MY_DRONE_RECALL }] };
+  }
+  if (heldKind === 'binoculars') {
+    // бинокль в руке (binoculars.js): стик вверх/вниз — кратность, курок ничего не делает
+    return { title: 'Бинокль', items: [...carItems, { label: BINO_REMOVE }, { label: MY_DRONE_REGRIP }, scopeModeItem, ...common] };
   }
   if (heldKind === 'plate') {
     // глиняная тарелка в руке: курок не стреляет, а взводит бросок (clays.js)
@@ -111,7 +130,7 @@ export function buildMenu({
         { label: laser ? 'Лазерный прицел: вкл' : 'Лазерный прицел: выкл', keepOpen: true },
         { label: 'Цвет прицела' }, // закрывает колесо и открывает панель laser-panel.js
         ...(genEntry(heldKind)?.modes?.length > 1 ? [{ label: `${FIRE_MODE_PREFIX} ${fireMode === 'auto' ? 'авто' : 'полуавтомат'}`, keepOpen: true }] : []),
-        ...(heldKind === 'awp' || heldKind === 'ak2' || (genEntry(heldKind)?.scope || genEntry(heldKind)?.addScope) ? [{ label: scopeDebug ? 'Отладка прицела: вкл' : 'Отладка прицела: выкл', keepOpen: true }] : []),
+        ...(heldKind === 'awp' || heldKind === 'ak2' || (genEntry(heldKind)?.scope || genEntry(heldKind)?.addScope) ? [zoomItem, { label: scopeDebug ? 'Отладка прицела: вкл' : 'Отладка прицела: выкл', keepOpen: true }, scopeModeItem] : []),
       ],
     };
   }
@@ -120,7 +139,7 @@ export function buildMenu({
     ? [
         // всё, что можно заспавнить, — в одном подменю (onMenu смотрит только на подпись пункта)
         // сгенерированные пушки (generated-guns.js): «Заспавнить <name>»; больше трёх — своим подменю
-        { label: 'Заспавнить', children: [{ label: 'Заспавнить пистолет' }, { label: 'Заспавнить калаш' }, { label: 'Заспавнить калаш 2.0' }, { label: 'Заспавнить АВП' }, { label: 'Заспавнить тарелку' }, { label: MY_DRONE_SPAWN, children: MY_DRONE_SIZES.map((label) => ({ label })) },
+        { label: 'Заспавнить', children: [{ label: 'Заспавнить пистолет' }, { label: 'Заспавнить калаш' }, { label: 'Заспавнить калаш 2.0' }, { label: 'Заспавнить АВП' }, { label: 'Заспавнить тарелку' }, { label: MY_DRONE_SPAWN, children: MY_DRONE_SIZES.map((label) => ({ label })) }, { label: BINO_SPAWN },
           ...(GENERATED_GUNS.length > 3 ? [{ label: 'Новые пушки', children: GENERATED_GUNS.map((g) => ({ label: genSpawnLabel(g) })) }] : GENERATED_GUNS.map((g) => ({ label: genSpawnLabel(g) })))] },
         { label: gripMode === 'hold' ? 'Хват: держать' : 'Хват: нажать' },
       ]

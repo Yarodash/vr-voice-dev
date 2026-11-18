@@ -1,20 +1,24 @@
-// Left Touch controller: holding Y records, the trigger presses the on-screen button the ray
-// points at, the other buttons are plain actions (see ControlMapper).
+// The primary Touch controller (left by default; the scene's «Настройки ▸ Основная рука» makes it the
+// right one, localStorage 'vr.primaryHand'): holding Y (B on the right) records, the trigger presses
+// the on-screen button the ray points at, the other buttons are plain actions (see ControlMapper).
+// The other controller is left to the scene (its trigger steadies the gun with both hands).
 import { ControlMapper } from './control-mapper.js';
 
-// A tracked hand can also fire these events (pinch); only the real left controller counts.
-const isLeftPad = (source) => Boolean(source && source.handedness === 'left' && source.gamepad && !source.hand);
+// A tracked hand can also fire these events (pinch); only real controllers count.
+const isPad = (source) => Boolean(source && source.gamepad && !source.hand && (source.handedness === 'left' || source.handedness === 'right'));
 
 // hitTest(): the action of the on-screen button the controller points at right now, or null.
 // onStick(x, y): the thumbstick every frame (right and down are positive).
 // getMapper(): the button map the scene has set, or null: then the built-in one is used.
+// getPrimaryHand(): 'left' | 'right' — which controller all of this listens to.
 export function createControls({
   renderer, scene, onPtt, onAction, onStick = () => {}, getMapper = () => null, hitTest = () => null,
+  getPrimaryHand = () => 'left',
 }) {
   const builtInMapper = new ControlMapper();
   let holding = false;
-  let leftGrip = null;
-  let leftController = null;
+  const pads = { left: null, right: null }; // { grip, controller } of each connected controller
+  const isPrimaryPad = (source) => isPad(source) && source.handedness === getPrimaryHand();
 
   const press = () => {
     if (!holding) {
@@ -38,21 +42,21 @@ export function createControls({
     const controller = renderer.xr.getController(index);
     const grip = renderer.xr.getControllerGrip(index);
     // Recording is not on the trigger: every click on a button would start it.
-    controller.addEventListener('selectstart', (event) => isLeftPad(event.data) && click());
+    controller.addEventListener('selectstart', (event) => isPrimaryPad(event.data) && click());
     controller.addEventListener('connected', (event) => {
-      if (isLeftPad(event.data)) {
-        leftGrip = grip;
-        leftController = controller;
-      }
+      if (isPad(event.data)) pads[event.data.handedness] = { grip, controller };
     });
-    // The release of Y never arrives if the left controller falls asleep mid-sentence. The other
+    // The release of Y never arrives if the primary controller falls asleep mid-sentence. The other
     // controller (or a tracked hand) disappearing must not cut the sentence short.
     controller.addEventListener('disconnected', (event) => {
-      if (leftGrip === grip) {
-        leftGrip = null;
-        leftController = null;
+      let wasPrimary = false;
+      for (const hand of ['left', 'right']) {
+        if (pads[hand]?.grip === grip) {
+          pads[hand] = null;
+          wasPrimary ||= hand === getPrimaryHand();
+        }
       }
-      if (!event.data || isLeftPad(event.data)) release();
+      if (!event.data || wasPrimary || isPrimaryPad(event.data)) release();
     });
     scene.add(controller, grip);
   }
@@ -66,18 +70,23 @@ export function createControls({
   });
 
   return {
-    get leftGrip() {
-      return leftGrip;
+    // The primary controller's grip, or null while it is not tracked.
+    get primaryGrip() {
+      return pads[getPrimaryHand()]?.grip ?? null;
     },
-    // The left controller's pointing ray (its -Z axis), or null while it is not tracked.
-    get leftController() {
-      return leftController;
+    // The primary controller's pointing ray (its -Z axis), or null while it is not tracked.
+    get primaryController() {
+      return pads[getPrimaryHand()]?.controller ?? null;
+    },
+    // The primary hand has just changed: a recording held on the old one ends here.
+    primaryChanged() {
+      release();
     },
     tick(nowMs) {
       const session = renderer.xr.getSession();
       if (!session) return;
       for (const source of session.inputSources) {
-        if (!isLeftPad(source)) continue;
+        if (!isPrimaryPad(source)) continue;
         const state = {
           buttons: source.gamepad.buttons.map((button) => button.pressed),
           axes: [...source.gamepad.axes],

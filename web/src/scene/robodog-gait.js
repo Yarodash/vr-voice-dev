@@ -61,8 +61,39 @@ export function legFK({ abd, hip, knee }) {
 // Высота прыжка → начальная вертикальная скорость
 export const jumpSpeed = (height) => Math.sqrt(2 * GRAVITY * height);
 
-const TROT = [0, 0.5, 0.5, 0];
+// Смещения фаз ног (ЛП, ПП, ЛЗ, ПЗ) от одной общей фазы цикла пса. Во всех трёх походках передние —
+// [0, s], задние — [h, h + s]: шаг (s = 0,5, h = 0,25) — 4-тактный латеральный (ЛЗ→ЛП→ПЗ→ПП), рысь
+// (s = h = 0,5) — диагональные пары, галоп (s = 0,08, h = 0,55) — пары передних и задних. Значения
+// записаны без «заворота» через 1 (ПЗ рыси = 1, а не 0): при плавном переходе рысь → галоп лапы идут
+// ровным 4-тактом. (Было ПЗ = 0 → 0,63: посередине три лапы шагали почти разом, а одна отдельно —
+// «одной лапой, потом тремя», и на опоре подолгу оставалась одна нога.)
+// Шаг и рысь — с долей опоры ≥ 0,5, а у передней и задней пары лапы в противофазе: на земле всегда
+// хотя бы одна передняя и одна задняя. Фаза полёта (< 2 опорных) — только в галопе.
+const WALK = [0, 0.5, 0.25, 0.75];
+const TROT = [0, 0.5, 0.5, 1];
 const GALLOP = [0, 0.08, 0.55, 0.63];
+// Отладка: доля кадров с < 2 опорными лапами у идущих псов. globalThis.__gaitStats() — сводка,
+// __gaitStats(true) — сводка и сброс. Счётчики — числа, без аллокаций в кадре.
+const stats = { frames: 0, low: 0, min: 4, gallopFrames: 0, gallopLow: 0, hist: [0, 0, 0, 0, 0] };
+if (typeof globalThis !== 'undefined') {
+  globalThis.__gaitStats = (reset) => {
+    const out = {
+      walkTrotFrames: stats.frames,
+      walkTrotBelow2: stats.low,
+      walkTrotBelow2Pct: stats.frames ? +((100 * stats.low) / stats.frames).toFixed(2) : 0,
+      walkTrotMinSupport: stats.frames ? stats.min : null,
+      supportHist0to4: stats.hist.slice(),
+      gallopFrames: stats.gallopFrames,
+      gallopFlightPct: stats.gallopFrames ? +((100 * stats.gallopLow) / stats.gallopFrames).toFixed(1) : 0,
+    };
+    if (reset) {
+      stats.frames = stats.low = stats.gallopFrames = stats.gallopLow = 0;
+      stats.min = 4;
+      stats.hist.fill(0);
+    }
+    return out;
+  };
+}
 
 // Походка. update(dt, cmd, ground) → pose. cmd: { v — скорость вперёд (м/с), w — поворот (рад/с,
 // + влево), sniff 0..1 — нюхает землю, crouch 0..1 — присел (перед прыжком и после), air: null |
@@ -73,6 +104,7 @@ export function createGait() {
   const pose = { y: BODY_Y, x: 0, pitch: 0, roll: 0, yaw: 0, legs: HIPS.map(() => ({ abd: 0, hip: 0, knee: 0 })) };
   const feet = HIPS.map(() => [0, 0, 0]); // цели стоп (для отладки и тени)
   let phase = 0;
+  let vS = 0; // сглаженная скорость для ритма шага
   let time = 0;
   const jolt = { p: 0, r: 0, vp: 0, vr: 0 }; // толчок от попадания: пружина на тангаж и крен
   const offsets = [0, 0, 0, 0];
@@ -137,16 +169,33 @@ export function createGait() {
       const brake = cmd.brake ?? 0;
       const look = cmd.look ?? 0;
       // во весь опор: галоп с фазой полёта — опора короче, корпус сильнее качается и «гнётся»
-      const sprint = smoothstep(3.0, 5.2, v);
-      let duty = lerp(0.62, 0.4, smoothstep(0.3, 3.0, v));
-      duty = lerp(lerp(duty, 0.3, sprint), 0.72, prowl);
+      // Ритм (частота, доля опоры, рысь ↔ галоп) — от сглаженной скорости vS (~0,25 с): при рывке,
+      // торможении юзом и после прыжка сдвиг фаз ног и частоты идёт плавно, а не скачком за кадр
+      // (стопы «перепрыгивали» в другое место цикла — было похоже на низкий фреймрейт модели)
+      vS += (v - vS) * Math.min(1, dt * 4);
+      const sprint = smoothstep(3.0, 5.2, vS);
+      // шаг → рысь → галоп по сглаженной скорости; доля опоры шагом и рысью не ниже 0,5, ниже — только
+      // по мере перехода в галоп
+      const trotK = smoothstep(0.4, 1.2, vS);
+      const run = smoothstep(2.4, 3.4, vS);
+      let duty = lerp(0.7, 0.55, smoothstep(0.3, 2.4, vS));
+      duty = lerp(duty, lerp(0.4, 0.3, sprint), smoothstep(0.35, 1, run));
+      duty = lerp(duty, 0.72, prowl);
       // шагов в секунду (полных циклов); на большой скорости — не реже, чем нужно, чтобы шаг
       // (v·duty/f) не упёрся в предел 0,55 м: иначе стопы скользят по земле
-      const f = Math.max(Math.min(4.4, 1.7 + 0.75 * v) * (1 - 0.35 * prowl), (v * duty) / 0.53);
+      const f = Math.max(Math.min(4.4, 1.7 + 0.75 * vS) * (1 - 0.35 * prowl), (Math.max(v, vS) * duty) / 0.53);
       phase = frac(phase + f * dt);
-      const run = smoothstep(1.6, 3.0, v);
       const activity = clamp(Math.max(v, Math.abs(w) * 0.35, Math.abs(vs)) / 0.12, 0, 1);
-      for (let i = 0; i < 4; i += 1) offsets[i] = lerp(TROT[i], GALLOP[i], run);
+      for (let i = 0; i < 4; i += 1) offsets[i] = lerp(lerp(WALK[i], TROT[i], trotK), GALLOP[i], run);
+      // Вес: опорная стопа чуть уходит кончиком в землю (cmd.footSink — единицы модели, у больших псов
+      // больше: robodog-unit.js), вдавливается в начале опоры и выходит перед подъёмом; стоит — утоплена
+      // всё время. Корпус коротко проседает, когда на лапу приходит вес (амортизация).
+      const footSink = cmd.footSink ?? 0.008;
+      let load = 0;
+      for (let i = 0; i < 4; i += 1) {
+        const x = frac(phase + offsets[i]) / duty;
+        if (x < 0.4) load += Math.sin((Math.PI * x) / 0.4);
+      }
 
       // корпус
       const k = Math.min(1, dt * 60);
@@ -169,7 +218,7 @@ export function createGait() {
       // чуть присели)
       const rearA = 0.85 * rear;
       let y = BODY_Y + groundMid - 0.025 * run - 0.02 * sprint - trotBob - gallopBob + 0.004 * breathe * idle - 0.045 * sniff - 0.13 * crouch
-        - 0.1 * prowl - 0.035 * brake + 0.28 * Math.sin(rearA) - 0.06 * rear;
+        - 0.1 * prowl - 0.035 * brake + 0.28 * Math.sin(rearA) - 0.06 * rear - 0.45 * footSink * activity * load;
       let pitch = slopePitch + (0.07 + 0.09 * sprint) * run * Math.sin(phase * Math.PI * 2 - 0.6) - 0.24 * sniff + jolt.p + 0.02 * Math.sin(time * 5.3) * sniff
         - 0.07 * prowl + 0.13 * brake + rearA;
       // живость: корпус в такт шагу поворачивается и покачивается (рысью — с каждым шагом пары, на
@@ -182,12 +231,18 @@ export function createGait() {
       let roll = slopeRoll + clamp(-0.14 * w * v, -0.22, 0.22) + 0.018 * Math.sin(time * Math.PI * 2 * 0.13) * idle + jolt.r
         + sway * 0.03 * Math.sin(phase * Math.PI * 4 + 1.2) * (1 - run) + clamp(-0.1 * vs, -0.15, 0.15);
       let x = 0.012 * Math.sin(time * Math.PI * 2 * 0.13) * idle;
+      if (cmd.paw && cmd.paw.k > 0) {
+        // удар лапой (стая): корпус клонится к удару (lean, рад) и уходит от бьющей лапы (shift)
+        pitch += (cmd.paw.lean ?? 0) * cmd.paw.k;
+        x += (cmd.paw.shift ?? 0) * cmd.paw.k;
+      }
       if (broken) {
         // хромает: корпус заваливается на перебитую сторону (передняя — ещё и нос вниз), ковыляет
         for (let i = 0; i < 4; i += 1) {
           if (!(broken & (1 << i))) continue;
-          roll += HIPS[i][0] < 0 ? 0.12 : -0.12;
-          if (i < 2) pitch -= 0.09;
+          const lostK = (cmd.lost ?? 0) & (1 << i) ? 1.7 : 1; // ноги нет совсем (большие псы) — валится сильнее
+          roll += (HIPS[i][0] < 0 ? 0.12 : -0.12) * lostK;
+          if (i < 2) pitch -= 0.09 * lostK;
         }
         y -= 0.035 * activity * Math.abs(Math.sin(phase * Math.PI * 2));
       }
@@ -204,6 +259,7 @@ export function createGait() {
 
       // ноги
       const lift = Math.max(0.06 + 0.05 * run + 0.04 * sprint, 0.09 * prowl) * activity;
+      let support = 0; // опорных лап в этом кадре (для __gaitStats)
       for (let i = 0; i < 4; i += 1) {
         const hip = HIPS[i];
         const nx = hip[0] * (NEUTRAL_X + 0.18 * prowl);
@@ -235,21 +291,27 @@ export function createGait() {
           const p = frac(phase + offsets[i]);
           let s;
           let h = 0;
-          if (p < duty) s = 0.5 - p / duty;
-          else {
+          let press = 0; // 0..1 — насколько стопа вдавлена (по ходу опоры)
+          if (p < duty) {
+            const x = p / duty;
+            s = 0.5 - x;
+            press = smoothstep(0, 0.18, x) * (1 - smoothstep(0.85, 1, x));
+            if (!(broken & (1 << i))) support += 1;
+          } else {
             const q = (p - duty) / (1 - duty);
             s = -0.5 + q * q * (3 - 2 * q);
             h = lift * Math.sin(Math.PI * q);
           }
           fx = nx + sx * s * activity;
           fz = nz + sz * s * activity;
-          fy = ground(fx, fz) + FOOT_R + h;
+          fy = ground(fx, fz) + FOOT_R + h - footSink * lerp(1, press, activity);
         }
         if (broken & (1 << i) && air === null) {
           // перебитая нога: не шагает — стопа волочится сзади-сбоку по земле
           fx = nx * 1.2;
           fz = nz + (i < 2 ? 0.12 : 0.18);
-          fy = ground(fx, fz) + FOOT_R;
+          fy = ground(fx, fz) + FOOT_R - 0.5 * footSink;
+          support += 1;
         }
         // удар лапой (стая, большие псы): cmd.paw = { leg, x, y, z, k } — стопа ноги leg тянется к
         // точке (x, y, z) (система «стоп», единицы модели) с долей k
@@ -275,8 +337,22 @@ export function createGait() {
         }
         // стопа всегда ниже таза (кроме замаха лапой): иначе решение IK переворачивает колено
         let ly = local[1] - hip[1];
-        if (!(paw && paw.leg === i && paw.k > 0) && ly > -0.12) ly = -0.12;
+        // (бьющая лапа — тоже ниже, хоть и чуть: выше таза тазовый узел проворачивается на 180°, лапа «через верх»)
+        const lyTop = paw && paw.leg === i && paw.k > 0 ? -0.02 : -0.12;
+        if (ly > lyTop) ly = lyTop;
         legIK(local[0] - hip[0], ly, local[2] - hip[2], pose.legs[i]);
+      }
+      // идёт сам (не прыжок, не дыбы, не удар лапой, не присел)
+      if (air === null && activity > 0.5 && rear < 0.01 && crouch < 0.1 && !(cmd.paw && cmd.paw.k > 0)) {
+        if (run > 0.5) {
+          stats.gallopFrames += 1;
+          if (support < 2) stats.gallopLow += 1;
+        } else {
+          stats.frames += 1;
+          stats.hist[support] += 1;
+          if (support < 2) stats.low += 1;
+          if (support < stats.min) stats.min = support;
+        }
       }
       return pose;
     },

@@ -29,6 +29,12 @@ export const DOG_PAINTS = [
   [0x1d4bb0, 0xe9ecef], // полицейская: синяя и белая
   [0xc0601c, 0x4a2b1a], // ржавая: оранжевая и бурая
   [0x2c9a4c, 0xe6ebe7], // 6 — союзники (стая): зелёная и белая, только у них
+  // 7–11 — тоже только союзники (по просьбе: «у нас тоже разные»), все в зелёной гамме — свои узнаются
+  [0x1f8f86, 0xe6ebe7], // 7 бирюзовая и белая
+  [0x3e5a2a, 0xc9b98a], // 8 лесная: тёмно-зелёная и песок
+  [0x7cc242, 0x1b1d1f], // 9 лаймовая и чёрная
+  [0x0f6b4a, 0xd8b04a], // 10 изумрудная и золотая
+  [0x9fd9b8, 0x3a4048], // 11 мятная и графит
 ];
 // где в атласе вид металла: [u0, v0, du, dv]
 const REGION = { paint: [0, 0, 0.5, 1], steel: [0.5, 0.5, 0.5, 0.5], rubber: [0.5, 0, 0.5, 0.5] };
@@ -36,14 +42,16 @@ const REGION = { paint: [0, 0, 0.5, 1], steel: [0.5, 0.5, 0.5, 0.5], rubber: [0.
 // мягкое тёмное пятно для тени под псом (одна текстура на всех псов)
 export function makeShadowTexture(THREE) {
   const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 64;
+  canvas.width = canvas.height = 128;
   const g = canvas.getContext('2d');
-  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  grad.addColorStop(0, 'rgba(0,0,0,0.55)');
-  grad.addColorStop(0.55, 'rgba(0,0,0,0.3)');
-  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  // плавный спад без «полки» и края (раньше читалось как диск, на котором стоит пёс)
+  for (let i = 0; i <= 8; i += 1) {
+    const r = i / 8;
+    grad.addColorStop(r, `rgba(0,0,0,${(0.5 * Math.exp(-3.2 * r * r) * (1 - r * r)).toFixed(3)})`);
+  }
   g.fillStyle = grad;
-  g.fillRect(0, 0, 64, 64);
+  g.fillRect(0, 0, 128, 128);
   return new THREE.CanvasTexture(canvas);
 }
 
@@ -149,6 +157,38 @@ export function makeDogTextures(THREE) {
   };
 }
 
+// Растворение трупа (вместо ухода под землю): материал остаётся непрозрачным, фрагменты отбрасываются
+// (discard) по порогу fade 0…1 — 3D-шум в координатах детали (не плывёт вместе с телом, крупнее у
+// больших псов) + байерова сетка 4×4 по экрану (рябь «полупрозрачности»), у кромки — голубое свечение.
+// Без прозрачных материалов: ни сортировки, ни depthWrite, программа одна на весь бой.
+// injectDissolve(shader, { source: 'attribute' | 'uniform', glow }) — в onBeforeCompile:
+//   attribute — у экземпляра атрибут aFade (robodog-instances.js); uniform — uDogFade (один пёс, ниже).
+const DISSOLVE_FN = `
+float dogHash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float dogNoise(vec3 x) {
+  vec3 i = floor(x); vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(dogHash(i), dogHash(i + vec3(1.0, 0.0, 0.0)), f.x), mix(dogHash(i + vec3(0.0, 1.0, 0.0)), dogHash(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+             mix(mix(dogHash(i + vec3(0.0, 0.0, 1.0)), dogHash(i + vec3(1.0, 0.0, 1.0)), f.x), mix(dogHash(i + vec3(0.0, 1.0, 1.0)), dogHash(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+}
+float dogBayer2(vec2 a) { a = floor(a); return fract(a.x * 0.5 + a.y * a.y * 0.75); }
+float dogBayer4(vec2 a) { return dogBayer2(0.5 * a) * 0.25 + dogBayer2(a); }
+`;
+export function injectDissolve(shader, { source = 'attribute', glow = true } = {}) {
+  const input = source === 'uniform' ? 'uniform float uDogFade;' : 'attribute float aFade;';
+  const value = source === 'uniform' ? 'uDogFade' : 'aFade';
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>\n${input}\nvarying float vDogFade;\nvarying vec3 vDogP;`)
+    .replace('#include <begin_vertex>', `#include <begin_vertex>\n\tvDogFade = ${value};\n\tvDogP = position;`);
+  const cut = `
+\tif (vDogFade > 0.0) {
+\t\tfloat dv = clamp((dogNoise(vDogP * 26.0) - 0.2) * 1.67, 0.0, 1.0) * 0.72 + dogBayer4(gl_FragCoord.xy) * 0.28; // шум растянут: исчезает равномерно
+\t\tif (dv < vDogFade) discard;
+${glow ? '\t\ttotalEmissiveRadiance += vec3(0.12, 0.3, 0.7) * smoothstep(vDogFade + 0.05, vDogFade, dv) * (1.0 - vDogFade);\n' : ''}\t}`;
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>\nvarying float vDogFade;\nvarying vec3 vDogP;\n${DISSOLVE_FN}`)
+    .replace(glow ? '#include <emissivemap_fragment>' : '#include <alphamap_fragment>', (m) => `${m}${cut}`);
+}
+
 // Скелет без мешей (стая: псов рисует robodog-instances.js экземплярами, по вызову отрисовки на вид
 // детали для всех псов). Те же шарниры и setPose, что у buildRobodog; материалы — заглушки с полями,
 // которые читает robodog-unit.js (вспышка, глаза), окраска — номер. В сцену не добавляется: матрицы
@@ -247,6 +287,151 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
     g.translate(x, y, z);
     return part(STEEL, g, list, 'steel');
   };
+  // тело вращения вокруг Y без индексов и без вырожденных треугольников у полюсов: profile — [r, y],
+  // segs граней; sx/sz — растяжение по X/Z (восьмигранник → прямоугольник с фасками), phase — поворот,
+  // lug(i, j) — множитель радиуса вершины (протектор: рёбра через одну)
+  const revolve = (profile, segs, { sx = 1, sz = 1, phase = 0, lug = null } = {}) => {
+    const pos = [];
+    const uvs = [];
+    const at = (i, j) => {
+      const [r0, y] = profile[i];
+      const r = r0 * (lug ? lug(i, j) : 1);
+      const a = phase + (j / segs) * Math.PI * 2;
+      return [r * sx * Math.cos(a), y, -r * sz * Math.sin(a), j / segs, i / (profile.length - 1)];
+    };
+    const tri = (p, q, s) => {
+      for (const v of [p, q, s]) {
+        pos.push(v[0], v[1], v[2]);
+        uvs.push(v[3], v[4]);
+      }
+    };
+    for (let i = 0; i < profile.length - 1; i += 1) {
+      for (let j = 0; j < segs; j += 1) {
+        const a = at(i, j);
+        const b = at(i, j + 1);
+        const c = at(i + 1, j + 1);
+        const d = at(i + 1, j);
+        if (profile[i][0] > 0) tri(a, b, d);
+        if (profile[i + 1][0] > 0) tri(b, c, d);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    g.computeVertexNormals();
+    return g;
+  };
+  // Призма без индексов: выпуклый многоугольник poly ([a, b] против часовой, вид с +Z) вытянут вдоль Z
+  // на depth; у каждой боковой грани и торцов uv 0…1 — на грань целиком ложится панель атласа
+  // (швы, болты, потёртости по краям), как у BoxGeometry
+  const prism = (poly, depth) => {
+    const pos = [];
+    const uvs = [];
+    const h = depth / 2;
+    const v = (a, b, z, u, w) => {
+      pos.push(a, b, z);
+      uvs.push(u, w);
+    };
+    const n = poly.length;
+    for (let i = 0; i < n; i += 1) {
+      const [pa, pb] = poly[i];
+      const [qa, qb] = poly[(i + 1) % n];
+      v(pa, pb, -h, 0, 0); v(qa, qb, -h, 1, 0); v(qa, qb, h, 1, 1);
+      v(pa, pb, -h, 0, 0); v(qa, qb, h, 1, 1); v(pa, pb, h, 0, 1);
+    }
+    let a0 = Infinity; let a1 = -Infinity; let b0 = Infinity; let b1 = -Infinity;
+    for (const [a, b] of poly) {
+      a0 = Math.min(a0, a); a1 = Math.max(a1, a); b0 = Math.min(b0, b); b1 = Math.max(b1, b);
+    }
+    const cu = (a, b, z) => v(a, b, z, (a - a0) / (a1 - a0), (b - b0) / (b1 - b0));
+    for (let i = 1; i < n - 1; i += 1) {
+      cu(...poly[0], h); cu(...poly[i], h); cu(...poly[i + 1], h);
+      cu(...poly[0], -h); cu(...poly[i + 1], -h); cu(...poly[i], -h);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    g.computeVertexNormals();
+    return g;
+  };
+  // брусок с фасками на четырёх длинных рёбрах: сечение w×h (X×Y), длина d вдоль Z; along: 'x' | 'y' — длина вдоль X/Y
+  const bevelBox = (hex, list, w, h, d, bev, x, y, z, { rx = 0, region = 'paint', along = 'z' } = {}) => {
+    const a = w / 2;
+    const b = h / 2;
+    const g = prism([[a, -b + bev], [a, b - bev], [a - bev, b], [-a + bev, b], [-a, b - bev], [-a, -b + bev], [-a + bev, -b], [a - bev, -b]], d);
+    if (along === 'x') g.rotateY(Math.PI / 2);
+    if (along === 'y') g.rotateX(Math.PI / 2);
+    if (rx) g.rotateX(rx);
+    g.translate(x, y, z);
+    return part(hex, g, list, region);
+  };
+  // цилиндр с осью axis ('x' | 'y' | 'z'), segs граней
+  const cyl = (hex, list, r, len, segs, x, y, z, axis = 'y', region = 'steel', r2 = r) => {
+    const g = new THREE.CylinderGeometry(r2, r, len, segs);
+    if (axis === 'x') g.rotateZ(-Math.PI / 2);
+    if (axis === 'z') g.rotateX(-Math.PI / 2);
+    g.translate(x, y, z);
+    return part(hex, g, list, region);
+  };
+
+  // Детальная стопа (большие псы, LOD в robodog-instances.js): прорезиненный «ботинок» — низ шара
+  // радиуса FOOT_R с пятаком, двумя канавками и двумя рядами шипов протектора (всё не дальше FOOT_R от
+  // центра — точка касания и утопание в землю как у прежнего шара), выше — гофрированное резиновое
+  // голенище (две складки), на нём стальная манжета-щиколотка (восьмигранник с фаской сверху,
+  // обхватывает конец голени) и два болта (спереди и снаружи). ~265 треугольников.
+  const FOOT_SHIN_END = 1.45; // где кончается голень над центром стопы (× FOOT_R), внутри манжеты
+  const detailedFoot = (list, cx, cy, side) => {
+    const R = FOOT_R;
+    const deg = Math.PI / 180;
+    const sp = (phi, k) => [Math.sin(phi * deg) * k, -Math.cos(phi * deg) * k];
+    const sole = [
+      [0, -1], // полюс: точка касания
+      sp(24, 1), // край пятака
+      sp(36, 0.88), // канавка
+      sp(50, 1), // шипы протектора
+      sp(64, 0.88), // канавка
+      sp(80, 1), // шипы протектора
+      [0.98, 0.15], // плечо
+      [0.78, 0.36], // складка голенища (впадина)
+      [0.86, 0.5], // гребень
+      [0.66, 0.68], // впадина
+      [0.74, 0.8], // гребень (под манжетой)
+      [0, 0.86], // крышка
+    ].map(([r, y]) => [r * R, y * R]);
+    const treads = new Set([3, 5]); // ряды шипов: вершины через одну утоплены
+    const s = revolve(sole, 10, { lug: (i, j) => (treads.has(i) && j % 2 ? 0.86 : 1) });
+    s.translate(cx, cy, 0);
+    part(RUBBER, s, list, 'rubber');
+    // резина светлее прежней (рисунок читается), канавки, утопленные шипы и впадины складок — почти чёрные
+    const sc = s.attributes.color;
+    const sp3 = s.attributes.position;
+    const lo = new THREE.Color(0x0a0a0b);
+    const hi = new THREE.Color(0x3a3b40);
+    const dips = new Set([2, 4, 7, 9].map((i) => sole[i][1]));
+    for (let i = 0; i < sp3.count; i += 1) {
+      const dx = sp3.getX(i) - cx;
+      const dy = sp3.getY(i) - cy;
+      const dz = sp3.getZ(i);
+      const deep = (dy < 0 && Math.hypot(dx, dy, dz) < 0.95 * R) || [...dips].some((y) => Math.abs(y - dy) < 1e-6);
+      const c = deep ? lo : hi;
+      sc.setXYZ(i, c.r, c.g, c.b);
+    }
+    // манжета: грани по осям, обхватывает конец голени (0,03×0,036, сдвинут вперёд на CUFF_Z); низ —
+    // на верхнем гребне голенища, фаска сверху выше конца голени
+    const CUFF_Z = 0.004;
+    const flat = Math.cos(Math.PI / 8);
+    const cuff = revolve([[1, 0.78 * R], [1, 1.55 * R], [0.8, 1.75 * R], [0, 1.75 * R]], 8, {
+      sx: 0.019 / flat,
+      sz: 0.02 / flat,
+      phase: Math.PI / 8,
+    });
+    cuff.translate(cx, cy, CUFF_Z);
+    part(STEEL, cuff, list, 'steel');
+    // болты (тёмная шляпка): спереди (−Z) и снаружи (±X по стороне)
+    for (const [bx, bz, w, d] of [[side * 0.019, 0, 0.004, 0.006], [0, -0.02, 0.006, 0.004]]) {
+      box(0x3a3d42, list, w, 0.006, d, cx + bx, cy + 1.17 * R, CUFF_Z + bz, 0, 0, 0, 'steel');
+    }
+  };
   const merged = (list) => {
     const g = mergeGeometries(list);
     for (const p of list) p.dispose();
@@ -267,6 +452,21 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
   });
   material.emissive.setRGB(0, 0, 0); // вспышка от попадания (robodog-unit.js)
   const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x45e8ff, toneMapped: false });
+  // растворение трупа (setFade): общий юниформ у корпуса/ног и глаз, программа одна на все кадры
+  const fadeU = { value: 0 };
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uDogFade = fadeU;
+    injectDissolve(shader, { source: 'uniform' });
+  };
+  material.customProgramCacheKey = () => 'robodog-dissolve-1';
+  eyeMaterial.onBeforeCompile = (shader) => {
+    shader.uniforms.uDogFade = fadeU;
+    injectDissolve(shader, { source: 'uniform', glow: false });
+  };
+  eyeMaterial.customProgramCacheKey = () => 'robodog-dissolve-eye-1';
+  const setFade = (k) => {
+    fadeU.value = k;
+  };
 
   const group = new THREE.Group();
   group.name = 'robodog';
@@ -295,7 +495,63 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
   box(BLACK, b, 0.18, 0.07, 0.06, 0, 0.0, 0.33);
   // крепления ног на корпусе — сталь
   for (const [x, y, z] of HIPS) steelBox(b, 0.04, 0.07, 0.09, Math.sign(x) * 0.098, y, z);
-  const bodyMesh = new THREE.Mesh(merged(b), material);
+  const bodyGeometry = merged(b);
+
+  // ---- детальный корпус (LOD больших псов, robodog-instances.js; у одиночного пса — всегда): тот же
+  // силуэт и те же точки крепления (ноги, пулемёт, полосы глаз на тех же гранях), но фаски на рёбрах,
+  // решётки охлаждения, болты, камеры на морде, люк и полозья на брюхе. ~900 треугольников против 228.
+  const bd = [];
+  const GLASS = 0x0d1016; // стекло объективов: тёмная гладкая сталь атласа
+  bevelBox(BLACK, bd, 0.21, 0.09, 0.66, 0.014, 0, -0.035, 0); // рама и брюхо
+  bevelBox(YELLOW, bd, 0.2, 0.08, 0.58, 0.012, 0, 0.03, 0.005); // кожух
+  bevelBox(YELLOW, bd, 0.16, 0.03, 0.5, 0.008, 0, 0.08, 0.01); // крышка
+  box(YELLOW, bd, 0.035, 0.03, 0.5, 0.083, 0.068, 0.01, 0, 0, -0.6); // скосы крышки
+  box(YELLOW, bd, 0.035, 0.03, 0.5, -0.083, 0.068, 0.01, 0, 0, 0.6);
+  box(BLACK, bd, 0.006, 0.022, 0.42, 0.101, 0.035, 0.02); // полосы по бокам
+  box(BLACK, bd, 0.006, 0.022, 0.42, -0.101, 0.035, 0.02);
+  steelBox(bd, 0.014, 0.014, 0.36, 0.055, 0.102, 0.02); // рейки и ручка
+  steelBox(bd, 0.014, 0.014, 0.36, -0.055, 0.102, 0.02);
+  steelBox(bd, 0.124, 0.014, 0.014, 0, 0.102, -0.16);
+  steelBox(bd, 0.124, 0.014, 0.014, 0, 0.102, 0.2);
+  // решётки охлаждения на крышке: тёмная рамка и стальные ламели (задняя — 5, передняя — 4)
+  box(BLACK, bd, 0.084, 0.004, 0.084, 0, 0.096, 0.145);
+  for (let i = 0; i < 5; i += 1) steelBox(bd, 0.072, 0.005, 0.007, 0, 0.099, 0.115 + i * 0.015);
+  box(BLACK, bd, 0.084, 0.004, 0.07, 0, 0.096, -0.1);
+  for (let i = 0; i < 4; i += 1) steelBox(bd, 0.072, 0.005, 0.007, 0, 0.099, -0.124 + i * 0.016);
+  // боковые решётки сзади (за полосами): рамка и 4 ламели с каждой стороны
+  for (const sx of [-1, 1]) {
+    box(BLACK, bd, 0.003, 0.046, 0.046, sx * 0.1005, 0.04, 0.262);
+    for (let i = 0; i < 4; i += 1) steelBox(bd, 0.004, 0.005, 0.04, sx * 0.102, 0.025 + i * 0.01, 0.262);
+    // болты на раме
+    for (const bz of [-0.2, 0.2]) steelBox(bd, 0.004, 0.007, 0.007, sx * 0.1055, -0.05, bz);
+  }
+  // болты по углам крышки
+  for (const [bx, bz] of [[0.066, -0.225], [-0.066, -0.225], [0.066, 0.245], [-0.066, 0.245]]) box(0x3a3d42, bd, 0.007, 0.004, 0.007, bx, 0.097, bz, 0, 0, 0, 'steel');
+  // сенсорная голова: блок с фасками, скошенный лоб, губа
+  bevelBox(BLACK, bd, 0.19, 0.085, 0.1, 0.012, 0, 0.0, -0.345);
+  box(BLACK, bd, 0.17, 0.04, 0.1, 0, 0.05, -0.335, -0.35);
+  steelBox(bd, 0.13, 0.03, 0.03, 0, -0.035, -0.39);
+  // стереокамеры под полосой глаз: стальная оправа, тёмное стекло; между ними — датчик глубины
+  for (const sx of [-1, 1]) {
+    cyl(STEEL, bd, 0.009, 0.008, 8, sx * 0.052, -0.009, -0.398, 'z');
+    cyl(GLASS, bd, 0.0058, 0.004, 8, sx * 0.052, -0.009, -0.4035, 'z');
+  }
+  box(GLASS, bd, 0.022, 0.008, 0.004, 0, -0.009, -0.397, 0, 0, 0, 'steel');
+  // камеры по бокам головы (под боковыми полосами глаз)
+  for (const sx of [-1, 1]) {
+    cyl(STEEL, bd, 0.008, 0.006, 8, sx * 0.0975, -0.016, -0.35, 'x');
+    cyl(GLASS, bd, 0.005, 0.003, 8, sx * 0.1015, -0.016, -0.35, 'x');
+  }
+  // задний бампер с фасками
+  bevelBox(BLACK, bd, 0.18, 0.07, 0.06, 0.012, 0, 0.0, 0.33);
+  // крепления ног — сталь с фасками
+  for (const [x, y, z] of HIPS) bevelBox(STEEL, bd, 0.04, 0.07, 0.09, 0.008, Math.sign(x) * 0.098, y, z, { region: 'steel' });
+  // брюхо: люк батареи и два стальных полоза
+  bevelBox(STEEL, bd, 0.14, 0.012, 0.36, 0.004, 0, -0.082, 0, { region: 'steel' });
+  for (const sx of [-1, 1]) steelBox(bd, 0.012, 0.008, 0.5, sx * 0.085, -0.082, 0);
+  const bodyDetailGeometry = merged(bd);
+
+  const bodyMesh = new THREE.Mesh(bodyDetailGeometry, material); // один пёс — детальный корпус
   bodyMesh.name = 'robodog-body';
   body.add(bodyMesh);
 
@@ -314,6 +570,8 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
   // ---- ноги: геометрия общая для всех ног одной стороны (зеркало по X)
   const upperGeometry = [];
   const lowerGeometry = [];
+  const lowerDetailGeometry = [];
+  const upperDetailGeometry = [];
   for (const side of [-1, 1]) {
     const u = [];
     joint(u, 0.048, 0.06, side * 0.012, 0, 0); // мотор бедра
@@ -330,6 +588,35 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
     foot.translate(side * 0.012, -L2, 0);
     part(RUBBER, foot, l, 'rubber');
     lowerGeometry.push(merged(l));
+    // ---- детальные бедро и голень (LOD больших псов): тот же размер и те же оси суставов
+    const cx = side * 0.012;
+    const ud = [];
+    // актуатор бедра: мотор (12 граней), снаружи кожух в цвет рамы, стальная ступица и 4 болта
+    cyl(STEEL, ud, 0.048, 0.06, 12, cx, 0, 0, 'x');
+    cyl(BLACK, ud, 0.038, 0.007, 10, side * 0.0455, 0, 0, 'x', 'paint');
+    cyl(STEEL, ud, 0.013, 0.006, 8, side * 0.05, 0, 0, 'x');
+    for (const [by, bz] of [[0.026, 0], [-0.026, 0], [0, 0.026], [0, -0.026]]) box(0x3a3d42, ud, 0.004, 0.006, 0.006, side * 0.05, by, bz, 0, 0, 0, 'steel');
+    // бедро с фасками, накладка снаружи, утолщение у колена
+    bevelBox(YELLOW, ud, 0.05, 0.07, L1 - 0.02, 0.01, cx, -L1 / 2 + 0.005, 0, { along: 'y' });
+    bevelBox(BLACK, ud, 0.006, 0.045, L1 * 0.6, 0.002, side * 0.04, -L1 / 2, 0, { along: 'y' });
+    bevelBox(YELLOW, ud, 0.04, 0.06, 0.05, 0.008, cx, -L1 + 0.02, 0.004, { along: 'y' });
+    // кабель сзади бедра (резиновый шланг) и два хомута
+    cyl(RUBBER, ud, 0.0045, L1 - 0.07, 6, side * 0.02, -0.03 - (L1 - 0.07) / 2, 0.039, 'y', 'rubber');
+    for (const cy of [-0.05, -L1 + 0.06]) steelBox(ud, 0.012, 0.006, 0.012, side * 0.02, cy, 0.037);
+    upperDetailGeometry.push(merged(ud));
+
+    // голень: колено с кожухом в цвет рамы и ступицей, голень с фасками и рёбрами, кабель к стопе
+    const ld = [];
+    cyl(STEEL, ld, 0.03, 0.05, 12, cx, 0, 0, 'x');
+    cyl(BLACK, ld, 0.024, 0.006, 10, side * 0.04, 0, 0, 'x', 'paint');
+    cyl(STEEL, ld, 0.009, 0.005, 8, side * 0.0445, 0, 0, 'x');
+    const shinEnd = -L2 + FOOT_SHIN_END * FOOT_R;
+    bevelBox(STEEL, ld, 0.03, 0.036, -0.01 - shinEnd, 0.005, cx, (-0.01 + shinEnd) / 2, 0.004, { along: 'y', region: 'steel' });
+    bevelBox(BLACK, ld, 0.032, 0.04, L2 * 0.35, 0.006, cx, -L2 * 0.3, 0.004, { along: 'y' });
+    for (const ry of [-0.125, -0.147, -0.169]) bevelBox(BLACK, ld, 0.034, 0.04, 0.005, 0.004, cx, ry, 0.004, { along: 'y' }); // рёбра
+    cyl(RUBBER, ld, 0.0035, 0.165, 6, cx, -0.1025, 0.026, 'y', 'rubber');
+    detailedFoot(ld, cx, -L2, side);
+    lowerDetailGeometry.push(merged(ld));
   }
 
   const legs = HIPS.map(([x, y, z], i) => {
@@ -339,13 +626,13 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
     body.add(hip);
     const upper = new THREE.Object3D();
     hip.add(upper);
-    const upperMesh = new THREE.Mesh(upperGeometry[sideIndex], material);
+    const upperMesh = new THREE.Mesh(upperDetailGeometry[sideIndex], material); // один пёс — детальное бедро
     upperMesh.name = `robodog-upper-${i}`;
     upper.add(upperMesh);
     const knee = new THREE.Object3D();
     knee.position.set(0, -L1, 0);
     upper.add(knee);
-    const lowerMesh = new THREE.Mesh(lowerGeometry[sideIndex], material);
+    const lowerMesh = new THREE.Mesh(lowerDetailGeometry[sideIndex], material); // один пёс — детальная стопа
     lowerMesh.name = `robodog-lower-${i}`;
     knee.add(lowerMesh);
     return { hip, upper, knee };
@@ -396,7 +683,7 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
       const yl = new THREE.Color(YELLOW);
       const bl = new THREE.Color(BLACK);
       const near = (a, i, c) => Math.abs(a[i] - c.r) + Math.abs(a[i + 1] - c.g) + Math.abs(a[i + 2] - c.b) < 1e-4;
-      paintSets = [bodyMesh.geometry, ...upperGeometry, ...lowerGeometry, turretBaseGeometry, turretGunGeometry].map((g) => {
+      paintSets = [bodyGeometry, bodyDetailGeometry, ...upperGeometry, ...upperDetailGeometry, ...lowerGeometry, ...lowerDetailGeometry, turretBaseGeometry, turretGunGeometry].map((g) => {
         const a = g.attributes.color.array;
         const first = [];
         const second = [];
@@ -430,12 +717,13 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
     setPaint,
     turret,
     // геометрии модели — для отрисовки всех псов стаи экземплярами (robodog-instances.js)
-    geometries: { body: bodyMesh.geometry, eye: eyeGeometry, upper: upperGeometry, lower: lowerGeometry, turretBase: turretBaseGeometry, turretGun: turretGunGeometry },
+    geometries: { body: bodyGeometry, bodyDetail: bodyDetailGeometry, eye: eyeGeometry, upper: upperGeometry, upperDetail: upperDetailGeometry, lower: lowerGeometry, lowerDetail: lowerDetailGeometry, turretBase: turretBaseGeometry, turretGun: turretGunGeometry },
     group,
     body,
     eye,
     material,
     eyeMaterial,
+    setFade,
     legs,
     setPose(pose) {
       body.position.set(pose.x, pose.y, 0);
@@ -450,9 +738,10 @@ export function buildRobodog(THREE, { textures = null, env = null } = {}) {
     },
     dispose() {
       group.removeFromParent();
-      bodyMesh.geometry.dispose();
+      bodyGeometry.dispose();
+      bodyDetailGeometry.dispose();
       eyeGeometry.dispose();
-      for (const g of [...upperGeometry, ...lowerGeometry]) g.dispose();
+      for (const g of [...upperGeometry, ...upperDetailGeometry, ...lowerGeometry, ...lowerDetailGeometry]) g.dispose();
       turretBaseGeometry.dispose();
       turretGunGeometry.dispose();
       material.dispose();

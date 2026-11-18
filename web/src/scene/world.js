@@ -7,7 +7,60 @@
 // непрозрачного, поэтому считается только там, где неба не закрывает земля. Звёзды — точки со своим
 // шейдером (мерцают, прячутся за облаками). Земля — свой маленький шейдер: пятна разных оттенков
 // зелени из шума и дымка у горизонта под цвет неба.
-export function createWorld({ THREE, scene, root, camera, renderer }) {
+// Тени псов и коптеров (sun-shadows.js): два каскада карт силуэтов. dogShadeUv(uv) — 1 освещено,
+// 0 тень; uv.xy — ближний каскад, uv.zw — дальний (считаются в вершинном шейдере: проекция
+// ортогональная, по треугольнику линейна). Край ближнего каскада плавно переходит в дальний, край
+// дальнего — в «без теней».
+const DOG_SHADE_GLSL = `
+  uniform float dogShadowOn;
+  uniform float dogShadowStrength;
+  uniform sampler2D dogShadowNear;
+  uniform sampler2D dogShadowFar;
+  uniform vec4 dogShadowNearA;
+  uniform vec4 dogShadowFarA;
+  float dogEdge(vec2 uv) { vec2 e = min(uv, 1.0 - uv); return min(e.x, e.y); }
+  // uv каскада → атлас (sun-shadows.js); чуть внутрь от края — соседний каскад не подмешивается
+  vec2 dogAtlas(vec2 uv, vec4 a) { return clamp(uv, 0.002, 0.998) * a.xy + a.zw; }
+  float dogShadeUv(vec4 uv) {
+    if (dogShadowOn < 0.5) return 1.0;
+    // внутри ближнего каскада — одна выборка; дальний — только на стыке и за ближним
+    float ea = dogEdge(uv.xy);
+    float near = 1.0;
+    if (ea > 0.0) {
+      near = texture2D(dogShadowNear, dogAtlas(uv.xy, dogShadowNearA)).r;
+      if (ea >= 0.06) return near;
+    }
+    float eb = dogEdge(uv.zw);
+    float far = eb > 0.0 ? mix(1.0, texture2D(dogShadowFar, dogAtlas(uv.zw, dogShadowFarA)).r, smoothstep(0.0, 0.08, eb)) : 1.0;
+    return ea > 0.0 ? mix(far, near, ea / 0.06) : far;
+  }`;
+// трава: только ближний каскад — дальше травинки сливаются с землёй, её тень видна и так; так вдвое
+// дешевле (у травы ~200k вершин на глаз и много перекрытий)
+const DOG_NEAR_GLSL = `
+  uniform float dogShadowOn;
+  uniform float dogShadowStrength;
+  uniform sampler2D dogShadowNear;
+  uniform vec4 dogShadowNearA;
+  float dogShadeNear(vec2 uv) {
+    if (dogShadowOn < 0.5) return 1.0;
+    vec2 e2 = min(uv, 1.0 - uv);
+    float e = min(e2.x, e2.y);
+    if (e <= 0.0) return 1.0;
+    return mix(1.0, texture2D(dogShadowNear, clamp(uv, 0.002, 0.998) * dogShadowNearA.xy + dogShadowNearA.zw).r, smoothstep(0.0, 0.06, e));
+  }`;
+const DOG_NEAR_UV_GLSL = `
+  uniform mat4 dogShadowNearM;
+  varying vec2 vDogUv;
+  void dogShadowUv(vec3 w) { vDogUv = (dogShadowNearM * vec4(w, 1.0)).xy * 0.5 + 0.5; }`;
+const DOG_UV_GLSL = `
+  uniform mat4 dogShadowNearM;
+  uniform mat4 dogShadowFarM;
+  varying vec4 vDogUv;
+  void dogShadowUv(vec3 w) {
+    vDogUv = vec4((dogShadowNearM * vec4(w, 1.0)).xy, (dogShadowFarM * vec4(w, 1.0)).xy) * 0.5 + 0.5;
+  }`;
+
+export function createWorld({ THREE, scene, root, camera, renderer, sunShadow = null }) {
   // Дорогое (шум, земля, звёзды, ~36 000 травинок, запечённые тени травы, текстуры на GPU) строится
   // один раз и переживает подмену сцены: на шлеме это ~0,5 с работы и заливки текстур на каждой
   // подмене. Ключ — исходный текст createWorld: любая правка этой функции строит всё заново.
@@ -26,6 +79,17 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     };
   }
   const cache = shared.worldCache;
+  // uniforms теней псов (sun-shadows.js); без них — выключены
+  const dogU = sunShadow ?? {
+    dogShadowOn: { value: 0 },
+    dogShadowStrength: { value: 0 },
+    dogShadowNear: { value: null },
+    dogShadowFar: { value: null },
+    dogShadowNearM: { value: new THREE.Matrix4() },
+    dogShadowFarM: { value: new THREE.Matrix4() },
+    dogShadowNearA: { value: new THREE.Vector4(1, 1, 0, 0) },
+    dogShadowFarA: { value: new THREE.Vector4(1, 1, 0, 0) },
+  };
 
   // --- дальность: небо и земля уходят далеко за 100 м, которые выставляет страница
   const oldFar = camera.far;
@@ -595,13 +659,16 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         noiseTex: { value: noiseTexture },
         bladeTex: { value: bladeTexture },
         time: grassTime,
+        ...dogU,
       },
       vertexShader: `
         varying vec3 vWorld;
         varying vec3 vNormal;
+        ${DOG_UV_GLSL}
         void main() {
           vec4 world = modelMatrix * vec4(position, 1.0);
           vWorld = world.xyz;
+          dogShadowUv(world.xyz);
           vNormal = normalize(mat3(modelMatrix) * normal);
           gl_Position = projectionMatrix * viewMatrix * world;
         }`,
@@ -615,7 +682,9 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         uniform float shadowOn;
         varying vec3 vWorld;
         varying vec3 vNormal;
+        varying vec4 vDogUv;
         ${MEADOW_GLSL}
+        ${DOG_SHADE_GLSL}
         void main() {
           vec2 p = vWorld.xz;
           float far = length(vWorld.xz - cameraPosition.xz);
@@ -657,16 +726,20 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
           col *= 1.0 + 0.9 * (light - 0.41);
           col += vec3(0.03, 0.013, 0.0) * max(light - 0.41, 0.0);
           // тени травинок (текстура силуэтов со стороны солнца); две точки с линейной фильтрацией
-          // смягчают края. Вне текстуры (дальше ~30 м) выборок нет.
+          // смягчают края. Вне текстуры (дальше ~30 м) выборок нет. Тени псов (dogShadeUv) с ними
+          // не складываются: берётся более тёмная.
+          float shade = 0.0;
           if (shadowOn > 0.5) {
             vec4 lc = shadowMatrix * vec4(vWorld, 1.0);
             vec2 suv = lc.xy * 0.5 + 0.5;
             if (suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0) {
               vec2 texel = vec2(0.75 / 2048.0);
               float lit = texture2D(grassShadow, suv + texel).r + texture2D(grassShadow, suv - texel).r;
-              col *= 1.0 - (1.0 - lit * 0.5) * 0.55;
+              shade = (1.0 - lit * 0.5) * 0.55;
             }
           }
+          shade = max(shade, (1.0 - dogShadeUv(vDogUv)) * dogShadowStrength);
+          col *= 1.0 - shade;
           // дымка у горизонта: к закату тёплая, в другую сторону холодная, чтобы земля сливалась с небом
           float distance = length(vWorld.xz - cameraPosition.xz);
           vec2 dir = normalize(vWorld.xz - cameraPosition.xz + vec2(1e-4));
@@ -745,7 +818,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
   const grassMaterial = new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
     toneMapped: false,
-    uniforms: { time: grassTime, sunDir: { value: sunDirection }, noiseTex: { value: noiseTexture } },
+    uniforms: { time: grassTime, sunDir: { value: sunDirection }, noiseTex: { value: noiseTexture }, ...dogU },
     // Весь свет считается по вершинам (у ближней травинки их 6): так на Quest заметно дешевле, чем в каждом
     // пикселе, а на узкой травинке разницы не видно. Фрагментный шейдер только выбирает сторону.
     vertexShader: `
@@ -754,6 +827,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
       varying vec3 vFront;
       varying vec3 vBack;
       ${MEADOW_GLSL}
+      ${DOG_NEAR_UV_GLSL}
       void main() {
         mat4 m = modelMatrix * instanceMatrix;
         vec4 world = m * vec4(position, 1.0);
@@ -767,6 +841,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
         world.x += sway * (0.06 + gust * 0.07 + wave * 0.1);
         world.z += sway * gust * 0.03;
         gl_Position = projectionMatrix * viewMatrix * world;
+        dogShadowUv(world.xyz); // тень пса на травинке (sun-shadows.js)
 
         // цвет: сизо-зелёный ↔ жёлто-зелёный по пятнам луга и по кустику; изредка сухая травинка
         float tint = aVariation.z;
@@ -803,8 +878,10 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
     fragmentShader: `
       varying vec3 vFront;
       varying vec3 vBack;
+      varying vec2 vDogUv;
+      ${DOG_NEAR_GLSL}
       void main() {
-        gl_FragColor = vec4(gl_FrontFacing ? vFront : vBack, 1.0);
+        gl_FragColor = vec4((gl_FrontFacing ? vFront : vBack) * (1.0 - (1.0 - dogShadeNear(vDogUv)) * dogShadowStrength), 1.0);
         #include <colorspace_fragment>
       }`,
   });
@@ -958,6 +1035,7 @@ export function createWorld({ THREE, scene, root, camera, renderer }) {
 
   const cameraPosition = new THREE.Vector3();
   return {
+    shadowSun, // к солнцу для теней (выше настоящего): тени псов (sun-shadows.js) — по нему же, как у травы
     update(dt) {
       // небо следует за головой: до него не дойти
       camera.getWorldPosition(cameraPosition);

@@ -31,6 +31,10 @@
 //   addScope — { at: [x, y], length = 0.28, zoom = 5, height, style = 'emerald' | 'black' }: на картинке
 //            прицела нет — модель прицела с настоящими стёклами (scope-addon.js); at — пиксели card.png
 //            верха коробки под серединой крепления, height — ось над ним, м
+//   collimator — { at: [x, y], windowR = 0.022, zeroM = 30, dotMoa = 5, color = 0xff2418, height, length }:
+//            коллиматор (red-dot, collimator.js) на рельсе; at — пиксели card.png верхней кромки рельса под
+//            серединой лапы (у модели лапа садится на верх вершин под ней); точка без параллакса, пристреляна
+//            на zeroM по пуле этой пушки; height — ось над рельсом, м
 //   trigger — { box: [x0, y0, x1, y1], maxAngle = 0.35 } — пиксели card.png: рамка вокруг лезвия
 //            спуска внутри скобы (верх рамки — ось поворота)
 //   thicknessM — толщина «картинки», м (по умолчанию 0.035)
@@ -54,11 +58,13 @@
 //            ракета (speed, gravity — дуга, взрыв с уроном ~4 м), рейлган (мгновенный сквозной луч
 //            300 м, урон по shotKind), плазма (голубые шары, всплеск ~1 м); без гильз и вспышки калаша
 //   shake  — { m, cap, tau }: своя тряска вида от выстрела (формат SHAKE в shake.js)
+//   projectile: '<имя>' из projectiles/index.js — снаряд-модуль (шаблон projectiles/_template.js);
+//            projectileOpts — { … } его настройки, доходят до mod.fire({ opts }) как есть
 export const GEN_PREFIX = 'gen:';
 
 // Стрельба по умолчанию (как в main.js GUNS): auto — как калаш, иначе — как пистолет.
-export const GUN_AUTO = { gapMs: 90, auto: true, kickMs: 60, kickRad: 0.02, kickBackM: 0.005, climbRad: 0.006, buzz: 0.7, speed: 900, flash: true, sound: 'ak', shotKind: 'ak', rifleCasing: true, autoAim: 0, projectile: null, projectileColor: null, gravity: null, homing: null, charge: null, shake: null };
-export const GUN_SEMI = { gapMs: 0, auto: false, kickMs: 140, kickRad: 0.2, kickBackM: 0, climbRad: 0, buzz: 0.8, speed: 360, flash: false, sound: 'pistol', shotKind: 'pistol', rifleCasing: false, autoAim: 0, projectile: null, projectileColor: null, gravity: null, homing: null, charge: null, shake: null };
+export const GUN_AUTO = { gapMs: 90, auto: true, kickMs: 60, kickRad: 0.02, kickBackM: 0.005, climbRad: 0.006, buzz: 0.7, speed: 900, flash: true, sound: 'ak', shotKind: 'ak', rifleCasing: true, autoAim: 0, projectile: null, projectileColor: null, projectileOpts: null, gravity: null, homing: null, charge: null, shake: null };
+export const GUN_SEMI = { gapMs: 0, auto: false, kickMs: 140, kickRad: 0.2, kickBackM: 0, climbRad: 0, buzz: 0.8, speed: 360, flash: false, sound: 'pistol', shotKind: 'pistol', rifleCasing: false, autoAim: 0, projectile: null, projectileColor: null, projectileOpts: null, gravity: null, homing: null, charge: null, shake: null };
 
 export const GENERATED_GUNS = [
   {
@@ -86,6 +92,10 @@ export const GENERATED_GUNS = [
     scope: { eyepiece: [724, 522], objective: [1701, 523], radiusPx: 57, objectiveRadiusPx: 83, zoom: 6 }, // замер 48 / 70, по просьбе ×1,1 ×1,08
     trigger: { box: [900, 826, 934, 890] }, gapMs: 1800, projectile: 'blackhole', charge: { minS: 0.3, maxS: 3 }, kickRad: 0.12, buzz: 1 }, // стреляет чёрными дырами (blackhole.js): держать курок — заряд, отпустить — выстрел; grip задан вручную: сама рукоять нашлась у приклада
   { id: 'sam_rifle', name: 'Сэм-винтовка', length: 0.775, auto: true, modes: ['semi', 'auto'], shape: 'rifle', card: true, glb: true, v: 4, autoAim: 15, projectile: 'mana', sound: 'mana', speed: 100, homing: { delayS: 0.04, turnDegS: 240 } }, // мана: сгусток виден в полёте (100 м/с) и доворачивает к цели дугой; v2 — «в стиле природы», v3 — + синяя мана, v4 — 3D (Tripo medium)
+  // «М-ка в хаки» (из шлема 2026-11-18): обычная штурмовая винтовка M4-образная в цвете хаки, обычные пули
+  { id: 'khaki_m4', name: 'М-ка хаки', length: 1.1, auto: true, modes: ['semi', 'auto'], shape: 'rifle', card: true, glb: true, v: 15, trigger: { box: [387, 307, 446, 342] },
+    // коллиматор на верхнем рельсе над коробкой (замер по альфе card.png 1024×572: верх зубьев рельса x 362–862 — y 200,5)
+    collimator: { at: [440, 200.5] } },
 ];
 
 const FIRE_KEYS = Object.keys(GUN_AUTO);

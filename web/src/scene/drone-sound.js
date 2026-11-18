@@ -10,13 +10,14 @@
 // всегда; гул отдаётся LOOPS ближайшим коптерам, у остальных его нет: меняются только позиция,
 // громкость и скорость воспроизведения).
 //
-// createDroneSound(shared) → { burst(p, rounds, size), clank(p, size), boom(p, size), pop(p, size),
+// createDroneSound(shared) → { burst(p, rounds, size), clank(p, size, own), boom(p, size), pop(p, size, own),
 //   update(head, drones, dt), stats() } — p: мировая точка, size: 0 маленький … 3 огромный.
 import { audioBudget, npcOut } from './audio-budget.js';
 
 const BAKE_VERSION = 1;
-const POOL_VERSION = 2; // 2: голоса — в npcBus (шина мира), разовые спрашивают audio-budget.js
-const SHOTS = 8;
+const POOL_VERSION = 7; // 7: позиции — .value (чистые панорамы без накопленных событий); 6: 6: голоса мира и гул — equalpower; 2: голоса — в npcBus (шина мира), разовые спрашивают audio-budget.js; 4: + OWN своих голосов; 5: SHOTS 12 (взрывы не обрывались очередями)
+const SHOTS = 12;
+const OWN = 4; // звон и хлопок от СВОЕЙ пули (own = true): свои голоса → master, бюджет мира не спрашивают
 const LOOPS = 4;
 const GAP = 0.075; // с между выстрелами очереди (тот же GAP — в drones.js)
 export const BURST_GAP = GAP;
@@ -211,7 +212,7 @@ const voicesFor = (shared, g) => {
   const pool = shared.droneVoices;
   const bus = npcOut(g);
   if (pool?.version === POOL_VERSION && pool.master === g.master && pool.bus === bus && pool.context === g.context) return pool;
-  for (const v of [...(pool?.shots ?? []), ...(pool?.loops ?? [])]) {
+  for (const v of [...(pool?.shots ?? []), ...(pool?.loops ?? []), ...(pool?.own ?? [])]) {
     try {
       v.source?.stop();
       v.input.disconnect();
@@ -221,16 +222,17 @@ const voicesFor = (shared, g) => {
     }
   }
   const c = g.context;
-  const chain = (ref, rolloff, sendGain) => {
+  // мир — 'equalpower' (дёшево), свои (own) — HRTF: HRTF-панорамы мира в бою перегружали аудиопоток Quest
+  const chain = (ref, rolloff, sendGain, out = bus, model = 'equalpower') => {
     const input = c.createGain();
     input.gain.value = 0;
     const panner = c.createPanner();
-    panner.panningModel = 'HRTF';
+    panner.panningModel = model;
     panner.distanceModel = 'inverse';
     panner.refDistance = ref;
     panner.rolloffFactor = rolloff;
     panner.maxDistance = 400;
-    input.connect(panner).connect(bus);
+    input.connect(panner).connect(out);
     if (g.reverbSend) {
       const send = c.createGain();
       send.gain.value = sendGain;
@@ -242,7 +244,9 @@ const voicesFor = (shared, g) => {
   for (let i = 0; i < SHOTS; i += 1) shots.push(chain(3, 0.7, 0.2));
   const loops = [];
   for (let i = 0; i < LOOPS; i += 1) loops.push(chain(2, 1, 0.05));
-  return (shared.droneVoices = { version: POOL_VERSION, master: g.master, bus, context: c, shots, loops });
+  const own = [];
+  for (let i = 0; i < OWN; i += 1) own.push(chain(3, 0.7, 0.2, g.master, 'HRTF'));
+  return (shared.droneVoices = { version: POOL_VERSION, master: g.master, bus, context: c, shots, loops, own });
 };
 
 // по размеру (0 маленький … 3 огромный)
@@ -263,17 +267,19 @@ export function createDroneSound(shared) {
     if (bank?.key !== `${BAKE_VERSION}|${c.sampleRate}`) bank = bake(shared, c);
     return g;
   };
-  const setPos = (p, x, y, z, at) => {
+  // .value, не setValueAtTime: автоматизация позиции переводит панораму в дорогой посэмпловый режим
+  const setPos = (p, x, y, z) => {
     if (p.positionX) {
-      p.positionX.setValueAtTime(x, at);
-      p.positionY.setValueAtTime(y, at);
-      p.positionZ.setValueAtTime(z, at);
+      p.positionX.value = x;
+      p.positionY.value = y;
+      p.positionZ.value = z;
     } else p.setPosition(x, y, z);
   };
 
   const budget = audioBudget(shared);
-  // cat — категория бюджета звуков мира (audio-budget.js): нет места — звук не играет
-  const play = (name, position, gain, rate = 1, cat = 'hit') => {
+  // cat — категория бюджета звуков мира (audio-budget.js): нет места — звук не играет.
+  // own — звук от СВОЕЙ пули игрока: свои голоса (→ master), бюджет не спрашивает, не пропускается
+  const play = (name, position, gain, rate = 1, cat = 'hit', own = false) => {
     try {
       const g = ready();
       if (!g || !position || !ok(position.x) || !ok(position.y) || !ok(position.z)) return;
@@ -282,11 +288,11 @@ export function createDroneSound(shared) {
       const list = bank.buffers[name];
       if (!list?.length) return; // ещё запекается
       const buffer = list[Math.floor(Math.random() * list.length)];
-      if (!budget.admit(cat, position, gain, buffer.duration / rate, 3, 0.7)) return;
+      if (!own && !budget.admit(cat, position, gain, buffer.duration / rate, 3, 0.7)) return;
       const pool = voicesFor(shared, g);
       const t = c.currentTime;
       let voice = null;
-      for (const v of pool.shots) {
+      for (const v of own ? pool.own : pool.shots) {
         if (v.endAt <= t) {
           voice = v;
           break;
@@ -415,9 +421,10 @@ export function createDroneSound(shared) {
   return {
     // очередь пулемёта (rounds 3–5): один голос на всю очередь
     burst: (p, rounds, size) => play(`burst${Math.max(3, Math.min(5, rounds))}`, p, SHOT_GAIN[size] * 0.9, SHOT_RATE[size] * jit(0.08), 'gun'),
-    clank: (p, size) => play('clank', p, 0.55 + 0.1 * size, (1.2 - 0.15 * size) * jit(0.2)),
+    // own = true — попала пуля игрока (drones.js hit): свои голоса, мимо бюджета мира
+    clank: (p, size, own = false) => play('clank', p, 0.55 + 0.1 * size, (1.2 - 0.15 * size) * jit(0.2), 'hit', own),
     boom: (p, size) => play('boom', p, 0.7 + 0.25 * size, (1.25 - 0.17 * size) * jit(0.08), 'boom'),
-    pop: (p, size) => play('pop', p, 0.6 + 0.1 * size, (1.2 - 0.15 * size) * jit(0.1), 'boom'),
+    pop: (p, size, own = false) => play('pop', p, 0.6 + 0.1 * size, (1.2 - 0.15 * size) * jit(0.1), 'boom', own),
     update(head, drones, dt) {
       try {
         humStep(head, drones, dt);

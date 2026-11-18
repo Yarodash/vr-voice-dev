@@ -214,8 +214,10 @@ export function createEffects({ THREE, group }) {
     // след пули: раскалённая чёрточка летит от дула по параболе (tracer.js); вернёт номер для tracerLand
     // «Настройки ▸ Трассеры: выкл» (globalThis.__sceneState.tracersOff) — трассер не запускается (−1)
     tracer(from, dir, speed, gravity, maxLen, force = false) {
-      if (globalThis.__sceneState?.tracersOff && !force) return -1;
-      return tracers.fire(from, dir, speed, gravity, maxLen);
+      // «Трассеры: выкл» — не совсем выкл: тонкий бледный след (пользователь: «хотя бы маленькие, чтобы
+      // было видно выстрел и траекторию»)
+      const slim = globalThis.__sceneState?.tracersOff && !force ? 0.35 : 1;
+      return tracers.fire(from, dir, speed, gravity, maxLen, slim);
     },
     // пуля номер id остановилась через along м (вдоль ствола)
     tracerLand(id, along) {
