@@ -46,14 +46,14 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - consts: `ROCKET_LIFE=4`
 - sets __sceneState: `arenaRocketGeo`
 
-### scene/artillery-sound.js (349)
+### scene/artillery-sound.js (351)
 Звуки артиллерии (artillery.js). Тот же звуковой граф, что у всей сцены: __sceneState.audioGraph = { context, master, reverbSend } (его создаёт sound.js).
-- `createArtillerySound(shared)` L237 → API:
-  - `boom(p, dist)` L326 — разрыв в точке p; dist — до слушателя (выбирает вариант: рядом / средне / далеко)
-  - `thump(p)` L331 — выстрел батареи далеко (p — точка в её стороне, ~250 м)
-  - `whistle(p)` L333 — свист снаряда: голос потом двигают move(h, …), пока он его
-  - `move(h, x, y, z)` L334
-  - `stats()` L343
+- `createArtillerySound(shared)` L238 → API:
+  - `boom(p, dist)` L328 — разрыв в точке p; dist — до слушателя (выбирает вариант: рядом / средне / далеко)
+  - `thump(p)` L333 — выстрел батареи далеко (p — точка в её стороне, ~250 м)
+  - `whistle(p)` L335 — свист снаряда: голос потом двигают move(h, …), пока он его
+  - `move(h, x, y, z)` L336
+  - `stats()` L345
 - consts: `WHISTLE_S=1.8`
 - sets __sceneState: `artillerySoundBank`, `artilleryVoices`
 
@@ -73,16 +73,44 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - `dispose()` L1100
 - sets __sceneState: `artillery`, `artilleryFx`, `artilleryAtlas`, `artilleryRun`, `artillerySystem`
 
-### scene/audio-budget.js (168)
+### scene/atmosphere-light.js (420)
+Свет атмосферы на предметах сцены (псы, оружие, дроны — MeshStandardMaterial): каждый кадр ведёт по shared.atmosphere.now два светильника оболочки (HemisphereLight и DirectionalLight из web/src/main.js), туман сцены, экспозицию, силу теней псов и яркость отражений (карта окружения оружия).
+- `createAtmosphereLight({ THREE, scene, root = null, renderer, shared, atmosphere, sunShadows = null })` L139 → API:
+  - `adopt()` L323 — В КОНЦЕ setup, когда всё создано: туман и свет эффектам, метки ключей материалам — до того, как оболочка в фоне подмены…
+  - `update(realDt)` L328 — после atmosphere.update этого кадра
+  - `dispose()` L391
+- sets __sceneState: `shellLights`, `objectLight`, `atmoTune`, `atmoSkyRef`
+
+### scene/atmosphere.js (895)
+Атмосфера: погода, время суток, сезон и стиль неба — одно состояние `now` с плавными переходами. Контракт (имена полей и id менять нельзя, по нему пишут world.js, weather-fx.js, weather-sound.js): docs/agents/atmosphere.md. Этот модуль — единственный, кто пишет в `now`; остальные только читают.
+- `createAtmosphere({ THREE, camera = null, shared = (globalThis.__sceneState ??= {}) })` L204 → API:
+  - `setWeather(id, seconds = 25)` L761
+  - `setTime(idOrHour, seconds = 8)` L776
+  - `setSeason(id, seconds = 20)` L789
+  - `setSky(id, seconds = 6)` L804
+  - `setFlow(minutesPerDay)` L815
+  - `setAutoWeather(on)` L820
+  - `on(type, fn)` L826
+  - `snap(settle = true)` L833 — доиграть все переходы сразу (для проверок и снимков); settle — накопители как будто погода стоит давно
+  - `reset(seconds = 0)` L843 — вернуть всё как на первом запуске (закат, розовое небо, лето, переменная облачность, время стоит)
+  - `strikeNow()` L853 — молния прямо сейчас (проверка вспышки и грома), при любой погоде
+  - `update(dt, realDt = dt)` L858 — dt — игровое время кадра («Время ×N»), realDt — настоящее
+  - `carry()` L876 — всё, что нужно следующему объекту при подмене сцены
+  - `dispose()` L879
+  - fields: `now`, `target`, `WEATHERS`, `TIMES`, `SEASONS`, `SKIES`, `rev`
+- consts: `KEY_SWITCH_ELEV=-5.5`, `WEATHERS`, `WEATHER_GROUPS`, `SEASONS`, `SUNSET_AZ=8`, `TIMES`, `TIME_GROUPS`, `SKIES`, `FLOW_STEPS`, `DEFAULTS`
+- sets __sceneState: `atmoSkyRef`, `atmoTune`, `atmosphere`
+
+### scene/audio-budget.js (192)
 Общий бюджет звуков мира (псы, коптеры, артиллерия, рог): в большой битве сотня псов не должна делать сотню звуков, а свои выстрелы игрока должны звучать всегда и чисто.
-- `audioBudget(shared)` L50 → API:
-  - `setHead(x, y, z)` L83
-  - `admit(cat, p, loud = 1, seconds = 0.5, ref = 1.5, rolloff = 0.5)` L92 — Можно ли сыграть звук мира? cat — из CATEGORIES; p — мировая точка; loud — громкость звука (gain голоса); seconds — ско…
-  - `duck(k = 0.62)` L142 — Свой выстрел игрока: коротко приглушить шину мира (k — множитель громкости на пике)
-  - `stats()` L159
+- `audioBudget(shared)` L73 → API:
+  - `setHead(x, y, z)` L107
+  - `admit(cat, p, loud = 1, seconds = 0.5, ref = 1.5, rolloff = 0.5)` L116 — Можно ли сыграть звук мира? cat — из CATEGORIES; p — мировая точка; loud — громкость звука (gain голоса); seconds — ско…
+  - `duck(k = 0.62)` L166 — Свой выстрел игрока: коротко приглушить шину мира (k — множитель громкости на пике)
+  - `stats()` L183
   - fields: `version`, `head`
-- `npcOut(g)` L39
-- consts: `BUDGET_VERSION=1`, `CATEGORIES`
+- `npcOut(g)` L43
+- consts: `BUDGET_VERSION=3`, `CATEGORIES`
 - sets __sceneState: `audioBudget`
 
 ### scene/awp-model.js (417)
@@ -195,27 +223,34 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - fields: `list`
 - sets __sceneState: `clays`
 
-### scene/compositions.js (180)
+### scene/collimator.js (283)
+Коллиматор (red-dot) на сгенерированной пушке (generated-guns.js collimator): компактная трубка на крепёжной лапе, лапа — на верхнем рельсе. Внутри трубки у переднего торца — наклонное тонированное стекло, в нём красная точка «на бесконечности».
+- `createCollimator(THREE, cfg, { outlineMaterial = null, outlineM = 0.0025, model, fire = {} })` L28 → API:
+  - `place(from)` L205
+  - fields: `mount`, `glass`, `uniforms`, `dotDir`, `outline`, `info`
+
+### scene/compositions.js (204)
 Сцены (композиции): сохранённое состояние мира и режим, который с ним включается.
-- `loadCompositions()` L31
-- `saveCompositions(list)` L42
-- `readActive(shared)` L51
-- `writeActive(shared, name, features)` L65 → { name, features }
-- `storeLive(name, json)` L77
-- `storeCarPose(name, pose)` L87
-- `migrateCarScene()` L97
-- `migrateHordeScenes()` L118
-- `nextName(list)` L140
-- `snapshot({ pistols, clays, shooting, score, car, robodog })` L158
-- `freshOf(data)` L176 → { version, weapons, clays, targets, score }
-- consts: `RANGE_FEATURES`, `EMPTY_FEATURES`, `HORDE_FEATURES`
+- `loadCompositions()` L33
+- `saveCompositions(list)` L44
+- `readActive(shared)` L53
+- `writeActive(shared, name, features)` L67 → { name, features }
+- `storeLive(name, json)` L79
+- `storeCarPose(name, pose)` L89
+- `migrateCarScene()` L99
+- `migrateHordeScenes()` L120
+- `migrateStandoffScene()` L145
+- `nextName(list)` L164
+- `snapshot({ pistols, clays, shooting, score, car, robodog })` L182
+- `freshOf(data)` L200 → { version, weapons, clays, targets, score }
+- consts: `RANGE_FEATURES`, `EMPTY_FEATURES`, `HORDE_FEATURES`, `STANDOFF_FEATURES`
 - sets __sceneState: `activeScene`
 
-### scene/controls-map.js (88)
+### scene/controls-map.js (90)
 Какая кнопка левого контроллера что делает. Живёт в сцене, чтобы перенос кнопок подхватывался на лету, без перезагрузки страницы (запись голоса и положение в мире не сбрасываются). Названия действий ('record-start', 'wheel-toggle', 'grip', ...) страница уже умеет; новые действия требуют правки страницы (оболочки).
 - class `ControlMap` L24:
-  - `constructor(menuOpen = () => false, yBlocked = () => false, remoteHeld = () => false)` L30 — menuOpen(): открыто ли радиальное меню сейчас. Перезагрузка — только на жест «закрыто → открыто → закрыто» (первые два…
-  - `step(nowMs, { buttons })` L42
+  - `constructor(menuOpen = () => false, yBlocked = () => false, remoteHeld = () => false, menuButton = () => MENU_BTN)` L31 — menuOpen(): открыто ли радиальное меню сейчас. Перезагрузка — только на жест «закрыто → открыто → закрыто» (первые два…
+  - `step(nowMs, { buttons })` L44
 
 ### scene/cracked-glasses.js (241)
 Разбитые очки: выстрел себе в глаз -> оба глаза видят трещины на «линзах» 5 с. createCrackedGlasses({ THREE, camera, renderer, shared }) -> { test(muzzle, dir) -> -1|0|1, trigger(eye), update(), dispose() } eye: 0 — левый, 1 — правый. Реальное время (не сценовые часы): это интерфейсный эффект.
@@ -232,47 +267,47 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - consts: `MOTORS`, `ROTOR_R`, `GUN_PIVOT`, `GUN_MUZZLE`, `LIGHTS`
 - sets __sceneState: `droneGeoCache`, `droneTexCache`
 
-### scene/drone-sound.js (441)
+### scene/drone-sound.js (443)
 Звуки квадрокоптеров (drones.js). Тот же звуковой граф, что у всей сцены: __sceneState.audioGraph = { context, master, reverbSend } (его создаёт sound.js).
-- `createDroneSound(shared)` L258 → API:
-  - `burst(p, rounds, size)` L421 — очередь пулемёта (rounds 3–5): один голос на всю очередь
-  - `clank(p, size, own = false)` L423 — own = true — попала пуля игрока (drones.js hit): свои голоса, мимо бюджета мира
-  - `boom(p, size)` L424
-  - `pop(p, size, own = false)` L425
-  - `update(head, drones, dt)` L426
-  - `stats()` L434 — с ПК: npm run vr:eval -- "__sceneState.drones.debug.sound()"
+- `createDroneSound(shared)` L259 → API:
+  - `burst(p, rounds, size)` L423 — очередь пулемёта (rounds 3–5): один голос на всю очередь
+  - `clank(p, size, own = false)` L425 — own = true — попала пуля игрока (drones.js hit): свои голоса, мимо бюджета мира
+  - `boom(p, size)` L426
+  - `pop(p, size, own = false)` L427
+  - `update(head, drones, dt)` L428
+  - `stats()` L436 — с ПК: npm run vr:eval -- "__sceneState.drones.debug.sound()"
 - consts: `BURST_GAP`
 - sets __sceneState: `droneSoundBank`, `droneVoices`
 
-### scene/drones.js (1642)
+### scene/drones.js (1702)
 Квадрокоптеры с пулемётами в большой битве («Сцена 3», функция сцены «robodogHorde»; меню «Собаки ▸ Квадрокоптеры: вкл/выкл», shared.drones, localStorage 'scene.drones', по умолчанию вкл).
 - `createDrones({ THREE, root, camera, renderer = null, shooting = null, horde = null, onKill = null })` L126 → API:
-  - `apply(on, { keep = false } = {})` L1451 — on — есть ли коптеры в сцене (функция «robodogHorde»); keep — подмена файла сцены (летают дальше)
-  - `update(dt)` L1472
-  - `debug.*` L1601
-    - `debug.spawn(team = 'enemy', n = 3)` L1603 — с ПК (не в шлеме!): __sceneState.droneSystem.debug.spawn('enemy', 3) — волна сейчас
-    - `debug.list()` L1604
-    - `debug.info()` L1605
-    - `debug.kill(id)` L1606
-    - `debug.sound()` L1611
-    - `debug.showcase(on = true, team = 'enemy')` L1613 — с ПК, только на странице без шлема: все размеры рядком перед камерой и замереть (false — дальше)
-  - `dispose()` L1635
+  - `apply(on, { keep = false } = {})` L1499 — on — есть ли коптеры в сцене (функция «robodogHorde»); keep — подмена файла сцены (летают дальше)
+  - `update(dt)` L1520
+  - `debug.*` L1661
+    - `debug.spawn(team = 'enemy', n = 3)` L1663 — с ПК (не в шлеме!): __sceneState.droneSystem.debug.spawn('enemy', 3) — волна сейчас
+    - `debug.list()` L1664
+    - `debug.info()` L1665
+    - `debug.kill(id)` L1666
+    - `debug.sound()` L1671
+    - `debug.showcase(on = true, team = 'enemy')` L1673 — с ПК, только на странице без шлема: все размеры рядком перед камерой и замереть (false — дальше)
+  - `dispose()` L1695
 - sets __sceneState: `drones`, `squadMarks`, `droneStrike(d, point, dir, dmg = 1)`, `droneRun`, `droneTargets`
 
-### scene/effects.js (296)
+### scene/effects.js (297)
 Эффекты выстрела и попадания: вспышка, искры, дым, гильза, трассер, отблеск света. Живёт в сцене: правки подхватываются на лету. Дым — smoke.js (один вызов отрисовки на весь дым).
 - `createEffects({ THREE, group })` L7 → API:
-  - `muzzleFlash(position, direction)` L130 — position/direction: дуло и направление ствола (мировые координаты)
-  - `setMuzzle(position)` L169 — где дуло оружия в руке сейчас (каждый кадр) или null: от него идёт струйка дыма после выстрела
-  - `eject(position, right, up_)` L174 — дымок из окна выброса; сама гильза — casings.js (вылетает, когда затвор отошёл назад)
-  - `impact(point, normal)` L180 — попадание в сталь: звёздочка-вспышка, веер искр, тлеющая точка (impact.js) и пыль краски (smoke.js); normal — наружу от…
-  - `smokePuff(x, y, z, ux, uy, uz, s0, s1, life, a)` L186 — один клуб дыма (след ракеты, выхлоп — arena-weapons.js; см. smoke.puff)
-  - `dust(point)` L191 — облачко пыли (разбитая глиняная тарелка)
-  - `groundHit(point, scale = 1)` L201 — пуля упала в землю: облачко пыли без глиняной рыжины scale > 1 (пулемёт «Моего дрона»): «бабах» — вспышка с искрами, бу…
-  - `tracer(from, dir, speed, gravity, maxLen, force = false)` L216 — след пули: раскалённая чёрточка летит от дула по параболе (tracer.js); вернёт номер для tracerLand «Настройки ▸ Трассер…
-  - `tracerLand(id, along)` L223 — пуля номер id остановилась через along м (вдоль ствола)
-  - `update(dt)` L228
-  - `dispose()` L277
+  - `muzzleFlash(position, direction)` L131 — position/direction: дуло и направление ствола (мировые координаты)
+  - `setMuzzle(position)` L170 — где дуло оружия в руке сейчас (каждый кадр) или null: от него идёт струйка дыма после выстрела
+  - `eject(position, right, up_)` L175 — дымок из окна выброса; сама гильза — casings.js (вылетает, когда затвор отошёл назад)
+  - `impact(point, normal)` L181 — попадание в сталь: звёздочка-вспышка, веер искр, тлеющая точка (impact.js) и пыль краски (smoke.js); normal — наружу от…
+  - `smokePuff(x, y, z, ux, uy, uz, s0, s1, life, a)` L187 — один клуб дыма (след ракеты, выхлоп — arena-weapons.js; см. smoke.puff)
+  - `dust(point)` L192 — облачко пыли (разбитая глиняная тарелка)
+  - `groundHit(point, scale = 1)` L202 — пуля упала в землю: облачко пыли без глиняной рыжины scale > 1 (пулемёт «Моего дрона»): «бабах» — вспышка с искрами, бу…
+  - `tracer(from, dir, speed, gravity, maxLen, force = false)` L217 — след пули: раскалённая чёрточка летит от дула по параболе (tracer.js); вернёт номер для tracerLand «Настройки ▸ Трассер…
+  - `tracerLand(id, along)` L224 — пуля номер id остановилась через along м (вдоль ствола)
+  - `update(dt)` L229
+  - `dispose()` L278
 
 ### scene/engine-sound.js (65)
 Гул мотора машины, пока игрок за рулём: синтез (пила + синус октавой ниже через фильтр), тихо. Высота и громкость — от скорости и газа. Контекст и выход — общие, из sound.js (__sceneState.audioGraph). Нет контекста — молчит.
@@ -288,22 +323,22 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - `dispose()` L193
 - consts: `TARGET_HZ=90`
 
-### scene/generated-gun.js (996)
+### scene/generated-gun.js (1002)
 Модель сгенерированной пушки (запись из generated-guns.js): сначала «толстая картинка» из card.png, потом, если glb: true и файл загрузился, — модель mesh.glb на её месте (та же группа: поза, «в руке», дуло — те же; меняется только то, что внутри visual).
-- `analyzeCard(alpha, w, h, entry = {})` L46 → { box, grip, muzzle, autoGrip, edgeRatio }
-- `buildGenerated(THREE, entry, { outlineMaterial, outlineM = 0.0025, makeLens = null })` L831 → { group, accent, muzzle, ejector, outline, gen }
-- `genGunDebug()` L985
+- `analyzeCard(alpha, w, h, entry = {})` L48 → { box, grip, muzzle, autoGrip, edgeRatio }
+- `buildGenerated(THREE, entry, { outlineMaterial, outlineM = 0.0025, makeLens = null })` L833 → { group, accent, muzzle, ejector, outline, gen }
+- `genGunDebug()` L991
 - sets __sceneState: `genHoloTime`
 
-### scene/generated-guns.js (122)
+### scene/generated-guns.js (128)
 Сгенерированные пушки — по этапам, в той же группе (поза и «в руке» не теряются при смене): 0) запись без файлов (card: false) — сразу голограмма-заглушка по shape с табличкой «генерирую…»; 1) card.png (Gemini, фон вырезан) и card: true — «толстая картинка» (грани + стенки по контуру);
-- `genKind(id)` L97
-- `isGenKind(kind)` L98
-- `genEntry(kind)` L99
-- `genSpawnLabel(entry)` L100
-- `genKindByLabel(label)` L101
-- `genFireMode(entry)` L107
-- `genGunParams(entry)` L116
+- `genKind(id)` L103
+- `isGenKind(kind)` L104
+- `genEntry(kind)` L105
+- `genSpawnLabel(entry)` L106
+- `genKindByLabel(label)` L107
+- `genFireMode(entry)` L113
+- `genGunParams(entry)` L122
 - consts: `GEN_PREFIX='gen:'`, `GUN_AUTO`, `GUN_SEMI`, `GENERATED_GUNS`
 
 ### scene/gun-resize.js (204)
@@ -349,24 +384,24 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - fields: `isOpen`
 - sets __sceneState: `ipdMm`, `ipdNativeMm`
 
-### scene/kill-confirm.js (590)
+### scene/kill-confirm.js (586)
 Подтверждение убийства (как в шутерах): игрок убил врага — резкий «клац» и в точке убийства хитмаркер-крест (четыре коротких косых штриха вокруг пустого центра), щелчком: быстро вырастает с лёгким перехлёстом и доворотом, держится и гаснет — всего ~0,45 с.
-- `createKillConfirm({ THREE, root, camera })` L222 → API:
-  - `update()` L566
-  - `dispose()` L580
+- `createKillConfirm({ THREE, root, camera })` L221 → API:
+  - `update()` L562
+  - `dispose()` L576
 - `__sceneState.killSoundBank` → API:
-  - `tick(x, y, z, n = 1)` L275
+  - `tick(x, y, z, n = 1)` L274
   - fields: `version`, `rate`, `normal`, `big`
 - `__sceneState.killConfirm` → API:
-  - `at(x, y, z, big = false, reward = 0, radius = 0.4)` L527
-  - `hitAt(x, y, z, radius = 0.08)` L528
-  - `hitRay(origin, dir, distance)` L530 — попадание пули игрока без убийства (луч origin + dir·distance)
-  - `dogHit(u)` L535 — ранение взрывом/дырой (без точки попадания): серый крестик в центре тела (союзники — нет)
-  - `droneHit(d)` L539
-  - `dog(u)` L543
-  - `drone(d)` L549
-  - `stats()` L554
-  - `test(dist = 15, big = false)` L556 — проверка с ПК: метка + звук в dist м перед глазами (big — красная)
+  - `at(x, y, z, big = false, radius = 0.4)` L523
+  - `hitAt(x, y, z, radius = 0.08)` L524
+  - `hitRay(origin, dir, distance)` L526 — попадание пули игрока без убийства (луч origin + dir·distance)
+  - `dogHit(u)` L531 — ранение взрывом/дырой (без точки попадания): серый крестик в центре тела (союзники — нет)
+  - `droneHit(d)` L535
+  - `dog(u)` L539
+  - `drone(d)` L545
+  - `stats()` L550
+  - `test(dist = 15, big = false)` L552 — проверка с ПК: метка + звук в dist м перед глазами (big — красная)
   - fields: `version`
 - consts: `KILL_CONFIRM_VERSION=4`
 - sets __sceneState: `killConfirmVersion`, `killSoundBank`, `killVoices`, `hitTickVoices`, `killConfirm`
@@ -386,43 +421,43 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - consts: `LASER_COLORS`
 - sets __sceneState: `laserColor`
 
-### scene/laser.js (105)
+### scene/laser.js (107)
 Лазерный прицел: тонкий красный луч от дула вдоль ствола и яркая точка там, где луч упирается. Два объекта, без аллокаций в кадре. update(muzzle, dir, hit|null): hit — точка попадания (или null: тогда луч бьёт в землю y=0, если смотрит вниз, иначе идёт на MAX_LENGTH).
 - `createLaser({ THREE, root })` L8 → API:
-  - `update(muzzle, dir, hit)` L61
-  - `setColor(hex)` L88
-  - `setVisible(value)` L92
-  - `dispose()` L96
+  - `update(muzzle, dir, hit)` L63
+  - `setColor(hex)` L90
+  - `setVisible(value)` L94
+  - `dispose()` L98
 
-### scene/main.js (1571)
+### scene/main.js (1675)
 Сцена. Этот файл (и любые файлы рядом с ним) Claude меняет по голосовым командам; страница подхватывает изменения без перезагрузки и без выхода из VR.
-- `setup(ctx)` L65 → API:
-  - `onMenu(picked)` L939 — Выбран пункт радиального меню: { path, label }
-  - `update(realDt)` L1147
-  - `dispose()` L1521
+- `setup(ctx)` L72 → API:
+  - `onMenu(picked)` L997 — Выбран пункт радиального меню: { path, label }
+  - `update(realDt)` L1230
+  - `dispose()` L1620
 - `__sceneState.inertiaDebug` → API:
-  - `make(params)` L307 — ручка для npm run vr:eval
+  - `make(params)` L330 — ручка для npm run vr:eval
   - fields: `filter`
 - `__sceneState.crackedGlasses` → API:
-  - `debug(side = 'left')` L317
+  - `debug(side = 'left')` L342
 - `__sceneState.clayDebug` → API:
-  - `spawn()` L320 — ручка для npm run vr:eval
+  - `spawn()` L345 — ручка для npm run vr:eval
   - fields: `clays`
 - `__sceneState.weaponDebug` → API:
-  - `spawn(kind)` L745
-  - `items()` L746
-  - `gen()` L747
-  - `fire(index)` L748
-  - `remove(index)` L754
+  - `spawn(kind)` L798
+  - `items()` L799
+  - `gen()` L800
+  - `fire(index)` L801
+  - `remove(index)` L807
 - `__sceneState.scenes` → API:
-  - `list()` L844
-  - `active()` L845
-  - `snapshot()` L848 — battleS — возраст боя стаи (стадия, progression.js), с точностью до 10 с: «Продолжить» и перезагрузка продолжают стадию…
-  - `saveLive()` L853
-  - `saveNew(name)` L855 — текущий мир — новая сцена (с режимом активной); она же становится активной
-  - `restore(name, mode = 'continue')` L869 — mode: 'continue' — как было (live), 'restart' — заново (freshOf: мишени стоят, счёт 0)
-  - `clear()` L880
-- sets __sceneState: `sceneNowMs`, `worldClock`, `targetPhysics`, `aimOutline`, `laser`, `inertia`, `tracersOff`, `prone`, `scopeMode`, `ipd`, `awpScopeZ`, `awpScopeTilt`, `ak2ScopeTilt`, `awpScopeY`, `rayGrab`, `sound`, `inertiaDebug`, `laserPanel`, `crackedGlasses`, `clayDebug`, `realModel`, `shotKind`, `weaponDebug`, `testKit`, `car`, `carDrive`, `robodog`, `horde`, `droneSystem`, `scenes`, `artillery`, `drones`, `allies`, `scopeDebug`, `timeScale`
+  - `list()` L898
+  - `active()` L899
+  - `snapshot()` L902 — battleS — возраст боя стаи (стадия, progression.js), с точностью до 10 с: «Продолжить» и перезагрузка продолжают стадию…
+  - `saveLive()` L907
+  - `saveNew(name)` L909 — текущий мир — новая сцена (с режимом активной); она же становится активной
+  - `restore(name, mode = 'continue')` L923 — mode: 'continue' — как было (live), 'restart' — заново (freshOf: мишени стоят, счёт 0)
+  - `clear()` L934
+- sets __sceneState: `sceneNowMs`, `worldClock`, `targetPhysics`, `aimOutline`, `laser`, `inertia`, `tracersOff`, `prone`, `scopeMode`, `sunShadows`, `ipd`, `awpScopeZ`, `awpScopeTilt`, `ak2ScopeTilt`, `awpScopeY`, `rayGrab`, `sound`, `inertiaDebug`, `laserPanel`, `crackedGlasses`, `clayDebug`, `twoHandAim`, `realModel`, `realModels`, `shotKind`, `weaponDebug`, `testKit`, `car`, `carDrive`, `robodog`, `horde`, `droneSystem`, `scenes`, `artillery`, `drones`, `allies`, `scopeDebug`, `timeScale`
 
 ### scene/mana.js (386)
 Мана-снаряды (оружие с projectile: 'mana', generated-guns.js / main.js GUNS): светящийся голубой сгусток вместо пули — яркое ядро в мягком ореоле, короткий мерцающий хвост и искорки, слегка виляет; вспышка у дула — голубое свечение с кольцом; попадание — магический всплеск (кольца, свечение, россыпь искр).
@@ -436,10 +471,10 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - `stats()` L376 — для vr:eval
   - `dispose()` L377
 
-### scene/menu.js (147)
+### scene/menu.js (183)
 Радиальное меню на джойстике. Живёт в сцене, чтобы добавление и правка пунктов подхватывались на лету, без перезагрузки страницы (запись голоса и положение в мире не сбрасываются).
-- `buildMenu({ holdingPistol, heldKind = holdingPistol ? 'pistol' : null, gripMode, targetPhysics = true, aimOutline = true, laser = false, features = {…)` L53 → { title, items }
-- consts: `FIRE_MODE_PREFIX='Режим:'`, `SCENES_MENU='Сцены'`, `SAVE_NEW='Сохранить как новую'`, `CLEAR_ALL='Очистить всё'`, `SCENE_CONTINUE='Продолжить'`, `SCENE_RESTART='Рестарт'`, `RESET_SCORE='Сбросить счёт'`, `EPOCH_PREFIX='Эпоха: '`, `RESET_GUN_SIZES='Сбросить размеры оружия'`, `CAR_ENTER='Сесть за руль'`, `CAR_EXIT='Выйти из машины'`, `DOGS_MENU='Собаки'`, `DRONES_ON='Квадрокоптеры: вкл'`, `DRONES_OFF='Квадрокоптеры: выкл'`, `MY_DRONE_SPAWN='Мой дрон'`, `MY_DRONE_RECALL='Дрон ко мне'`, `MY_DRONE_REMOVE='Удалить дрон'`, `MY_DRONE_REGRIP='Перенастроить хват'`, `MY_DRONE_RELEASE='Отпустить пульт'`, `MY_DRONE_AUTOPILOT_ON='Автопилот: вкл'`, `MY_DRONE_AUTOPILOT_OFF='Автопилот: выкл'`, `MY_DRONE_SIZES`, `BINO_SPAWN='Бинокль'`, `BINO_REMOVE='Удалить бинокль'`, `SCOPE_MODE_PREFIX='Прицел:'`, `ZOOM_PREFIX='Кратность ×'`, `ARTILLERY_ON='Артиллерия: вкл'`, `ARTILLERY_OFF='Артиллерия: выкл'`
+- `buildMenu({ holdingPistol, heldKind = holdingPistol ? 'pistol' : null, gripMode, targetPhysics = true, aimOutline = true, laser = false, features = {…)` L66 → { title, items }
+- consts: `FIRE_MODE_PREFIX='Режим:'`, `SCENES_MENU='Сцены'`, `SAVE_NEW='Сохранить как новую'`, `CLEAR_ALL='Очистить всё'`, `SCENE_CONTINUE='Продолжить'`, `SCENE_RESTART='Рестарт'`, `RESET_SCORE='Сбросить счёт'`, `ATMO_MENU='Погода и небо'`, `ATMO_WEATHER='Погода'`, `ATMO_TIME='Время суток'`, `ATMO_SEASON='Сезон'`, `ATMO_SKY='Небо'`, `ATMO_FLOW_PREFIX='Течение суток:'`, `ATMO_AUTO_PREFIX='Авто-погода:'`, `ATMO_MARK='● '`, `EPOCH_PREFIX='Эпоха: '`, `RESET_GUN_SIZES='Сбросить размеры оружия'`, `CAR_ENTER='Сесть за руль'`, `CAR_EXIT='Выйти из машины'`, `DOGS_MENU='Собаки'`, `DRONES_ON='Квадрокоптеры: вкл'`, `DRONES_OFF='Квадрокоптеры: выкл'`, `MY_DRONE_SPAWN='Мой дрон'`, `MY_DRONE_RECALL='Дрон ко мне'`, `MY_DRONE_REMOVE='Удалить дрон'`, `MY_DRONE_REGRIP='Перенастроить хват'`, `MY_DRONE_RELEASE='Отпустить пульт'`, `MY_DRONE_AUTOPILOT_ON='Автопилот: вкл'`, `MY_DRONE_AUTOPILOT_OFF='Автопилот: выкл'`, `MY_DRONE_SIZES`, `BINO_SPAWN='Бинокль'`, `BINO_REMOVE='Удалить бинокль'`, `SCOPE_MODE_PREFIX='Прицел:'`, `ZOOM_PREFIX='Кратность ×'`, `ARTILLERY_ON='Артиллерия: вкл'`, `ARTILLERY_OFF='Артиллерия: выкл'`
 
 ### scene/message-holes.js (305)
 Пулевые отверстия в окнах сообщений. Окно — меш оболочки (камера -> HUD -> меши с renderOrder 1000). Оболочку не трогаем: в материал окна подмешивается шейдерный код, который по списку дыр выбрасывает пиксели (сквозь дыру виден мир) и рисует обугленный рваный край с трещинами.
@@ -454,36 +489,18 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - `cachedBuild(build, THREE, options = {})` L7
 - sets __sceneState: `modelCache`
 
-### scene/money.js (352)
-Деньги игрока: награда за убийства робопсов и коптеров (те же убийства, что у хитмаркера — kill-confirm.js: пули/ракеты/рельса/плазма/дыра игрока и «Мой дрон»). Баланс общий для всех сцен и переживает перезагрузку: localStorage 'scene.money'; между подменами сцены — shared.moneyState.
-- `createMoney({ THREE, root, camera })` L100 → API:
-  - `update(dt)` L315
-  - `dispose()` L336
-- `dogReward(scale = 1)` L23
-- `droneReward(size = 0)` L28
-- `__sceneState.money` → API:
-  - `add(amount, at = null)` L288
-  - `balance()` L289
-  - `set(n)` L290
-  - `reset()` L296
-  - `stats()` L301
-  - `test(dist = 12, amount = 200)` L303 — «+$N» в dist м перед глазами, баланс не меняется (проверка с ПК)
-  - fields: `version`, `dogReward`, `droneReward`
-- consts: `MONEY_VERSION=2`
-- sets __sceneState: `moneyState`, `moneyVersion`, `money`
-
-### scene/my-drone.js (884)
+### scene/my-drone.js (885)
 «Мой дрон»: личный квадрокоптер игрока и пульт к нему (меню «Заспавнить ▸ Мой дрон»).
-- `createMyDrone({ THREE, root, scene, camera, renderer, shooting = null })` L231 → API:
-  - `spawn(i = st.size ?? 1)` L562
-  - `recall()` L567 — «Дрон ко мне»: дрон снова перед игроком
-  - `release()` L573 — «Отпустить пульт»: пульт висит, где был
-  - `regrip()` L581 — «Перенастроить хват»: пульт замирает, следующий хват рядом задаёт новую посадку
-  - `toggleAutopilot()` L589 — «Автопилот: вкл/выкл»
-  - `remove()` L601
-  - `hand({ gripWorld, handPosition, seat = null, gripDown, gripPressed, gripMode, menuIsOpen, handBusy })` L608 — хват (main.js, раздел хвата; только когда рука есть). Возвращает 'grab' | 'release' | null
-  - `update(realDt, source, menuIsOpen)` L650 — полёт, звук, экран; realDt — реальное время (дрон — не мир)
-  - `dispose()` L833
+- `createMyDrone({ THREE, root, scene, camera, renderer, shooting = null })` L232 → API:
+  - `spawn(i = st.size ?? 1)` L563
+  - `recall()` L568 — «Дрон ко мне»: дрон снова перед игроком
+  - `release()` L574 — «Отпустить пульт»: пульт висит, где был
+  - `regrip()` L582 — «Перенастроить хват»: пульт замирает, следующий хват рядом задаёт новую посадку
+  - `toggleAutopilot()` L590 — «Автопилот: вкл/выкл»
+  - `remove()` L602
+  - `hand({ gripWorld, handPosition, seat = null, gripDown, gripPressed, gripMode, menuIsOpen, handBusy })` L609 — хват (main.js, раздел хвата; только когда рука есть). Возвращает 'grab' | 'release' | null
+  - `update(realDt, source, menuIsOpen)` L651 — полёт, звук, экран; realDt — реальное время (дрон — не мир)
+  - `dispose()` L834
   - fields: `held`, `near`, `exists`, `size`, `autopilot`, `regripping`
 - consts: `SIZES`
 - sets __sceneState: `myDrone`, `myDroneRT`, `myDroneVoice`, `shotKind`, `myDroneDebug`
@@ -514,16 +531,16 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - consts: `SIDE_UV=0.03`
 - sets __sceneState: `plateTextures`
 
-### scene/progression.js (81)
+### scene/progression.js (89)
 Прогрессия боя (просьба пользователя): 4 стадии. В начале сцены — только маленькие псы и никаких коптеров; с каждой стадией псы крупнее (доля крупных растёт), коптеры появляются со 2-й стадии и тоже по ступеням: маленькие → средние → большие (+ огромные).
-- `battleSeconds(shared)` L29
-- `stageOf(t)` L34
-- `dogSizeWeights(t)` L40
-- `droneSizeWeights(t)` L44
-- `dogsAllowed(t)` L49
-- `dronesAllowed(t)` L53
-- `pickWeighted(weights, r = Math.random())` L58
-- `setStage(shared, n)` L74
+- `battleSeconds(shared)` L37
+- `stageOf(t)` L42
+- `dogSizeWeights(t)` L48
+- `droneSizeWeights(t)` L52
+- `dogsAllowed(t)` L57
+- `dronesAllowed(t)` L61
+- `pickWeighted(weights, r = Math.random())` L66
+- `setStage(shared, n)` L82
 - consts: `STAGE_FROM`, `STAGE_NAMES`
 - sets __sceneState: `battleStartMs`
 
@@ -554,131 +571,147 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - `yawTo(dx, dz)` L29
 - consts: `NEAR_M=4`, `FAR_M=25`
 
-### scene/robodog-fx.js (324)
+### scene/robodog-fx.js (325)
 Робопёс: электрические эффекты — искры, дуги и вспышки. Один InstancedMesh (один вызов отрисовки) из вытянутых «чёрточек» с аддитивным смешением: искра — чёрточка вдоль скорости, дуга — ломаная из чёрточек (тонкая бело-голубая сердцевина + широкое синее свечение), вспышка — три скрещённые чёрточки.
 - `createZapFx({ THREE, root, anchors })` L18 → API:
-  - `sparks(point, normal, count = 14, { speed = [1.5, 4], spread = 0.9, hot = false, size = 1 } = {})` L120 — n искр из точки, разлёт вокруг normal (единичный). opts: { speed: [a, b], spread, hot } — hot: жёлто-белые (горячий мет…
-  - `bolt(from, dir, speed = 160, maxLen = 60, ally = false)` L147 — трассер пули пулемёта: из from по единичному dir со скоростью speed, гаснет через maxLen м
-  - `flash(point, size = 0.1, hot = false)` L160
-  - `arc(anchorA, pointA, anchorB, pointB, life = 0.45, amp = 0.05, width = 1)` L172 — дуга между точками на шарнирах anchorA и anchorB (индексы в anchors); точки — мировые сейчас
-  - `clear()` L184
-  - `update(dt)` L190
-  - `dispose()` L316
+  - `sparks(point, normal, count = 14, { speed = [1.5, 4], spread = 0.9, hot = false, size = 1 } = {})` L121 — n искр из точки, разлёт вокруг normal (единичный). opts: { speed: [a, b], spread, hot } — hot: жёлто-белые (горячий мет…
+  - `bolt(from, dir, speed = 160, maxLen = 60, ally = false)` L148 — трассер пули пулемёта: из from по единичному dir со скоростью speed, гаснет через maxLen м
+  - `flash(point, size = 0.1, hot = false)` L161
+  - `arc(anchorA, pointA, anchorB, pointB, life = 0.45, amp = 0.05, width = 1)` L173 — дуга между точками на шарнирах anchorA и anchorB (индексы в anchors); точки — мировые сейчас
+  - `clear()` L185
+  - `update(dt)` L191
+  - `dispose()` L317
   - fields: `active`
 
-### scene/robodog-gait.js (290)
+### scene/robodog-gait.js (361)
 Робопёс: размеры, ноги (обратная кинематика) и походка — чистая математика без three.js (можно проверить в node). Модель — robodog-model.js, поведение — robodog-ai.js, всё вместе — robodog.js.
 - `legIK(dx, dy, dz, out)` L41
 - `legFK({ abd, hip, knee })` L55
-- `createGait()` L72 → API:
-  - `kick(pitchSpeed, rollSpeed)` L117 — попадание: тряхнуть корпус (pitch, roll — рад/с) Ограничено: очередь по большому псу не накапливает толчки (иначе корпу…
-  - `update(dt, cmd, ground)` L121
+- `createGait()` L103 → API:
+  - `kick(pitchSpeed, rollSpeed)` L148 — попадание: тряхнуть корпус (pitch, roll — рад/с) Ограничено: очередь по большому псу не накапливает толчки (иначе корпу…
+  - `update(dt, cmd, ground)` L152
   - fields: `pose`, `feet`, `phase`
 - `jumpSpeed(height)` L62
 - consts: `L1=0.22`, `L2=0.23`, `FOOT_R=0.028`, `BODY_Y=0.46`, `HIPS`
 
-### scene/robodog-horde.js (1914)
+### scene/robodog-horde.js (2418)
 Стая робопсов (функция сцены «robodogHorde», «Сцена 3»): псы появляются далеко впереди игрока (25–40 м, в пределах ±40° от того, куда он смотрит в момент появления), бегут к нему и с ~2,5 м прыгают на грудь.
-- `createHorde({ THREE, root, camera, renderer = null, shooting, onPlayerHit, onKill })` L194 → API:
-  - `apply(on, { keep = false, battleS = 0 } = {})` L1707 — on — есть ли стая в сцене; keep — подмена файла сцены (живые псы остаются), иначе заново battleS — сколько игровых секу…
-  - `update(dt)` L1731
-  - `debug.*` L1858
-    - `debug.spawn(i = 0)` L1860 — проверка с ПК (не в шлеме!): поставить пса размера i (0 маленький … 3 огромный)
-    - `debug.pack()` L1861
-    - `debug.allyPack()` L1862
-    - `debug.waves()` L1864 — волны и перевес: когда следующая волна каждой стороны, сколько осталось выпустить, живых, hpMul
-    - `debug.units()` L1869
-    - `debug.force(pose)` L1871 — поза поверх поведения на всех псов (проверка с ПК, не в шлеме): force({ rear: 1 }), force(null)
-    - `debug.kinds()` L1876 — роли и приёмы живых: { rusher, flanker, stalker, stalking, charging, rearing, prowling, braking, climbing, pouncing }
-    - `debug.info()` L1892
-  - `dispose()` L1899
+- `createHorde({ THREE, root, camera, renderer = null, shooting, onPlayerHit, onKill })` L252 → API:
+  - `apply(on, { keep = false, battleS = 0, standoff = false } = {})` L2204 — on — есть ли стая в сцене; keep — подмена файла сцены (живые псы остаются), иначе заново battleS — сколько игровых секу…
+  - `update(dt)` L2229
+  - `debug.*` L2362
+    - `debug.spawn(i = 0)` L2364 — проверка с ПК (не в шлеме!): поставить пса размера i (0 маленький … 3 огромный)
+    - `debug.pack()` L2365
+    - `debug.allyPack()` L2366
+    - `debug.waves()` L2368 — волны и перевес: когда следующая волна каждой стороны, сколько осталось выпустить, живых, hpMul
+    - `debug.units()` L2373
+    - `debug.force(pose)` L2375 — поза поверх поведения на всех псов (проверка с ПК, не в шлеме): force({ rear: 1 }), force(null)
+    - `debug.kinds()` L2380 — роли и приёмы живых: { rusher, flanker, stalker, stalking, charging, rearing, prowling, braking, climbing, pouncing }
+    - `debug.info()` L2396
+  - `dispose()` L2403
 - `__sceneState.hordeDebug` → API:
-  - `clear()` L578 — убрать всех псов (живых и трупы) — освободить модели
-  - `place(x, z, { size = 'маленький', team = 'enemy', frozen = true, emerge = true } = {})` L588 — проверка урона с ПК (не в шлеме!): один пёс в точке (x, z), по умолчанию стоит на месте (frozen) — мишень для areaDamag…
-  - `spawn(name = 'огромный', count = 10, dist = 60)` L597
-- sets __sceneState: `allies`, `hordeRun`, `hordeDebug`, `squadSeq`, `squadQueue`, `dogWave`, `battleStartMs`
+  - `clear()` L699 — убрать всех псов (живых и трупы) — освободить модели
+  - `place(x, z, { size = 'маленький', team = 'enemy', frozen = true, emerge = true, turret } = {})` L710 — проверка урона с ПК (не в шлеме!): один пёс в точке (x, z), по умолчанию стоит на месте (frozen) — мишень для areaDamag…
+  - `airStats()` L724 — пулемёты по коптерам: выстрелов, попаданий (в шар), долетело с уроном, сбито
+  - `spawn(name = 'огромный', count = 10, dist = 60)` L725
+- sets __sceneState: `allies`, `hordeRun`, `hordeDebug`, `squadSeq`, `squadQueue`, `standoff`, `pawHits`, `dogWave`, `battleStartMs`
 
-### scene/robodog-horn.js (133)
+### scene/robodog-horn.js (134)
 Стая робопсов: рог/гул перед большой волной. Отдельный маленький модуль (robodog-sound.js ведёт другой агент), но по тому же правилу (docs/agents/effects-and-sound.md): звук запекается один раз в AudioBuffer (OfflineAudioContext, кэш __sceneState.dogHornBank), играет через один постоянный голос (усиление → панорама → master, __…
 - `createHorn(shared)` L53 → API:
   - `play(position, pitch = 1, gain = 1)` L96
 - sets __sceneState: `dogHornBank`, `dogHornVoice`
 
-### scene/robodog-instances.js (208)
+### scene/robodog-instances.js (290)
 Стая робопсов: все псы — экземплярами. Вместо 11+ вызовов отрисовки на пса — по одному на вид детали для всех сразу: корпус, глаза, бедро и голень (левые и правые — зеркальные геометрии), башенка и ствол пулемёта, пятно тени (итого 9).
-- `createDogInstances({ THREE, root, textures = null, env = null, shadowTexture = null, capacity = 64 })` L17 → API:
-  - `begin()` L151
-  - `add(unit)` L155 — пёс с скелетом (unit.model — buildRobodogRig); матрицы шарниров уже посчитаны (collectJoints)
-  - `end()` L187
-  - `dispose()` L195
+- `createDogInstances({ THREE, root, textures = null, env = null, shadowTexture = null, capacity = 64 })` L22 → API:
+  - `begin()` L210
+  - `add(unit)` L215 — пёс с скелетом (unit.model — buildRobodogRig); матрицы шарниров уже посчитаны (collectJoints)
+  - `addLeg(side, paint, fade, upperElements, lowerElements)` L257 — отвалившаяся нога (robodog-leg-debris.js): бедро и голень стороны side, окраска paint, растворение fade
+  - `end()` L266
+  - `dispose()` L274
   - fields: `meshes`, `count`
 
-### scene/robodog-model.js (463)
+### scene/robodog-leg-debris.js (257)
+Отвалившиеся ноги больших робопсов (стая, robodog-horde.js): кусок — бедро + голень со стопой той же раскраски — падает куклой и через LIFE_S растворяется, как труп (aFade).
+- `createLegDebris({ THREE, sfx })` L27 → API:
+  - `spawn(seg, scale, side, paint, vx, vy, vz)` L178 — новый кусок: seg — таз, колено, стопа, ось колена (мировые); (vx, vy, vz) — скорость, м/с
+  - `update(dt)` L215
+  - `render(inst)` L238 — в буферы экземпляров (между inst.begin и inst.end)
+  - `clear()` L251
+  - fields: `active`
+
+### scene/robodog-model.js (752)
 Робопёс: low-poly модель в духе Boston Dynamics Spot (~0,9 м длиной, ~0,6 м в холке сзади). Жёлтый корпус с чёрной рамой, спереди сенсорная голова с голубой светящейся полосой «глаз», четыре ноги: тазовый узел → бедро → колено → голень со стопой.
-- `makeShadowTexture(THREE)` L37
-- `makeDogTextures(THREE)` L53 → API:
-  - `dispose()` L145
+- `makeShadowTexture(THREE)` L43
+- `makeDogTextures(THREE)` L61 → API:
+  - `dispose()` L153
   - fields: `map`, `orm`
-- `buildRobodogRig(THREE)` L156 → API:
-  - `material.*` L188
-    - `material.dispose()` L188
+- `injectDissolve(shader, { source = 'attribute', glow = true } = {})` L176
+- `buildRobodogRig(THREE)` L196 → API:
+  - `material.*` L228
+    - `material.dispose()` L228
     - fields: `material.emissive`
-  - `eyeMaterial.*` L189
-    - `eyeMaterial.dispose()` L189
+  - `eyeMaterial.*` L229
+    - `eyeMaterial.dispose()` L229
     - fields: `eyeMaterial.color`
-  - `setPaint(index)` L191
-  - `setPose(pose)` L194
-  - `dispose()` L205
+  - `setPaint(index)` L231
+  - `setPose(pose)` L234
+  - `dispose()` L245
   - fields: `group`, `body`, `legs`, `rig`, `paint`, `turret`
-- `buildRobodog(THREE, { textures = null, env = null } = {})` L212 → API:
-  - `setPaint(index)` L430
-  - `setPose(pose)` L440
-  - `dispose()` L451
+- `buildRobodog(THREE, { textures = null, env = null } = {})` L252 → API:
+  - `setPaint(index)` L717
+  - `setFade(k)` L726
+  - `setPose(pose)` L728
+  - `dispose()` L739
   - fields: `turret`, `geometries`, `group`, `body`, `eye`, `material`, `eyeMaterial`, `legs`
 - consts: `DOG_PAINTS`
 
-### scene/robodog-ragdoll.js (448)
+### scene/robodog-ragdoll.js (478)
 Робопёс: тряпичная кукла (ragdoll) после смерти — без three.js (проверяется в node).
 - `createRagdoll()` L31 → API:
-  - `setScale(s = 1)` L210 — размер куклы (до start): длины костей и корпуса, радиусы частиц ×s, предел скорости ×√s
-  - `start(points, vx = 0, vy = 0, vz = 0, ground = null)` L220 — points: 16 мировых точек (как BODY_POINTS + колени + стопы) в позе на момент смерти; (vx, vy, vz) — скорость пса, м/с g…
-  - `settle(ground)` L248 — сразу улечься (бюджет кукол в стае): все точки — на землю под собой, без скорости, уснуть
-  - `rest(ground, seconds = 0.3)` L263 — Перестать считать куклу БЕЗ рывка (бюджет кукол): лежит у земли — просто уснуть в этой позе; висит в воздухе — та же по…
-  - `drag(dx, dz, ground, maxDrop)` L291 — Волочь по земле без физики (чёрная дыра, кукол сверх бюджета): сдвиг (dx, dz), поза та же, тело опускается к земле не б…
-  - `motion()` L318 — насколько кукла ещё движется (сумма квадратов смещений за подшаг, в единицах размера)
-  - `setMuscle(k)` L327 — сила мышц 0..1 (0 — обмяк)
-  - `impulse(x, y, z, dx, dy, dz, speed, r = 0.45)` L336 — толчок в точке (x, y, z) по направлению (dx, dy, dz) (единичный): частицам в радиусе r — прибавка скорости speed (м/с),…
-  - `push(vx, vy, vz)` L352 — толчок всему телу: прибавка скорости (vx, vy, vz) м/с каждой частице (полёт целиком)
-  - `nudge(i, dx, dy, dz)` L364 — толкнуть одну частицу (подёргивания)
-  - `step(dt, ground)` L372
-  - `bodyFrame(out)` L404 — Система корпуса из частиц: out = { c: [x, y, z], x: [...], y: [...], z: [...] } (оси единичные)
+  - `setScale(s = 1)` L228 — размер куклы (до start): длины костей и корпуса, радиусы частиц ×s, предел скорости ×√s
+  - `start(points, vx = 0, vy = 0, vz = 0, ground = null)` L238 — points: 16 мировых точек (как BODY_POINTS + колени + стопы) в позе на момент смерти; (vx, vy, vz) — скорость пса, м/с g…
+  - `settle(ground)` L266 — сразу улечься (бюджет кукол в стае): все точки — на землю под собой, без скорости, уснуть
+  - `rest(ground, seconds = 0.3)` L281 — Перестать считать куклу БЕЗ рывка (бюджет кукол): лежит у земли — просто уснуть в этой позе; висит в воздухе — та же по…
+  - `drag(dx, dz, ground, maxDrop)` L309 — Волочь по земле без физики (чёрная дыра, кукол сверх бюджета): сдвиг (dx, dz), поза та же, тело опускается к земле не б…
+  - `motion()` L336 — насколько кукла ещё движется (сумма квадратов смещений за подшаг, в единицах размера)
+  - `setLost(mask)` L346 — сила мышц 0..1 (0 — обмяк) отвалившиеся ноги (биты 0–3 — ЛП, ПП, ЛЗ, ПЗ; большие псы): не держат и не тянут тело
+  - `setMuscle(k)` L350
+  - `impulse(x, y, z, dx, dy, dz, speed, r = 0.45)` L359 — толчок в точке (x, y, z) по направлению (dx, dy, dz) (единичный): частицам в радиусе r — прибавка скорости speed (м/с),…
+  - `push(vx, vy, vz)` L375 — толчок всему телу: прибавка скорости (vx, vy, vz) м/с каждой частице (полёт целиком)
+  - `setSlip(on)` L388 — толкнуть одну частицу (подёргивания) погасить скорость всех точек до доли k (0 — стоп): тяжёлый лёг и не катится
+  - `damp(k)` L391
+  - `nudge(i, dx, dy, dz)` L394
+  - `step(dt, ground)` L402
+  - `bodyFrame(out)` L434 — Система корпуса из частиц: out = { c: [x, y, z], x: [...], y: [...], z: [...] } (оси единичные)
   - fields: `pos`, `prev`, `count`, `asleep`, `hits`, `muscle`, `scale`, `easing`
 - consts: `BODY_POINTS`, `KNEE=8`, `FOOT=12`, `COUNT=16`
 
-### scene/robodog-sound.js (720)
+### scene/robodog-sound.js (723)
 Звуки робопсов: электричество и металл. Свой модуль (sound.js ведёт другой агент), но тот же звуковой граф: __sceneState.audioGraph = { context, master, reverbSend } (его создаёт sound.js).
-- `createDogSound(shared)` L604 → { zap, crackle, powerDown, clank, clankHeavy, thud, servo, turretWind, groundThud, scrape, whoosh, bark, growl, howl, mg }
+- `createDogSound(shared)` L606 → { zap, crackle, powerDown, clank, clankHeavy, thud, servo, turretWind, groundThud, scrape, whoosh, bark, growl, howl, mg }
 - sets __sceneState: `dogSoundBank`, `dogVoices`
 
-### scene/robodog-unit.js (941)
+### scene/robodog-unit.js (1103)
 Один робопёс «в мире»: модель (robodog-model.js), походка (robodog-gait.js), прыжок, попадания, сбивание с ног и подъём, смерть и тряпичная кукла (robodog-ragdoll.js), тень. Поведения тут нет: куда бежать, решает хозяин — одиночный пёс (robodog.js, мозг robodog-ai.js) или стая (robodog-horde.js).
-- `createDogSfx(shared)` L44 → API:
-  - `zap(p, strength = 1, size = 1, own = false)` L57
-  - `clank(p, size = 1, own = false)` L58
-  - `clankHeavy(p, k, size = 1, own = false)` L59
-  - `crackle(p, size = 1)` L60
-  - `powerDown(p, size = 1, own = false)` L61
-  - `thud(p, size = 1)` L62
-  - `servo(p, speed, size = 1)` L63 — шаги: не чаще ~4 в секунду на всех
-  - `groundThud(p, k, size = 1)` L64
-  - `scrape(p, k, size = 1)` L65
-  - `whoosh(p, size = 1)` L66
-  - `bark(p, size = 1)` L67
-  - `growl(p, size = 1)` L68
-  - `howl(p, size = 1)` L69
-  - `mg(p, size = 1)` L70
-  - `turretWind(p, size = 1)` L71 — мотор башенки перед очередью
-- `createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera, textures = null, env = null, shared = globalThis.__sceneState ?? {}, rig = false })` L77 → { model, dog, mode, health, deadFor, jumpH, jumpVy, bodyCenter, ragdoll, shadow, shadowMaterial, hitPart, scale, emerging, knocked }
+- `createDogSfx(shared)` L45 → API:
+  - `zap(p, strength = 1, size = 1, own = false)` L58
+  - `clank(p, size = 1, own = false)` L59
+  - `clankHeavy(p, k, size = 1, own = false)` L60
+  - `crackle(p, size = 1)` L61
+  - `powerDown(p, size = 1, own = false)` L62
+  - `thud(p, size = 1)` L63
+  - `servo(p, speed, size = 1)` L64 — шаги: не чаще ~4 в секунду на всех
+  - `groundThud(p, k, size = 1)` L65
+  - `scrape(p, k, size = 1)` L66
+  - `whoosh(p, size = 1)` L67
+  - `bark(p, size = 1)` L68
+  - `growl(p, size = 1)` L69
+  - `howl(p, size = 1)` L70
+  - `mg(p, size = 1)` L71
+  - `turretWind(p, size = 1)` L72 — мотор башенки перед очередью
+- `createDogUnit({ THREE, root, fx, anchors, shadowTexture, sfx, camera, textures = null, env = null, shared = globalThis.__sceneState ?? {}, rig = false })` L78 → { model, dog, mode, health, deadFor, jumpH, jumpVy, bodyCenter, ragdoll, shadow, shadowMaterial, hitPart, scale, fade, emerging, knocked, collapsing }
 
 ### scene/robodog.js (228)
 Робопёс-одиночка (функция сцены «robodog», см. compositions.js; сейчас ни в одной сцене не включён).
@@ -784,18 +817,28 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - fields: `blackhole`, `arena`, `projectiles`
 - sets __sceneState: `sound`, `areaDamage`, `targetDecals`, `targetStands`, `targetLayout`, `shotKind`, `shooting`
 
-### scene/smoke.js (485)
+### scene/sky-palettes.js (667)
+Облик неба, облаков и света на земле по состоянию атмосферы (scene/atmosphere.js, `shared.atmosphere.now`). Здесь только расчёт на процессоре, раз в кадр и без выделений памяти: палитры стилей неба (pink / gold / blue / cosmic) как функция высоты солнца, смешивание стилей по весам, поправки на погоду (пелена, грозовые тучи, тум…
+- `makeDefaultNow(THREE)` L270 → API:
+  - `sun(elevDeg, azDeg = 8)` L296 — для проверок из vr:eval: высота и азимут солнца в градусах (азимут: 0 — справа +X, плюс — к +Z)
+  - fields: `hour`, `sunDir`, `moonDir`, `sunElev`, `day`, `sunColor`, `ambientColor`, `sunPower`, `ambientPower`, `cloudCover`, `cloudDark`, `sunDirect`, `fog`, `visibilityM`, `fogColor`, `wind`, `windDir`, `gust`, `rain`, `snow`, `hail`, `sleet`, `dust`, `smoke`, `leaves`, `wet`, `puddles`, `snowCover`, `lightning`, `flash`, `rainbow`, `spring`, `summer`, `autumn`, `winter`, `sky`
+- `createSkyLook(THREE)` L311 → API:
+  - `update(now, dt)` L440
+  - fields: `look`, `pub`
+- consts: `KEY_ELEV`, `CLOUD_COVER_TODAY=0.35`
+
+### scene/smoke.js (492)
 Дым выстрела: клубы из дула, тонкая струйка над стволом, дымок из окна гильзы и пыль в месте попадания. Все клубы — одна сетка с одним шейдером (один вызов отрисовки на весь дым): мягкие повёрнутые спрайты из процедурной текстуры, освещённые закатным солнцем справа (+X).
-- `createSmoke({ THREE, group })` L164 → API:
-  - `muzzle(position, direction)` L278 — плотный клуб из дула: часть вылетает струёй вперёд и тормозит, часть расходится кольцом
-  - `setMuzzle(position)` L324 — где дуло сейчас (каждый кадр); null — оружия в руке нет: струйка прекращается
-  - `eject(position, right, up)` L335 — небольшой дымок из окна выброса гильзы
-  - `puff(x, y, z, ux, uy, uz, s0, s1, lifeS, a)` L351 — один клуб порохового дыма (след ракеты, выхлоп ракетницы — arena-weapons.js): точка, скорость, м/с, полуразмер от/до, м…
-  - `impact(point, normal, scale = 1)` L357 — облачко пыли в месте попадания; normal — наружу от поверхности scale > 1 — крупнее, выше и дольше (пулемёт дрона: видно…
-  - `update(dtRaw)` L371
-  - `dispose()` L477
+- `createSmoke({ THREE, group })` L166 → API:
+  - `muzzle(position, direction)` L285 — плотный клуб из дула: часть вылетает струёй вперёд и тормозит, часть расходится кольцом
+  - `setMuzzle(position)` L331 — где дуло сейчас (каждый кадр); null — оружия в руке нет: струйка прекращается
+  - `eject(position, right, up)` L342 — небольшой дымок из окна выброса гильзы
+  - `puff(x, y, z, ux, uy, uz, s0, s1, lifeS, a)` L358 — один клуб порохового дыма (след ракеты, выхлоп ракетницы — arena-weapons.js): точка, скорость, м/с, полуразмер от/до, м…
+  - `impact(point, normal, scale = 1)` L364 — облачко пыли в месте попадания; normal — наружу от поверхности scale > 1 — крупнее, выше и дольше (пулемёт дрона: видно…
+  - `update(dtRaw)` L378
+  - `dispose()` L484
   - fields: `count`
-- sets __sceneState: `smokeTexture`
+- sets __sceneState: `smokeTexture`, `objectLight`
 
 ### scene/sound-bank.js (172)
 Банк запечённых звуков с постоянными голосами — по ПРАВИЛАМ ЗВУКА (docs/agents/effects-and-sound.md), тот же приём, что arena-sound.js / artillery-sound.js, но в одну строку для нового модуля.
@@ -806,25 +849,37 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - `normalize(d, peak)` L21
 - `fadeTail(d, sr, seconds = 0.03)` L26
 
-### scene/sound.js (978)
+### scene/sound.js (1097)
 Звуки выстрела и попадания. Выстрелы — записи настоящего оружия (web/public/sounds/guns, CC0, см. LICENSE.txt), пока они не загрузились — запечённый синтез. Попадание, тарелка, гильза, разряд — синтез, запечённый в буферы. Живёт в сцене: правки подхватываются на лету.
-- `createSound()` L397 → API:
-  - `previewFile(name)` L828
-  - `stats()` L830 — Отладка: sound.stats() → голоса по пулам, счётчики, состояние контекста
-  - `update(camera)` L859 — Слушатель = голова: вызывать каждый кадр. Позиция и ориентация — AudioParam, сглаживание 20 мс.
-  - `setWeapon(kind)` L897 — Каким оружием звучит следующий shot() без параметров: 'pistol' | 'ak'. shooting.js зовёт shot() без параметров, поэтому…
-  - `bolt(position, phase = 'open')` L902 — затвор АВП (awp-model.js cycleBolt): phase 'open' — вверх и назад, 'close' — вперёд и вниз, 'cycle' — самозарядка: коро…
-  - `shot(opts)` L908 — Выстрел: случайная запись (±3 % высоты, ±12 % громкости); пока записи не загрузились — запечённый синтез. { kind: 'ak'…
-  - `shotRaw({ kind = weapon, position } = {})` L913
-  - `tink(position)` L954
-  - `hit(position)` L958 — звон тише выстрела на ~6 дБ и затухает с расстоянием (ref 1.5 м): мишень в 5 м ≈ -7 дБ ещё
-  - `shatter(position)` L961
-  - `zap(position, strength = 1)` L965 — strength 0..1 — громкость
-  - `powerDown(position)` L968
-  - `manaHit(position)` L972 — мана попала: «чпок» со звоном (shooting.js, projectile 'mana')
+- `createSound()` L419 → API:
+  - `previewFile(name)` L938
+  - `stats()` L940 — Отладка: sound.stats() → голоса по пулам, счётчики, состояние контекста
+  - `update(camera)` L970 — Слушатель = голова: вызывать каждый кадр. Позиция и ориентация — AudioParam, сглаживание 20 мс.
+  - `setWeapon(kind)` L1011 — Каким оружием звучит следующий shot() без параметров: 'pistol' | 'ak'. shooting.js зовёт shot() без параметров, поэтому…
+  - `bolt(position, phase = 'open')` L1016 — затвор АВП (awp-model.js cycleBolt): phase 'open' — вверх и назад, 'close' — вперёд и вниз, 'cycle' — самозарядка: коро…
+  - `shot(opts)` L1022 — Выстрел: случайная запись (±3 % высоты, ±12 % громкости); пока записи не загрузились — запечённый синтез. { kind: 'ak'…
+  - `shotRaw({ kind = weapon, position } = {})` L1027
+  - `tink(position)` L1073
+  - `hit(position)` L1077 — звон тише выстрела на ~6 дБ и затухает с расстоянием (ref 1.5 м): мишень в 5 м ≈ -7 дБ ещё
+  - `shatter(position)` L1080
+  - `zap(position, strength = 1)` L1084 — strength 0..1 — громкость
+  - `powerDown(position)` L1087
+  - `manaHit(position)` L1091 — мана попала: «чпок» со звоном (shooting.js, projectile 'mana')
   - fields: `version`
-- consts: `SOUND_VERSION=34`, `GUN_FILES`
-- sets __sceneState: `soundCounters`, `audioGraph`, `soundBank`, `previewBuffers`, `shotSoundGates`
+- consts: `SOUND_VERSION=43`, `GUN_FILES`
+- sets __sceneState: `soundCounters`, `audioGraph`, `soundBank`, `previewBuffers`, `audioMonitor`, `shotSoundGates`, `lastHandShotMs`, `handShotsTotal`
+
+### scene/sun-shadows.js (245)
+Тени от солнца на землю — каскадные карты силуэтов (как запечённые тени травы в world.js, но каждый кадр и двумя каскадами). Отбрасывают тень только зарегистрированные экземплярные меши (робопсы — robodog-instances.js, коптеры — drones.js), принимают земля и трава (их шейдеры в world.js читают uniforms отсюда: dogShade()).
+- `createSunShadows({ THREE, renderer, camera, shared })` L36 → API:
+  - `setSun(dir)` L172
+  - `addCaster(mesh, { material = plainMaterial, cascades: which = 'both', geometry = null } = {})` L187 — отбрасыватель: InstancedMesh; силуэт делит с ним геометрию и буфер матриц экземпляров (без копий) geometry — своя геоме…
+  - `removeCaster(mesh)` L199
+  - `update()` L206 — раз в кадр, после того как псы и коптеры записали свои матрицы
+  - `dispose()` L236
+  - fields: `uniforms`, `enabled`, `enabled`
+- consts: `SUN_SHADOW_SIZE=1024`, `FAR_SHADOW_SIZE=512`, `NEAR_R=16`, `FAR_R=80`, `SHADOW_STRENGTH=0.62`
+- sets __sceneState: `sunShadowCache`
 
 ### scene/targets.js (796)
 Мишени на деревянных стойках, рядами вдаль. Живёт в сцене: правки подхватываются на лету.
@@ -843,7 +898,7 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
 - consts: `TARGET_LAYOUT`, `TARGET_COUNT`
 - sets __sceneState: `woodTextures`, `targetBodies`
 
-### scene/test-kit.js (282)
+### scene/test-kit.js (281)
 Приёмка выстрела пушки с ПК (только десктоп-страница: в шлеме не создаётся и ничего не стоит). CLI: npm run test:shot -- <id> [--enemy 3] [--ally 3] [--wait 8] [--shot] (scripts/test-shot.mjs) Ручка: __sceneState.testKit — placeDog(team, x, z, { size, frozen }) → unit (стоит сразу, без вылезания;
 - `createTestKit({ THREE, camera, shared, shooting, guns, kindOf, shootGun })` L34 → API:
   - `placeDog(team = 'enemy', x, z, { size = 'маленький', frozen = true, shield = false } = {})` L86
@@ -884,10 +939,47 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - `update(dtRaw)` L221
   - `dispose()` L285
 
+### scene/two-hand-aim.js (129)
+Двуручный хват: пока оружие в основной руке (по умолчанию левой) и зажат курок ДРУГОГО контроллера, ствол смотрит по линии «основная рука (рукоятка) → вторая рука (цевьё)», крен — от основной, точка хвата — та же.
+- `createTwoHandAim(THREE)` L11 → API:
+  - `apply(gunWorld, handleLocal, renderer, rigMatrix, allow, dt, fake = null, support = 'right')` L84 — gunWorld — поза оружия одной рукой (до отдачи и «Размера»), меняется на месте: поворот вокруг точки handleLocal (рукоят…
+  - `reset()` L122
+  - fields: `weight`, `engaged`
+
 ### scene/weapon-env.js (33)
 Дешёвая карта окружения только для металла оружия (на сцену не вешается): закатный градиент + пятно солнца, один раз через PMREM, кэш в __sceneState.weaponEnv (при подмене сцены не освобождается).
 - `ensureWeaponEnv(THREE, renderer)` L3
 - sets __sceneState: `weaponEnv`
+
+### scene/weather-fx.js (1306)
+Частицы погоды: дождь, снег, дождь со снегом, град, брызги, «стена» дождя и снега вдали, пыль и песок, смог, снежная позёмка, летящие листья и разряд молнии.
+- `createWeatherFx(ctx)` L696 → API:
+  - `update(dtRaw)` L1060
+  - `stats()` L1278 — для отчётов и vr:eval: сколько чего рисуется сейчас
+  - `dispose()` L1293
+- `__sceneState.weatherFxDebug` → API:
+  - `set(values)` L801
+  - `clear()` L805
+  - `strike(o = {})` L808
+  - `stats()` L820
+  - fields: `values`
+- sets __sceneState: `weatherFxCache`, `weatherFxLive`, `weatherFxDebug`
+
+### scene/weather-sound.js (1587)
+Звук погоды и природы: дождь, ветер, гром, град, снег, птицы, сверчки, листва. Состояние только читается: shared.atmosphere.now (docs/agents/atmosphere.md), гром — по событию atmosphere.on('lightning'). Пока модуля атмосферы нет — тишина.
+- `bakeLib()` L43 → { RECIPES, REF }
+- `createWeatherSound(ctx)` L1108 → API:
+  - `update()` L1541
+  - `dispose()` L1558
+  - `stats()` L1584
+- `__sceneState.weatherSoundDebug` → API:
+  - `set(o)` L1496
+  - `clear()` L1500
+  - `thunder(distM = 800, power = 1, azimuthDeg = 0)` L1504 — гром: расстояние (м), сила, азимут (°: 0 — прямо перед головой, 90 — справа)
+  - `bench(name, v = 0)` L1517 — сколько мс считается рецепт на главном потоке (проверка запасного пути): bench('bird', 0)
+  - `stats()` L1537
+- consts: `KNEE=0.06`, `CAP=0.1`
+- sets __sceneState: `weatherSoundBank`, `weatherVoices`, `weatherSoundCounters`, `weatherSoundDebug`, `weatherSoundOverride`
 
 ### scene/world-clock.js (82)
 Часы мира: замедление и ускорение времени («Настройки ▸ Время», shared.timeScale ×0,25 … ×64).
@@ -898,15 +990,18 @@ handles the file sets (`shared.x = …`). Read this first, then open only the fi
   - fields: `state`, `hardMs`
 - consts: `STEP_S=0.05`, `MAX_SUB=8`, `MAX_STEP_S=0.2`, `FAST_FROM=32`, `FAST_HZ=72`
 
-### scene/world.js (1009)
-Мир вокруг: слегка волнистая зелёная земля до горизонта, небо заката и облака. Закат справа от игрока (вправо по оси мира +X, то есть после центровки по правую руку), слева небо темнее, со звёздами. Живёт в сцене: правки подхватываются на лету.
-- `createWorld({ THREE, scene, root, camera, renderer })` L10 → API:
-  - `update(dt)` L961
-  - `dispose()` L988
+### scene/world.js (1532)
+Мир вокруг: слегка волнистая земля с травой до горизонта, небо и облака. Вид по умолчанию — закат справа от игрока (вправо по оси мира +X), слева небо темнее, со звёздами. Живёт в сцене: правки подхватываются на лету.
+- `createWorld({ THREE, scene, root, camera, renderer, sunShadow = null })` L73 → API:
+  - `update(dt)` L1467
+  - `dispose()` L1509
+  - fields: `shadowSun`
 - `__sceneState.worldCache` → API:
-  - `free()` L22
+  - `free()` L85
   - fields: `key`
-- sets __sceneState: `worldCache`, `skyStarPx`
+- `__sceneState.worldDebug` → API:
+  - `makeNow()` L128 — Проверка из vr:eval без модуля атмосферы и не трогая его: `__sceneState.atmoOverride = __sceneState.worldDebug.makeNow(…
+- sets __sceneState: `worldCache`, `worldDebug`, `atmoFallback`, `skyLook`, `skyStarPx`
 
 ## Shell (`web/src/`, editing reloads the page)
 
@@ -930,11 +1025,12 @@ Left Touch controller (xr-standard gamepad) -> actions. Y pressed: 'record-start
   - `constructor()` L18
   - `step(nowMs, { buttons })` L25
 
-### controls.js (98)
-Left Touch controller: holding Y records, the trigger presses the on-screen button the ray points at, the other buttons are plain actions (see ControlMapper).
-- `createControls({ renderer, scene, onPtt, onAction, onStick = () => {}, getMapper = () => null, hitTest = () => null, })` L11 → API:
-  - `tick(nowMs)` L76
-  - fields: `leftGrip`, `leftController`
+### controls.js (107)
+The primary Touch controller (left by default; the scene's «Настройки ▸ Основная рука» makes it the right one, localStorage 'vr.primaryHand'): holding Y (B on the right) records, the trigger presses the on-screen button the ray points at, the other buttons are plain actions (see ControlMapper).
+- `createControls({ renderer, scene, onPtt, onAction, onStick = () => {}, getMapper = () => null, hitTest = () => null, getPrimaryHand = () => 'left', })` L14 → API:
+  - `primaryChanged()` L82 — The primary hand has just changed: a recording held on the old one ends here.
+  - `tick(nowMs)` L85
+  - fields: `primaryGrip`, `primaryController`
 
 ### draft.js (86)
 Reads what matters out of the Claude Code screen, so the user never has to look at the terminal itself: the text dictated so far, whether Claude is working, and its last answer.
@@ -942,7 +1038,7 @@ Reads what matters out of the Claude Code screen, so the user never has to look 
 - `isTranscribing(rows)` L63
 - `extractStatus(rows)` L68 → { busy, reply }
 
-### main.js (761)
+### main.js (833)
 The shell: everything that must survive while the scene is being rewritten. It owns the renderer, the VR session, the microphone, the controller and the terminal panel. A change to this file (or anything it imports except the scene) reloads the whole page.
 
 ### message-panel.js (188)

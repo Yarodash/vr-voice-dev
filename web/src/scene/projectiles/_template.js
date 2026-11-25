@@ -89,7 +89,7 @@ export function createTemplate(ctx) { // create<Имя>
   // [П1] пул: на снаряд — один светящийся спрайт (state: 0 свободен, 1 летит, 2 лежит и ждёт)
   const slots = [];
   for (let i = 0; i < MAX; i += 1) {
-    const mat = new THREE.SpriteMaterial({ map: tex, color: 0xff5a2a, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+    const mat = new THREE.SpriteMaterial({ map: tex, color: 0xff5a2a, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }); // fog: false — светящееся туман сцены не перекрашивает
     const sprite = new THREE.Sprite(mat);
     sprite.visible = false;
     group.add(sprite);

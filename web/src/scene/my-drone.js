@@ -272,7 +272,7 @@ export function createMyDrone({ THREE, root, scene, camera, renderer, shooting =
   };
   rotors.renderOrder = 3;
   drone.add(rotors);
-  const beaconMat = new THREE.SpriteMaterial({ map: tex.glow, color: GOLD, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+  const beaconMat = new THREE.SpriteMaterial({ map: tex.glow, color: GOLD, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false }); // fog: false — светящееся туман сцены не перекрашивает
   const beacon = new THREE.Sprite(beaconMat);
   beacon.position.set(0, 0.11, 0.06);
   beacon.scale.setScalar(0.22);

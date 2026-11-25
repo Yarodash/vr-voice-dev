@@ -28,7 +28,6 @@
 // С ПК: npm run vr:eval -- "__sceneState.killConfirm.stats()"
 //       npm run vr:eval -- "__sceneState.killConfirm.test(20)"  (метка+звук в 20 м перед глазами; только ПК)
 import { audioBudget } from './audio-budget.js';
-import { dogReward, droneReward } from './money.js';
 
 export const KILL_CONFIRM_VERSION = 4;
 const BANK_VERSION = 2; // менять при правке рецепта звука
@@ -383,9 +382,7 @@ export function createKillConfirm({ THREE, root, camera }) {
     }
     return at - now;
   };
-
-  // reward — $ за убийство (money.js: баланс слева сверху и «+$N» рядом с крестом, в такт щелчку)
-  const at = (x, y, z, big = false, reward = 0, radius = 0.4) => {
+  const at = (x, y, z, big = false, radius = 0.4) => { // radius — радиус жертвы, м
     try {
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
       stats.kills += 1;
@@ -416,7 +413,6 @@ export function createKillConfirm({ THREE, root, camera }) {
       geo.instanceCount = SLOTS + HIT_SLOTS;
       mat.uniforms.uTime.value = t; // update этого кадра мог пройти раньше
       lastEnd = Math.max(lastEnd, start + LIFE);
-      if (reward > 0) shared.money?.add(reward, { x, y, z, delay: start - t, radius });
     } catch {
       stats.errors += 1; // подтверждение не важнее убийства
     }
@@ -544,12 +540,12 @@ export function createKillConfirm({ THREE, root, camera }) {
       if (!u || u.dog?.team === 'ally') return;
       stats.dogs += 1;
       const c = u.bodyCenter;
-      if (c) at(c.x, c.y, c.z, (u.scale ?? 1) >= BIG_DOG, dogReward(u.scale ?? 1), 0.35 * (u.scale ?? 1));
+      if (c) at(c.x, c.y, c.z, (u.scale ?? 1) >= BIG_DOG, 0.35 * (u.scale ?? 1));
     },
     drone(d) {
       if (!d || d.team === 'ally') return;
       stats.drones += 1;
-      at(d.x, d.y, d.z, (d.size ?? 0) >= BIG_DRONE, droneReward(d.size ?? 0), 0.5 * (d.span ?? 0.5));
+      at(d.x, d.y, d.z, (d.size ?? 0) >= BIG_DRONE, 0.5 * (d.span ?? 0.5));
     },
     stats: () => ({ ...stats, active: geo.instanceCount > 0, voices: shared.killVoices?.list.length ?? 0 }),
     // проверка с ПК: метка + звук в dist м перед глазами (big — красная)

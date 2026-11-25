@@ -17,12 +17,6 @@ drawn in scope / drone camera passes). Sound: JS-baked buffers (`__sceneState.ki
 multi-kill = clicks queued `GAP` 85 ms apart (≤ 0.36 s ahead, pitch rises in a streak), marker synced to its
 click; `audioBudget.duck(0.7)` per click. Debug: `__sceneState.killConfirm.stats()`, `.test(dist, big)` (desktop only).
 
-Money (`scene/money.js`): every kill above pays `dogReward(scale)` (10/20/50/100/200/400, titan 1200) or
-`droneReward(size)` (40/80/200/400) via `shared.money.add(n, { x, y, z, delay })`. Balance in
-`shared.moneyState`, localStorage `'scene.money'` (all scenes, saved ≤ 1/s). HUD plate `scene-money` in the
-shell HUD group at local (−0.4, 0.12) (top-left, ~29°/22°), canvas redrawn only on change, pulses green on
-gain. «+$N» right of the cross floats up 0.8 s: one instanced glyph mesh (atlas «0–9+$», renderOrder 906,
-in `scopeHide`). Debug: `__sceneState.money.{stats, balance, add, set, reset, test(dist, n)}`.
 
 ## shake.js — VR-safe screen shake
 
@@ -213,3 +207,37 @@ recipe changes, `BUS_VERSION` / `POOL_VERSION` when the output or voice chains c
 = add a recipe + a `BAKES` entry + a method calling `play(pool, pick(bank.fx.name), {...})`; do
 not build node graphs per call. Verify rapid fire with master muted (`audioGraph.master.gain`)
 and `sound.stats()` staying bounded.
+
+## weather-sound.js — weather and nature ambience
+
+`createWeatherSound({ camera })` → `{ update(), dispose(), stats() }`, wired in `scene/main.js` right after
+`shared.sound.update`. Reads `shared.atmosphere.now` only (rain, snow, hail, sleet, dust, wind, gust, fog,
+day, hour, season weights, leaves, snowCover); thunder comes from `atmosphere.on('lightning')`, delayed by
+`distM / 343` s. No atmosphere → silence.
+
+- **Bank** (`__sceneState.weatherSoundBank`, key `BAKE_VERSION|sampleRate`): 40 mono buffers, ~28 MB at
+  48 kHz, computed as plain numbers (noise + filters + envelopes) by `bakeLib()` in a **Blob Worker** — no
+  frame hitches (≈0.75 s of background work on the PC). `bakeLib` must stay self-contained: its source text
+  is what the worker runs, so nothing inside may reference module scope. Worker unavailable → the same
+  recipes run on the main thread one generator slice per task. Bake order: what the current weather needs first.
+- **Loops** (16 layers, RMS-normalised to `REF` 0.125, seamless by an equal-power crossfade of the tail into
+  the head, lengths 4.1–7.9 s and mutually non-commensurate): `drizzle`, `rainA`, `rainB`, `pour`, `rumble`,
+  `windLow`, `windMidA`, `windMidB`, `windHigh` (grass), `gale`, `grit` (snow / sand), `hailLoop`, `snowBed`,
+  `birdsBed`, `crickets`, `leaves`. A "stereo" layer is the same mono buffer played by two sources with
+  different offsets into a `ChannelMerger` (half the memory). A layer's sources exist only while it sounds
+  (created when its target rises, removed after 6 s of silence).
+- **One-shots**: `drop` ×6, `hailHit` ×4, `bird` ×8 (variant 4 = cuckoo), `gust` ×2, `thunderNear` ×2,
+  `thunderMid`, `thunderFar` — one `BufferSource` into a fixed voice (gain → `StereoPanner`), pools of 5
+  short + 4 long voices; a busy short pool skips, thunder steals the oldest long voice (60 ms fade).
+- **Graph** (`__sceneState.weatherVoices`, 49 fixed nodes, survives scene swaps): layers → `out` →
+  `npcOut(g)` (world bus). No PannerNode, filter, reverb or feedback anywhere; thunder echoes are baked.
+- **Mix** (`mix()` in the file): per-layer RMS from the weather values, smoothed in JS and written with
+  `.value` only when it changed; the sum is soft-limited (`KNEE` 0.06 → `CAP` 0.1 RMS). Measured at the
+  module output: clear −44 dBFS RMS, rain −29, heavy rain −24, hurricane −22; hurricane + rain + near
+  thunder peaks 0.45 against 0.90 for an AK shot at the speakers.
+- Birds: spring/summer by day (dawn chorus around 7:30), rare in autumn; crickets: summer dusk and night;
+  both stop in rain, wind above 0.55, snow, hail, dust and fade in fog. Winter: rare lone gust.
+- Debug: `__sceneState.weatherSoundDebug.stats()`; `.set({ rain: 1, wind: 1.2 })` overrides fields of `now`
+  for the sound only (real lightning is ignored meanwhile), `.clear()`; `.thunder(distM, power, azimuthDeg)`;
+  `.bench(name)` — ms to bake one recipe on the main thread. Master volume: `__sceneState.weatherVolume` (0…2).
+- Change a recipe → bump `BAKE_VERSION`; change the node graph → bump `GRAPH_VERSION`.

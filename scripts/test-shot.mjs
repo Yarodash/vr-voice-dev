@@ -8,7 +8,7 @@
 //   --shot    — снимок экрана в момент эффекта (путь — в поле screenshot)
 //   --pitch / --yaw — угол выстрела от камеры, градусы (20 / 0); --keep — не убирать псов после проверки
 //
-// Печатает ОДИН JSON: fired, landed, strikes, landPoint, enemy/ally, killConfirm/money (прирост),
+// Печатает ОДИН JSON: fired, landed, strikes, landPoint, enemy/ally, killConfirm (прирост),
 // pageErrors (ERROR из logs/page-console.log с начала проверки), screenshot, checks, ok.
 // Код выхода: 0 — все заявленные проверки прошли и ошибок страницы нет; 1 — нет; 2 — нет страницы/моста.
 // Логика на странице: web/src/scene/test-kit.js (__sceneState.testKit.shotTest).

@@ -38,6 +38,8 @@ import { createCrackedGlasses } from './cracked-glasses.js';
 import { createClays } from './clays.js';
 import { createWorld } from './world.js';
 import { createSunShadows } from './sun-shadows.js';
+import { createAtmosphere } from './atmosphere.js';
+import { createAtmosphereLight } from './atmosphere-light.js';
 import { createFps, TARGET_HZ as FPS_TARGET_HZ } from './fps.js';
 import { createLaser } from './laser.js';
 import { createLaserPanel } from './laser-panel.js';
@@ -53,11 +55,14 @@ import { createRayGrab } from './ray-grab.js';
 import { createMyDrone } from './my-drone.js';
 import { createBinoculars } from './binoculars.js';
 import { createKillConfirm } from './kill-confirm.js';
-import { createMoney } from './money.js';
 import { createTestKit } from './test-kit.js';
 import { createTwoHandAim } from './two-hand-aim.js';
 import { BINO_SPAWN, BINO_REMOVE } from './menu.js';
 import { SCOPE_MODE_PREFIX, ZOOM_PREFIX } from './menu.js';
+import { ATMO_MENU, ATMO_WEATHER, ATMO_TIME, ATMO_SEASON, ATMO_SKY, ATMO_FLOW_PREFIX, ATMO_AUTO_PREFIX, ATMO_MARK } from './menu.js';
+import { WEATHERS, TIMES, SEASONS, SKIES, FLOW_STEPS } from './atmosphere.js';
+import { createWeatherSound } from './weather-sound.js';
+import { createWeatherFx } from './weather-fx.js';
 
 const GRIP_BUTTON = 1; // xr-standard gamepad: хват
 const TRIGGER_BUTTON = 0; // курок
@@ -78,6 +83,9 @@ export function setup(ctx) {
   let hzSession = null; // частота экрана под «Время» ×32/×64 (update)
   let hzAsked = 0;
   shared.worldClock = worldClock.state; // ручка для npm run vr:eval
+  // атмосфера (atmosphere.js): погода, время суток, сезон, стиль неба — раньше мира и эффектов, они читают
+  // shared.atmosphere.now; значения переживают подмену сцены (берутся из прежнего объекта)
+  const atmosphere = createAtmosphere({ THREE, camera, shared });
   const SHOW_AXES = false; // нарисовать оси (красная, зелёная, синяя) на джойстике
 
   // Режим хвата (пункт меню, запоминается): 'toggle' — нажал хват, пистолет взят, нажал ещё раз —
@@ -206,6 +214,7 @@ export function setup(ctx) {
     tower: Boolean(shared.towerOn), // «Вышка: вкл/выкл» (tower.js)
     scopeZoom: heldLens()?.magnification ?? null,
     scopeMode: shared.scopeMode, // «Прицел: аркадный / реалистичный» (Настройки, меню оружия с прицелом и бинокля; scope-lens.js)
+    atmo: atmosphere.target, // «Погода и небо ▸»: что выбрано (atmosphere.js); пересборка меню — по atmosphere.rev
   });
   // тени псов и коптеров по солнцу (каскады карт силуэтов): до мира (земля и трава читают их uniforms)
   // и до стаи/коптеров (регистрируют отбрасыватели через shared.sunShadows)
@@ -217,6 +226,8 @@ export function setup(ctx) {
 
   const world = createWorld({ THREE, scene, root, camera, renderer, sunShadow: sunShadows.uniforms });
   sunShadows.setSun(world.shadowSun);
+  // свет атмосферы на предметах: светильники оболочки, туман сцены, экспозиция, сила теней (atmosphere-light.js)
+  const atmosphereLight = createAtmosphereLight({ THREE, scene, root, renderer, shared, atmosphere, sunShadows });
   const fps = createFps({ THREE, camera, renderer, scene });
   // расстояние между глазами (Настройки ▸): сдвиг камер глаз + панель; после fps (оба оборачивают
   // scene.onBeforeRender), в dispose — до fps
@@ -326,6 +337,8 @@ export function setup(ctx) {
   score.setVisible(active.features.score);
   const messageHoles = createMessageHoles({ THREE, camera });
   const crackedGlasses = createCrackedGlasses({ THREE, camera, renderer, shared }); // выстрел себе в глаз (cracked-glasses.js)
+  const weatherSound = createWeatherSound({ camera }); // звук погоды и природы (weather-sound.js): читает shared.atmosphere.now
+  const weatherFx = createWeatherFx(ctx); // частицы погоды и молния (weather-fx.js): читает shared.atmosphere.now
   shared.crackedGlasses = { debug: (side = 'left') => crackedGlasses.trigger(side === 'right' ? 1 : 0) };
   // глиняные тарелки (clays.js): спавн в руку, хват как у оружия, курок — бросок взмахом
   const clays = createClays({ THREE, root, shooting, camera });
@@ -670,6 +683,7 @@ export function setup(ctx) {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
+      fog: false, // светящееся (сложение): туман сцены не перекрашивает (atmosphere-light.js)
     });
     // плоскости вдоль ствола (−Z), начинаются у дула; и диск поперёк ствола у самого дула
     const planes = [];
@@ -839,7 +853,6 @@ export function setup(ctx) {
   const myDrone = createMyDrone({ THREE, root, scene: ctx.scene, camera, renderer, shooting });
   const binoculars = createBinoculars({ THREE, root, scene: ctx.scene, camera, renderer }); // «Заспавнить ▸ Бинокль» (binoculars.js)
   const killConfirm = createKillConfirm({ THREE, root, camera }); // убил игрок — «клац» + крест-хитмаркер (kill-confirm.js, shared.killConfirm)
-  const money = createMoney({ THREE, root, camera }); // $ за убийства: баланс слева сверху, «+$N» у креста (money.js, shared.money)
   const rayItems = []; // что можно взять лучом: оружие + бинокль (ray-grab.js), без выделений в кадре
   shared.droneSystem = drones; // ручка для npm run vr:eval (droneSystem.debug.info())
   // артиллерия (artillery.js) — в той же битве («robodogHorde»), «Собаки ▸ Артиллерия»; ручка shared.artillerySystem
@@ -975,9 +988,30 @@ export function setup(ctx) {
     }
   };
 
+  // туман и свет атмосферы — всему, что создано выше (atmosphere-light.js): в самом конце setup, чтобы
+  // оболочка дособрала новые программы в фоне подмены, а не рывком в первом кадре
+  atmosphereLight.adopt();
+
   return {
     // Выбран пункт радиального меню: { path, label }
     onMenu(picked) {
+      if (picked.path?.[0] === ATMO_MENU) {
+        // «Погода и небо ▸ …» (atmosphere.js): переходы плавные, выбор сохраняется в 'scene.atmo'
+        const name = picked.label.startsWith(ATMO_MARK) ? picked.label.slice(ATMO_MARK.length) : picked.label;
+        const byName = (list) => list.find((e) => e.name === name)?.id;
+        const kind = picked.path[1];
+        if (picked.label.startsWith(ATMO_FLOW_PREFIX)) atmosphere.setFlow(FLOW_STEPS[(FLOW_STEPS.indexOf(atmosphere.target.flow) + 1) % FLOW_STEPS.length]);
+        else if (picked.label.startsWith(ATMO_AUTO_PREFIX)) atmosphere.setAutoWeather(!atmosphere.target.auto);
+        else if (kind === ATMO_WEATHER && byName(WEATHERS)) atmosphere.setWeather(byName(WEATHERS));
+        else if (kind === ATMO_TIME && byName(TIMES)) atmosphere.setTime(byName(TIMES));
+        else if (kind === ATMO_SEASON && byName(SEASONS)) atmosphere.setSeason(byName(SEASONS));
+        else if (kind === ATMO_SKY && byName(SKIES)) atmosphere.setSky(byName(SKIES));
+        else console.warn(`[atmo] непонятный пункт меню: ${picked.path.join(' > ')}`);
+        const t = atmosphere.target;
+        console.log(`[atmo] ${t.weather} / ${t.time} / ${t.season} / ${t.sky} / течение ${t.flow} мин / авто ${t.auto ? 'вкл' : 'выкл'}`);
+        menuKey = null;
+        return;
+      }
       // бинокль (binoculars.js): «Перенастроить хват» у него та же подпись, что у пульта дрона
       if (binoculars.held && picked.label === MY_DRONE_REGRIP) return binoculars.regrip();
       if (picked.label === BINO_REMOVE) return binoculars.remove();
@@ -1213,8 +1247,12 @@ export function setup(ctx) {
         }
       }
       fps.beginFrame(); // отсюда до конца renderer.render — цена кадра на CPU (см. fps.js)
+      atmosphere.update(dt, realDt); // до мира, частиц и звука погоды: они читают shared.atmosphere.now этого кадра
+      atmosphereLight.update(realDt);
       world.update(dt);
+      weatherFx.update(dt); // после атмосферы: дождь, снег, град, пыль, листья — по shared.atmosphere.now
       shared.sound?.update?.(camera); // слушатель 3D-звука = голова
+      weatherSound.update(realDt); // после атмосферы: громкости дождя, ветра, птиц — по shared.atmosphere.now
       fps.update();
       if (ctx.pointerAim) ctx.pointerAim.hideBeam = Boolean(heldItem || heldClay || scopeDebug.held || carDrive.seated || rayGrab.showing || myDrone.held || binoculars.held); // луч не рисуется, пока что-то в руке (rayGrab рисует свой — до оружия)
 
@@ -1531,7 +1569,7 @@ export function setup(ctx) {
       myDrone.update(realDt, source, menuIsOpen); // «Мой дрон»: полёт с пульта, гул, экран камеры (my-drone.js)
       binoculars.update({ realDt, source, menuIsOpen, rayTarget: rayGrab.target, rayHeld: rayGrab.item }); // бинокль: обводка, кратность стиком, окуляры у лица
       killConfirm.update(); // хитмаркеры убийств: только uniform времени (kill-confirm.js)
-      money.update(realDt); // баланс в HUD (перерисовка только при изменении) и «+$N»
+      sunShadows.setSun(world.shadowSun); // мир двигает этот вектор на месте (время суток); без изменений — ничего не стоит
       sunShadows.update(); // тени по солнцу: псы и коптеры уже записали матрицы этого кадра
       if (!hand) scopeDebug.update({ hand: null, gripDown: false, gripWasDown: false, gripMode, menuIsOpen: true }); // без руки — только видна
       if (!hand) rayGrab.hide();
@@ -1567,7 +1605,7 @@ export function setup(ctx) {
           }
         }
       } // 'remote' — пульт дрона, 'binoculars' — бинокль (menu.js)
-      const key = `${heldKind}|${gripMode}|${shared.targetPhysics}|${shared.aimOutline}|${shared.laser}|${carDrive.seated}|${shared.timeScale ?? 1}|${Boolean(shared.scopeDebug)}|${Boolean(shared.inertia)}|${GUNS[heldKind]?.auto}|${shared.allies !== false}|${shared.drones !== false}|${shared.artillery !== false}|${shared.scopeMode}|${heldLens()?.magnification}|${sunShadows.enabled}`; // сцены сбрасывают menuKey сами
+      const key = `${heldKind}|${gripMode}|${shared.targetPhysics}|${shared.aimOutline}|${shared.laser}|${carDrive.seated}|${shared.timeScale ?? 1}|${Boolean(shared.scopeDebug)}|${Boolean(shared.inertia)}|${GUNS[heldKind]?.auto}|${shared.allies !== false}|${shared.drones !== false}|${shared.artillery !== false}|${shared.scopeMode}|${heldLens()?.magnification}|${sunShadows.enabled}|${atmosphere.rev}`; // сцены сбрасывают menuKey сами
       if (key !== menuKey) {
         menuKey = key;
         ctx.setMenu?.(buildMenu(menuState(heldKind)));
@@ -1591,7 +1629,6 @@ export function setup(ctx) {
       myDrone.dispose();
       binoculars.dispose();
       killConfirm.dispose();
-      money.dispose();
       if (testKit && shared.testKit === testKit) delete shared.testKit; // псы кита остаются в стае
       laserPanel.dispose();
       saveLive(); // до shooting.dispose: снимок читает мишени
@@ -1609,7 +1646,11 @@ export function setup(ctx) {
       shooting.dispose();
       messageHoles.dispose();
       crackedGlasses.dispose();
+      weatherSound.dispose();
+      weatherFx.dispose();
+      atmosphereLight.dispose(); // светильники оболочки — как были (до world.dispose: он возвращает экспозицию)
       world.dispose();
+      atmosphere.dispose(); // объект остаётся в shared.atmosphere: следующая версия сцены продолжит с его значений
       sunShadows.dispose();
       if (shared.sunShadows === sunShadows) delete shared.sunShadows;
       shake.dispose(); // до ipd и fps: все оборачивают scene.onBeforeRender

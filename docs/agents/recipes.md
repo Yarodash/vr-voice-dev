@@ -459,7 +459,7 @@ reaching the page. Take a new name instead.
     "landPoint":[0,0.86,-107.04],"strikes":1,"strikeAfterS":6.24,"lastStrike":{"x":0,"z":-107.04,"dogs":7,"drones":2,"kills":4},
     "enemy":{"team":"enemy","mode":"dead","hp0":2,"hp":-5,"hurt":true,"dist":3,"hpAtStrike":2},
     "ally":{"team":"ally","mode":"alive","hp0":2,"hp":2,"hurt":false,"dist":3,"hpAtStrike":2},
-    "killConfirm":{"kills":4,"dogs":2,"drones":2,"hits":5},"money":{"balance":140},"creditedToPlayer":true,
+    "killConfirm":{"kills":4,"dogs":2,"drones":2,"hits":5},"creditedToPlayer":true,
     "checks":{"fired":true,"landed":true,"strikes":true,"enemyHurtAndCredited":true,"allyUnharmed":true,"noPageErrors":true},
     "ok":true,"screenshot":"D:\\vr_something\\logs\\screenshots\\…-desktop.jpg","pageErrors":[]}
    ```
@@ -487,7 +487,7 @@ air or evicted; `update(dt)` game-time substep (`Math.min(MAX_STEP_S, dt)`, no `
 
 **ctx helpers**: `THREE, group, camera, shared, effects, groundAt(x, z)`;
 `areaDamage(point, radius, maxDamage, { credit: 'player' | null, allies = false, push = 1 })` →
-`{ dogs, drones, kills }` (dogs and drones, allies spared; `'player'` gives hitmarker, «клац», money);
+`{ dogs, drones, kills }` (dogs and drones, allies spared; `'player'` gives hitmarker and «клац»);
 `strike(x, z, { damage = 0, radius = 7.5, credit = 'player', sound = true, shake = true })` — full
 artillery shell blast on the ground (fireball, crater, scorch, boom, shake; with `damage` it calls
 `areaDamage`); `explode(x, y, z, S = 0.3)` — small blast, visuals only;

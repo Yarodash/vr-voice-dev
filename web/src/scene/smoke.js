@@ -137,6 +137,8 @@ const fragmentShader = /* glsl */ `
   varying float vKind;
   varying vec3 vSun;
   varying vec3 vView;
+  uniform vec3 lightK; // свет атмосферы (atmosphere-light.js): направленный и рассеянный в долях прежнего заката
+  uniform vec3 shadeK;
   void main() {
     vec4 tex = texture2D(map, vUv);
     float density = tex.a * vAlpha;
@@ -149,10 +151,10 @@ const fragmentShader = /* glsl */ `
     // тень — сумеречная сизая (у пыли — тёплая серая), свет — закатный оранжевый
     vec3 shade = mix(vec3(0.17, 0.19, 0.29), vec3(0.26, 0.23, 0.21), vKind);
     vec3 sunCol = mix(vec3(1.9, 0.95, 0.45), vec3(1.8, 1.05, 0.55), vKind);
-    vec3 col = shade * (0.6 + 0.6 * detail) + sunCol * lit;
+    vec3 col = shade * shadeK * (0.6 + 0.6 * detail) + sunCol * lightK * lit;
     // против солнца тонкий дым светится насквозь
     float back = pow(max(dot(vView, vSun), 0.0), 5.0);
-    col += vec3(1.8, 0.85, 0.38) * back * (1.0 - tex.a * 0.6);
+    col += vec3(1.8, 0.85, 0.38) * lightK * back * (1.0 - tex.a * 0.6);
     // в первые мгновения дым подсвечен вспышкой
     col += vec3(2.4, 1.15, 0.45) * vHeat;
     gl_FragColor = vec4(col, density);
@@ -182,10 +184,15 @@ export function createSmoke({ THREE, group }) {
   geometry.setAttribute('iData', dataAttr);
   geometry.instanceCount = 0;
 
+  // свет атмосферы: общий объект, который каждый кадр ведёт atmosphere-light.js (время суток, погода);
+  // пока его никто не ведёт — прежний закат (свет ×1 с прежнего направления)
+  const light = (shared.objectLight ??= { dir: new THREE.Vector3(...SUN).normalize(), sun: new THREE.Color(1, 1, 1), amb: new THREE.Color(1, 1, 1) });
   const material = new THREE.ShaderMaterial({
     uniforms: {
       map: { value: texture },
-      sunDir: { value: new THREE.Vector3(...SUN).normalize() },
+      sunDir: { value: light.dir },
+      lightK: { value: light.sun },
+      shadeK: { value: light.amb },
     },
     vertexShader,
     fragmentShader,

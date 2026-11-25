@@ -56,6 +56,11 @@ Current tree:
 - `heldKind === 'remote'` (pult of the personal drone, `scene/my-drone.js`; main.js passes it when
   `myDrone.held`; title Пульт): `Дрон ко мне` (`MY_DRONE_RECALL`), `Удалить` (`MY_DRONE_REMOVE`: remote + drone together),
   + common. Labels are exported constants (`MY_DRONE_SPAWN = 'Мой дрон'` too).
+- common also holds `Погода и небо ▸ {Погода ▸ {Ясно и облака ▸, Дождь ▸, Снег и лёд ▸, Туман и ветер ▸},
+  Время суток ▸ {Утро и день ▸, Вечер и ночь ▸}, Сезон ▸, Небо ▸, Течение суток: стоит|10 мин|30 мин|2 ч
+  (keepOpen), Авто-погода: вкл/выкл (keepOpen)}` (before `Сцены`; `buildMenu({ atmo })` = `atmosphere.target`;
+  the current choice is prefixed `● ` (`ATMO_MARK`); `onMenu` checks `picked.path[0] === ATMO_MENU`, strips the
+  mark and finds the id by the Russian name; rebuild key includes `atmosphere.rev`; see [atmosphere.md](atmosphere.md)).
 - common: if `features.targets`: `Мишени ▸ {Физика мишеней: вкл/выкл (keepOpen), Обводка
   прицела: вкл/выкл (keepOpen), [Сбросить счёт if features.score]}`; `Сцены ▸ {<name> ▸
   {Продолжить, Рестарт}…, Сохранить как новую, Очистить всё}`; `Настройки ▸ {Отцентрировать,

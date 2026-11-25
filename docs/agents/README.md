@@ -76,6 +76,7 @@ ipd, laserPanel, textTest, sound`. See [perf.md](perf.md) and [recipes.md](recip
 | [items-and-grabbing.md](items-and-grabbing.md) | Weapons (`pistols.js`, models), absolute grab + axis recalibration, relative grab (`relative-grab.js`), clays as items, text test board |
 | [shooting-targets-score.md](shooting-targets-score.md) | `fire()`, GUNS table, `shooting.js` API, targets physics/shadows, clays as targets, score, laser sight + colour panel, robodog horde, quadcopters (`drones.js`) |
 | [effects-and-sound.md](effects-and-sound.md) | `effects.js`, `smoke.js`, `tracer.js`, AK flash; `sound.js` (3D, near field, samples, `SOUND_VERSION`) |
+| [atmosphere.md](atmosphere.md) | Weather, time of day, seasons, sky styles: the state contract (`__sceneState.atmosphere`, `scene/atmosphere.js`), how blending / sun path / object light / fog work, menu «Погода и небо ▸» |
 | [world-and-sky.md](world-and-sky.md) | `world.js`: sky/clouds/stars/ground/grass shaders, ground height, tone mapping, baked shadows; car (in progress) |
 | [hud-and-messages.md](hud-and-messages.md) | Shell HUD (message windows, dot), `hud.js` config, attaching to the HUD, `message-holes.js` shader patch, render orders, text test board (in progress) |
 | [panels.md](panels.md) | World-space canvas panels with stick input: IPD (`ipd-panel.js`), laser colour (`laser-panel.js`) |

@@ -1040,7 +1040,7 @@ export function createArtillery({ THREE, root, camera, horde = null }) {
     // ПОЛНЫЙ разрыв артиллерийского снаряда в (x, z) на земле — для любого модуля (projectiles/*):
     // огненный шар, столб дыма, воронка, пятно, «бум» (дойдёт со скоростью звука, игровое время) и
     // тряска. damage > 0 — ещё и урон по области __sceneState.areaDamage(точка, radius, damage, { credit })
-    // (area-damage.js; credit 'player' — маркеры и деньги игроку, null — чужой). Работает в любой сцене
+    // (area-damage.js; credit 'player' — маркеры игроку, null — чужой). Работает в любой сцене
     // (вне битвы тоже). → { dogs, drones, kills } или true (без урона); false — плохие координаты
     strike(x, z, { damage = 0, radius = SPLASH_R, credit = 'player', sound: withSound = true, shake = true } = {}) {
       if (!Number.isFinite(x) || !Number.isFinite(z)) return false;

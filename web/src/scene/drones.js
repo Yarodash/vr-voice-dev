@@ -188,8 +188,8 @@ export function createDrones({ THREE, root, camera, renderer = null, shooting = 
     // дважды за вызов ставит material.needsUpdate — лишний вызов и перепроверка программы на каждый глаз
     // каждый кадр. Диск плоский — порядок граней не важен.
     const rotorMat = new THREE.MeshBasicMaterial({ map: tex.rotor, color: 0xb4b9bf, transparent: true, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true });
-    const lightMat = new THREE.MeshBasicMaterial({ map: tex.glow, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
-    const fireMat = new THREE.MeshBasicMaterial({ map: tex.puff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+    const lightMat = new THREE.MeshBasicMaterial({ map: tex.glow, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false }); // fog: false — светящееся (сложение) туман сцены не перекрашивает, иначе вдали оно светилось бы цветом тумана (atmosphere-light.js)
+    const fireMat = new THREE.MeshBasicMaterial({ map: tex.puff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, fog: false });
     const smokeMat = new THREE.MeshBasicMaterial({ map: tex.puff, transparent: true, depthWrite: false });
     smokeMat.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader

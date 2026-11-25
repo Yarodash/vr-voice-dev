@@ -23,6 +23,7 @@ export function createZapFx({ THREE, root, anchors }) {
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     toneMapped: false,
+    fog: false, // светящееся (сложение): туман сцены не перекрашивает (atmosphere-light.js)
   });
   const mesh = new THREE.InstancedMesh(geometry, material, CAP);
   mesh.name = 'robodog-fx';

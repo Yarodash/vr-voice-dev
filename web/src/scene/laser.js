@@ -23,6 +23,7 @@ export function createLaser({ THREE, root }) {
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     side: THREE.DoubleSide,
+    fog: false, // светящееся (сложение): туман сцены не перекрашивает (atmosphere-light.js)
   });
   const beam = new THREE.Mesh(geometry, beamMaterial);
   beam.frustumCulled = false;
@@ -47,6 +48,7 @@ export function createLaser({ THREE, root }) {
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     sizeAttenuation: false,
+    fog: false,
   });
   const dot = new THREE.Sprite(dotMaterial);
   dot.scale.set(DOT_SIZE, DOT_SIZE, 1);

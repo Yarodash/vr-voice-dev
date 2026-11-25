@@ -105,10 +105,15 @@ export function createSunShadows({ THREE, renderer, camera, shared }) {
   const right = new THREE.Vector3();
   const up = new THREE.Vector3();
   const fwd = new THREE.Vector3();
+  const UP = new THREE.Vector3(0, 1, 0);
+  const lastDir = new THREE.Vector3(); // что передали в прошлый раз: main.js зовёт setSun каждый кадр
   const setSun = (dir) => {
+    // время суток (atmosphere.js) двигает солнце: вектор тот же, значения меняются. Не изменился — выходим
+    if (Math.abs(dir.x - lastDir.x) + Math.abs(dir.y - lastDir.y) + Math.abs(dir.z - lastDir.z) < 1e-6) return;
+    lastDir.copy(dir);
     sun.copy(dir).normalize();
     fwd.copy(sun).negate(); // взгляд камеры каскада
-    right.crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+    right.crossVectors(fwd, UP).normalize();
     up.crossVectors(right, fwd).normalize();
     const elevation = Math.max(0.05, Math.asin(Math.min(1, sun.y)));
     for (const c of cascades) {

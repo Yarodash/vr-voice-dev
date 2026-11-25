@@ -20,6 +20,19 @@ export const SCENE_CONTINUE = 'Продолжить';
 export const SCENE_RESTART = 'Рестарт';
 export const RESET_SCORE = 'Сбросить счёт';
 import { STAGE_NAMES } from './progression.js';
+import { WEATHERS, WEATHER_GROUPS, TIMES, TIME_GROUPS, SEASONS, SKIES } from './atmosphere.js';
+// «Погода и небо ▸» (atmosphere.js; обрабатывает main.js по picked.path): «Погода ▸ <группа> ▸ <погода>»,
+// «Время суток ▸ <группа> ▸ <время>», «Сезон ▸», «Небо ▸», «Течение суток: …» и «Авто-погода: …» (keepOpen).
+// Текущий выбор помечен «● » в начале подписи (ATMO_MARK; main.js срезает её перед поиском по имени).
+export const ATMO_MENU = 'Погода и небо';
+export const ATMO_WEATHER = 'Погода';
+export const ATMO_TIME = 'Время суток';
+export const ATMO_SEASON = 'Сезон';
+export const ATMO_SKY = 'Небо';
+export const ATMO_FLOW_PREFIX = 'Течение суток:';
+export const ATMO_AUTO_PREFIX = 'Авто-погода:';
+export const ATMO_MARK = '● ';
+const flowLabel = (minutes) => (minutes > 0 ? (minutes >= 60 ? `${String(minutes / 60).replace('.', ',')} ч` : `${minutes} мин`) : 'стоит');
 export const EPOCH_PREFIX = 'Эпоха: '; // Настройки ▸ Эпоха ▸ «Эпоха: Начало» … — стадия боя прямо сейчас (progression.js)
 export const RESET_GUN_SIZES = 'Сбросить размеры оружия'; // Настройки ▸: все scene.scale.* → 1 (gun-resize.js)
 // машина (car-drive.js): первый пункт любого меню в сцене с функцией «car»
@@ -76,7 +89,28 @@ export function buildMenu({
   drones = null, // «Собаки ▸ Квадрокоптеры: вкл/выкл» (drones.js); null — пункта нет
   artillery = null, // «Собаки ▸ Артиллерия: вкл/выкл» (artillery.js); null — пункта нет
   scopeMode = 'arcade', // «Прицел: аркадный / реалистичный» (scope-lens.js)
+  atmo = null, // { weather, time, season, sky, flow, auto } — выбранное в атмосфере (atmosphere.js target); null — пункта нет
 }) {
+  // «Погода и небо ▸»: в колесе читается до ~6–8 секторов, поэтому 18 погод и 10 времён суток — по группам
+  const atmoPick = (list, current) => (id) => {
+    const entry = list.find((e) => e.id === id);
+    return { label: (current === id ? ATMO_MARK : '') + entry.name };
+  };
+  const atmoItem = atmo
+    ? [
+        {
+          label: ATMO_MENU,
+          children: [
+            { label: ATMO_WEATHER, children: WEATHER_GROUPS.map((g) => ({ label: g.name, children: g.ids.map(atmoPick(WEATHERS, atmo.weather)) })) },
+            { label: ATMO_TIME, children: TIME_GROUPS.map((g) => ({ label: g.name, children: g.ids.map(atmoPick(TIMES, atmo.time)) })) },
+            { label: ATMO_SEASON, children: SEASONS.map((e) => e.id).map(atmoPick(SEASONS, atmo.season)) },
+            { label: ATMO_SKY, children: SKIES.map((e) => e.id).map(atmoPick(SKIES, atmo.sky)) },
+            { label: `${ATMO_FLOW_PREFIX} ${flowLabel(atmo.flow)}`, keepOpen: true },
+            { label: `${ATMO_AUTO_PREFIX} ${atmo.auto ? 'вкл' : 'выкл'}`, keepOpen: true },
+          ],
+        },
+      ]
+    : [];
   const zoomItem = { label: `${ZOOM_PREFIX}${String(scopeZoom ?? '?').replace('.', ',')}`, keepOpen: true };
   const scopeModeItem = { label: `${SCOPE_MODE_PREFIX} ${scopeMode === 'realistic' ? 'реалистичный' : 'аркадный'}`, keepOpen: true };
   const towerItem = { label: tower ? 'Вышка: вкл' : 'Вышка: выкл', keepOpen: true };
@@ -106,7 +140,7 @@ export function buildMenu({
   const timeLabel = `Время: ×${String(timeScale).replace('.', ',')}`;
   const settingsItem = { label: 'Настройки', children: [{ label: 'Отцентрировать' }, { label: 'Расстояние между глазами' }, { label: timeLabel, keepOpen: true }, { label: inertia ? 'Инерция: вкл' : 'Инерция: выкл', keepOpen: true }, ...(primaryHand ? [{ label: `Основная рука: ${primaryHand === 'right' ? 'правая' : 'левая'}`, keepOpen: true }] : []), { label: prone ? 'Режим лёжа: вкл' : 'Режим лёжа: выкл' }, { label: tracersOff ? 'Трассеры: выкл' : 'Трассеры: вкл', keepOpen: true }, ...(shadows === null ? [] : [{ label: shadows ? 'Тени: вкл' : 'Тени: выкл', keepOpen: true }]), { label: shake === 0 ? 'Тряска: выкл' : shake === 2 ? 'Тряска: сильно' : 'Тряска: вкл', keepOpen: true }, { label: RESET_GUN_SIZES }, scopeModeItem, { label: 'Эпоха', children: STAGE_NAMES.map((name) => ({ label: EPOCH_PREFIX + name })) }, ...(allies === null ? [towerItem] : [])] };
   const dogsItem = allies === null ? [] : [{ label: DOGS_MENU, children: [{ label: allies ? 'Союзники: вкл' : 'Союзники: выкл', keepOpen: true }, towerItem, ...(drones === null ? [] : [{ label: drones ? DRONES_ON : DRONES_OFF, keepOpen: true }]), ...(artillery === null ? [] : [{ label: artillery ? ARTILLERY_ON : ARTILLERY_OFF, keepOpen: true }])] }];
-  const common = [...(features.targets ? [physicsItem] : []), ...dogsItem, scenesItem, settingsItem];
+  const common = [...(features.targets ? [physicsItem] : []), ...dogsItem, ...atmoItem, scenesItem, settingsItem];
   if (heldKind === 'remote') {
     // пульт «Моего дрона» в руке (my-drone.js; управления дроном с пульта пока нет)
     // меню с пультом открывается кнопкой «≡» (controls-map.js)

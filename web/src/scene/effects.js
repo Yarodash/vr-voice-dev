@@ -56,6 +56,7 @@ export function createEffects({ THREE, group }) {
     g.setAttribute('aOpacity', opacity);
     const material = new THREE.MeshBasicMaterial({
       transparent: true, depthWrite: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+      fog: !additive, // светящееся (сложение) туман сцены не перекрашивает: вдали оно светилось бы цветом тумана (atmosphere-light.js)
     });
     material.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader

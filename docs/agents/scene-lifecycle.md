@@ -142,6 +142,7 @@ The real controller model (`shared.realModel`) is intentionally left on the hand
 | `scene.inertia` | scene/main.js | `'on'`/`'off'` (default off), hand tremor filter `inertia.js` |
 | `scene.artillery` | scene/main.js | `'on'`/`'off'` (default on), «Собаки ▸ Артиллерия» (artillery.js) |
 | `scene.shake` | shake.js | `'1'` on (default) / `'2'` strong / `'0'` off — «Настройки ▸ Тряска» |
+| `scene.atmo` | atmosphere.js | `{ weather, time, season, sky, flow, auto, hour }` — «Погода и небо ▸» ([atmosphere.md](atmosphere.md)) |
 | `scene.pistol.calib`, `scene.ak.calib` | scene/main.js | 16-number hand->weapon matrix |
 | `scene.pistols` | pistols.js | `{ list:[{kind,position,quaternion}], held:-1 }` (old: `scene.pistol`) |
 | `scene.clays` | clays.js | resting clays `[{p,q}]` |

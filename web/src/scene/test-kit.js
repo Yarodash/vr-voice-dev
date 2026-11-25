@@ -7,7 +7,7 @@
 //     с опциями пушки из GUNS, из точки чуть перед камерой; kind — 'pistol', 'awp', 'gen_flare_shotgun'
 //     или id записи generated-guns.js ('flare_shotgun')
 //   waitFor(fn, timeoutMs) → значение fn() или null (опрос раз в кадр, реальное время)
-//   snapshotStats() → { projectiles: { <имя>: stats() }, killConfirm, money }
+//   snapshotStats() → { projectiles: { <имя>: stats() }, killConfirm }
 //   shotTest(id, { enemy, ally, wait, screenshot, pitchDeg, yawDeg, keepDogs }) — вся приёмка одним вызовом
 //     (её зовёт CLI); псы кита убираются в начале и в конце (keepDogs: true — оставить)
 //
@@ -129,7 +129,7 @@ export function createTestKit({ THREE, camera, shared, shooting, guns, kindOf, s
       for (const [name, m] of Object.entries(shooting.projectiles ?? {})) {
         try { projectiles[name] = m.stats?.() ?? null; } catch (e) { projectiles[name] = { error: String(e?.message ?? e) }; }
       }
-      return { projectiles, killConfirm: shared.killConfirm?.stats?.() ?? null, money: shared.money?.stats?.() ?? null };
+      return { projectiles, killConfirm: shared.killConfirm?.stats?.() ?? null };
     },
 
     // Вся приёмка: выстрел → упал → псы рядом → эффект → итог. Псы ставятся поперёк линии огня
@@ -257,7 +257,6 @@ export function createTestKit({ THREE, camera, shared, shooting, guns, kindOf, s
     }
     const after = kit.snapshotStats();
     out.killConfirm = delta(pick(before.killConfirm, ['kills', 'dogs', 'drones', 'hits']), pick(after.killConfirm, ['kills', 'dogs', 'drones', 'hits']));
-    out.money = delta(pick(before.money, ['balance']), pick(after.money, ['balance']));
     out.creditedToPlayer = (out.killConfirm.kills ?? 0) + (out.killConfirm.hits ?? 0) > 0;
 
     // итог: проверки по тому, что заявлено
